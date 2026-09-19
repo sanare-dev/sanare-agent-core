@@ -1,5 +1,22 @@
 # Deep Agents Template
 
+## Msty Brain restoration — 19 September 2026
+
+The `msty` graph is the main Msty route (`team.brain`), distinct from the local
+`team.architect`. Msty executes local MCP tools and returns their real results;
+the cloud graph does not independently access the Mac filesystem.
+
+Tool policy is generated from each request's actual function schemas. With no
+tools attached, the model must report unavailable execution, never fabricate
+tool calls or file contents. Unsupported/malformed structured calls are rejected.
+Textual hallucinations are not mechanically eliminated: live verification is
+still required. Retired supervisor/council tools are not required by the policy.
+
+Msty project LLM supplies its scoped instructions, Sanare Core and Knowledge
+Stacks. Existing old conversations do not necessarily inherit changed project
+defaults; use a fresh conversation for acceptance. Check actual tool results,
+not just HTTP success or generated prose.
+
 Deployment template for a deep agent built with `create_deep_agent(...)`.
 
 ## What this template gives you
