@@ -44,5 +44,30 @@ Minimum routing evaluations:
 - A one-word or simple factual request returns directly without subagents.
 - A complex research request may use one researcher.
 - A high-risk or explicitly requested review may use one critic.
-- A council is used only when the user explicitly asks for a council or vote.
+- A council is used for explicit requests or consequential unresolved alternatives;
+  the owner authorized adaptive delegation on 2026-09-19. Explain the reason first.
 - A claimed external action must be backed by a real tool result.
+
+## Adaptive supervisor (2026-09-19)
+
+Use the existing Msty Admin MCP tools `msty_brain_delegate`, `msty_brain_job`,
+and `msty_brain_lessons`. No additional framework or subscription is introduced.
+This follows the tool-calling supervisor pattern recommended by
+https://github.com/langchain-ai/langgraph-supervisor-py (MIT), not the older
+mandatory multi-agent loop. One lead retains actual Msty execution tools.
+
+Delegation is a consultation: worker selects DeepSeek Flash/Luna/GLM/Gemini/Qwen;
+parallel gives DeepSeek implementation and Luna architecture/risk analysis;
+review selects Luna or DeepSeek from a different family than the declared author;
+council invokes the installed council via the existing budgeted gateway.
+Two live delegation jobs maximum, six per task ID, no blind automatic retries.
+Local-only is restricted to Qwen single-worker; no cloud fallback is requested.
+Do not rename tasks to bypass limits. Job completion is not business completion.
+Arbitrary external bots are not registered or claimed operational.
+
+For substantive project work retrieve lessons. After a verified correction,
+record an evidence-linked candidate in the existing primary change journal.
+Candidates are reference material, not executable policy or permissions.
+Before reuse check current applicability; before changing code add a regression
+and independent review where justified. No weight training or automatic promotion
+is claimed. Local MCP outcomes, not model narratives, are the evidence.
