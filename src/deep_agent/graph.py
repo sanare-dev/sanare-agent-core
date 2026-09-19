@@ -88,6 +88,7 @@ def _build_agent(backend=None):
 
 
 RO_AGENT = _build_agent()
+graph = RO_AGENT  # CLI/test compatibility; deployment still uses get_agent.
 
 
 def _sandbox_enabled() -> bool:
