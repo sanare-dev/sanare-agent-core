@@ -77,10 +77,22 @@ def _build_agent(backend=None):
 RO_AGENT = _build_agent()
 
 
+def _sandbox_enabled() -> bool:
+    """Return whether the optional LangSmith sandbox backend is enabled."""
+    return os.getenv("DEEP_AGENT_SANDBOX_ENABLED", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 @contextlib.asynccontextmanager
 async def get_agent(config: RunnableConfig, runtime: ServerRuntime):
+    # LangSmith's execution runtime may be present even when no compatible
+    # sandbox API is available.  Keep the agent usable by default and only
+    # opt into the remote sandbox when explicitly enabled.
     ert = runtime.execution_runtime
-    if ert:
+    if ert and _sandbox_enabled():
         thread_id = config.get("configurable", {}).get("thread_id", "default")
         backend = await get_or_create_sandbox(thread_id)
         yield _build_agent(backend=backend)
