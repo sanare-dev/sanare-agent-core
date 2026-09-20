@@ -17,6 +17,39 @@ Stacks. Existing old conversations do not necessarily inherit changed project
 defaults; use a fresh conversation for acceptance. Check actual tool results,
 not just HTTP success or generated prose.
 
+## Validated publication contract — 20 September 2026
+
+The `msty` graph publishes one `custom` event after the model step and guards:
+`{"type":"validated_result","message":<AIMessage.model_dump()>}`. The same
+message remains in `State.result`; existing input/state fields are unchanged.
+Controlled context-admission blockers use this contract too, without generation.
+The bridge must consume `custom` + `values`, **never publish native `messages`
+events**: those are unvalidated provider chunks and can precede rejection.
+Text is intentionally buffered until the guarded final message is available.
+Deploy the graph and compatible bridge together before accepting this contract.
+
+Every structured call is checked against its current function's complete JSON
+Schema using pinned `jsonschema` / `referencing`, including nested constraints,
+required fields and local references. A declared supported draft is honored;
+schemas without a dialect use draft 2020-12, and missing `parameters` means `{}`.
+Built-in installed format checks are enabled; unknown format names remain
+annotations as specified by JSON Schema. Unknown drafts, malformed schemas,
+duplicate function names and unresolved references fail closed. An empty
+reference registry prevents external HTTP/file retrieval; local `$defs` work.
+
+Any unknown, malformed or schema-invalid call rejects the entire call batch,
+replaces unverified prose with a visible blocker, and clears raw call fields.
+Measured usage and response metadata are retained; there is no second LLM repair
+call. Valid batches are returned unchanged for Msty to execute. Schema validity
+is not authorization, action success or proof of textual truth: the local tool
+executor still enforces access and checks actual results.
+
+Offline regression (no provider requests):
+`uv run pytest tests/unit_tests/test_msty.py tests/unit_tests/test_msty_guards.py`.
+The stream test exercises the actual `msty.graph.astream`, including a synthetic
+stream that emits unsafe chunks before the guard; only the guarded message is
+present in the custom publication channel.
+
 ## Context admission — 20 September 2026
 
 The local bridge limits transport to 2 MB after bounded directory-tree previews;

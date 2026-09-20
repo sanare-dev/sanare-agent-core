@@ -7,10 +7,14 @@ import asyncio
 import json
 import os
 from typing import TypedDict
+from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.validators import validator_for
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.chat_models import _format_messages
 from langchain_core.messages import AIMessage, SystemMessage, convert_to_messages
+from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
+from referencing import Registry
 
 COUNT_TRIGGER_BYTES = 200000
 INPUT_TOKEN_LIMIT = 180000
@@ -89,13 +93,71 @@ class State(TypedDict):
     context_budget_check: dict | None
 
 
+def valid_tool_calls(result: AIMessage, tools: list[dict]) -> bool:
+    """Validate the entire batch against exactly the client's current schemas.
+
+    No repair generation or remote/file reference retrieval is permitted here.
+    Duplicate names are ambiguous, so even a valid-looking call fails closed.
+    """
+    if result.invalid_tool_calls:
+        return False
+    definitions: dict[str, list[dict]] = {}
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get('type') != 'function':
+            continue
+        function = tool.get('function')
+        if isinstance(function, dict) and isinstance(function.get('name'), str):
+            definitions.setdefault(function['name'], []).append(function)
+    for call in result.tool_calls:
+        candidates = definitions.get(call.get('name'), [])
+        if len(candidates) != 1:
+            return False
+        schema = candidates[0].get('parameters', {})
+        try:
+            # No dialect means current JSON Schema; an unknown explicit dialect
+            # is rejected, not silently treated as another schema version.
+            if isinstance(schema, dict) and '$schema' in schema:
+                validator_class = validator_for(schema, default=None)
+                if validator_class is None:
+                    return False
+            else:
+                validator_class = Draft202012Validator
+            validator_class.check_schema(schema)
+            # Explicit empty registry disables the library's legacy network
+            # retrieval. In-document $defs / anchors still resolve normally.
+            validator = validator_class(schema, registry=Registry(),
+                                        format_checker=FormatChecker())
+            if not validator.is_valid(call.get('args')):
+                return False
+        except Exception:
+            # Validation errors include instances/schema text; do not expose
+            # them to logs, tracing or the client. Broken refs also fail closed.
+            return False
+    return True
+
+
+def publish_result(result: AIMessage, budget_check: dict | None):
+    """The sole public stream event is a complete, already guarded message."""
+    message = result.model_dump()
+    try:
+        writer = get_stream_writer()
+    except RuntimeError as error:
+        # Direct offline callers of respond() retain the pre-stream API. Never
+        # suppress errors from an actual runtime writer or other graph failures.
+        if str(error) != 'Called get_config outside of a runnable context':
+            raise
+    else:
+        writer({'type': 'validated_result', 'message': message})
+    return {'result': message, 'context_budget_check': budget_check}
+
+
 def rejected_context_budget(explanation: str, input_tokens: int | None = None):
     """A local blocker is not generated inference and does not consume its tokens."""
     result = AIMessage(content=explanation, usage_metadata={
         'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})
-    return {'result': result.model_dump(), 'context_budget_check': {
+    return publish_result(result, {
         'version': 1, 'status': 'rejected', 'input_tokens': input_tokens,
-        'limit': INPUT_TOKEN_LIMIT}}
+        'limit': INPUT_TOKEN_LIMIT})
 
 
 async def respond(state: State):
@@ -157,17 +219,17 @@ async def respond(state: State):
         model = model.bind_tools(tools, tool_choice=choice)
     result = await model.ainvoke(full_messages)
     allowed = tool_names(tools)
-    if result.invalid_tool_calls or any(call.get('name') not in allowed for call in result.tool_calls):
+    if not valid_tool_calls(result, tools):
         # Fail closed before the client can execute an invented operation. Keep
         # measured usage: rejecting output does not undo the provider expense.
         explanation = ('В этом чате инструменты не подключены; действие не выполнено.'
                        if not allowed else
                        'Модель запросила неподключённый или некорректный инструмент; вызов не выполнен.')
         result = result.model_copy(update={'content': explanation, 'tool_calls': [],
-                                          'invalid_tool_calls': []})
+                                          'invalid_tool_calls': [], 'additional_kwargs': {}})
     # Explicit None clears any check left in a persisted LangGraph thread;
     # an earlier accepted count must never attest a different request.
-    return {"result": result.model_dump(), "context_budget_check": budget_check}
+    return publish_result(result, budget_check)
 
 
 builder = StateGraph(State)
