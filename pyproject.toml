@@ -10,7 +10,7 @@ dependencies = [
     "referencing==0.37.0",
     "langgraph>=1.0.0",
     "langgraph-sdk>=0.3.15",
-    "langsmith>=0.8.18",
+    "langsmith==0.8.18",
     "python-dotenv>=1.0.1",
 ]
 

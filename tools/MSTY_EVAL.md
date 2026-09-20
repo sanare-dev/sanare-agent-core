@@ -5,6 +5,8 @@ framework, model judge, agent, Engine, task runner or background process. No new
 dependency. GitHub-first review selected the maintained MIT SDK and its ordinary
 code-evaluator contract; the larger starter kit would add unrelated UI evaluator
 and automation setup. The existing release runner is not copied or replaced.
+`langsmith==0.8.18` is pinned in the project dependency contract: its total-attempt
+and response behavior is verified below, not assumed compatible with later SDKs.
 
 Sources reviewed 2026-09-20:
 
