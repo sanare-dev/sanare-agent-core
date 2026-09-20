@@ -1,8 +1,10 @@
 """Real native ToolNode/checkpoint tests; scripted guarded steps, no providers."""
 import asyncio
 from copy import deepcopy
+import hashlib
 import json
 import socket
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -176,7 +178,7 @@ def test_unsafe_batches_block_before_publication_or_execution(monkeypatch, mode)
 
 def test_native_ticket_mismatch_cannot_trigger_next_model(monkeypatch):
     seen = scripted(monkeypatch, [answer('', [call('native_write_file', {
-        'file_path': '/must-not-exist.txt', 'content': 'not admitted'})])])
+        'file_path': '/scratch/must-not-exist.txt', 'content': 'not admitted'})])])
 
     async def run():
         graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
@@ -382,10 +384,10 @@ def test_real_guarded_native_and_external_read_file_are_distinct(monkeypatch):
 def test_namespaced_native_callbacks_keep_scratch_and_todo_runtime_injection(monkeypatch):
     todos = [{'content': 'Verify native scratch', 'status': 'completed'}]
     seen = scripted(monkeypatch, [
-        answer('', [call('native_write_file', {'file_path': '/scratch.txt', 'content': 'before'}, 'write')]),
-        answer('', [call('native_edit_file', {'file_path': '/scratch.txt', 'old_string': 'before',
+        answer('', [call('native_write_file', {'file_path': '/scratch/fixture.txt', 'content': 'before'}, 'write')]),
+        answer('', [call('native_edit_file', {'file_path': '/scratch/fixture.txt', 'old_string': 'before',
                                             'new_string': 'after'}, 'edit')]),
-        answer('', [call('native_read_file', {'file_path': '/scratch.txt'}, 'read')]),
+        answer('', [call('native_read_file', {'file_path': '/scratch/fixture.txt'}, 'read')]),
         answer('', [call('native_write_todos', {'todos': todos}, 'todo')]), answer()])
 
     async def run():
@@ -403,7 +405,9 @@ def test_namespaced_native_callbacks_keep_scratch_and_todo_runtime_injection(mon
             state, events = await invoke(graph, Command(resume={ticket.id: {
                 **ticket.value, 'type': 'msty_native_resume'}}), config)
         assert len(events) == 1 and len(seen) == 5
-        assert state.values['files']['/scratch.txt']['content'] == ['after']
+        assert state.values['files']['/scratch/fixture.txt']['content'] == ['after']
+        for message in [message for message in state.values['messages'] if message.type == 'tool'][:2]:
+            assert 'VIRTUAL SCRATCH ONLY; no Mac/local file was changed.' in message.content
         assert state.values['todos'] == todos
         assert state.values['execution']['status'] == 'answered'
         assert 'after' in [message for message in seen[3]['state']['messages'] if message['role'] == 'tool'][-1]['content']
@@ -417,3 +421,157 @@ def test_native_template_namespacing_never_changes_approved_memory_body():
     prompt = memory._format_agent_memory({'/memory/PROJECT.md': source})
     assert source in prompt
     assert 'native_edit_file' in prompt
+
+
+@pytest.mark.parametrize('name,args', [
+    ('native_write_file', {'file_path': '/Users/vb/Documents/ChatGPT/LLM/work/fixture.txt', 'content': 'x'}),
+    ('native_write_file', {'file_path': '/Volumes/NAS/fixture.txt', 'content': 'x'}),
+    ('native_write_file', {'file_path': 'work/fixture.txt', 'content': 'x'}),
+    ('native_write_file', {'file_path': '/scratch/../Users/vb/fixture.txt', 'content': 'x'}),
+    ('native_write_file', {'file_path': '/scratch/../skills/fake.md', 'content': 'x'}),
+    ('native_write_file', {'file_path': '/scratchpad/fixture.txt', 'content': 'x'}),
+    ('native_write_file', {'file_path': '//scratch/fixture.txt', 'content': 'x'}),
+    ('native_write_file', {'file_path': '/scratch/fixture\x00.txt', 'content': 'x'}),
+    ('native_write_file', {'file_path': '/memory/PROJECT.md', 'content': 'x'}),
+    ('native_write_file', {'file_path': '/skills/fake.md', 'content': 'x'}),
+    ('native_write_file', {'file_path': '/large_tool_results/fake', 'content': 'x'}),
+    ('native_edit_file', {'file_path': '/Users/vb/local.txt', 'old_string': 'x', 'new_string': 'y'}),
+    ('native_read_file', {'file_path': '/Users/vb/local.txt'}),
+    ('native_ls', {'path': '/Volumes'}),
+    ('native_glob', {'path': '/Users/vb', 'pattern': '*.txt'}),
+    ('native_glob', {'path': '/scratch/', 'pattern': '/Users/vb/*.txt'}),
+    ('native_glob', {'path': '/scratch/', 'pattern': '../*.txt'}),
+    ('native_grep', {'path': 'work/', 'pattern': 'needle'}),
+    ('native_grep', {'path': '/scratch/', 'pattern': 'needle', 'glob': '/Users/vb/*.txt'}),
+    ('native_grep', {'pattern': 'needle'}),
+])
+def test_forbidden_virtual_path_returns_error_without_native_handler(name, args):
+    async def run():
+        async def forbidden_handler(request):
+            raise AssertionError('Forbidden path reached native backend')
+
+        request = SimpleNamespace(tool_call=call(name, args), state={'native_tool_names': [name]})
+        result = await msty_native.NativeMstyMiddleware().awrap_tool_call(request, forbidden_handler)
+        assert result.status == 'error'
+        assert result.tool_call_id == 'tool-1'
+        assert 'native_virtual_path_required' in result.content
+        assert 'external MCP tools without native_' in result.content
+        assert not request.state.get('files')
+    asyncio.run(run())
+
+
+def test_forbidden_local_write_corrects_to_external_write_with_verified_callback(monkeypatch, tmp_path):
+    """Actual ToolNode + guarded model + protocol callback; local IO only in pytest temp."""
+    target = tmp_path / 'external-verified.txt'
+    body = 'Verified external fixture, not virtual scratch.\n'
+    seen, schemas = [], []
+    args = {'file_path': str(target), 'content': body}
+    sequence = [answer('', [call('native_write_file', args, 'wrong-virtual')]),
+        answer('', [call('write_file', args, 'real-external')]), answer('External callback verified.')]
+
+    class Provider:
+        def bind_tools(self, tools, **kwargs):
+            schemas.append(deepcopy(tools))
+            return self
+
+        async def ainvoke(self, messages):
+            seen.append(deepcopy(messages))
+            return sequence.pop(0)
+
+    monkeypatch.setenv('MSTY_MODEL_PROFILE', 'luna')
+    monkeypatch.setattr(msty.msty_models, 'make_model', lambda *args: Provider())
+    monkeypatch.setattr(msty.msty_models, 'stamp_usage', lambda profile, result: result)
+    data = initial()
+    data['tools'] = [{'type': 'function', 'function': {'name': 'write_file',
+        'description': 'External MCP write_file writes a real local file.',
+        'parameters': {'type': 'object', 'properties': {
+            'file_path': {'type': 'string'}, 'content': {'type': 'string'}},
+            'required': ['file_path', 'content'], 'additionalProperties': False}}}]
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'virtual-then-real-write'}}
+        first, events = await invoke(graph, data, config)
+        assert len(events) == 1 and not target.exists() and not first.values.get('files')
+        ticket = first.tasks[0].interrupts[0]
+        second, events = await invoke(graph, Command(resume={ticket.id: {
+            **ticket.value, 'type': 'msty_native_resume'}}), config)
+        assert len(events) == 1 and len(seen) == 2
+        assert not target.exists() and not second.values.get('files')
+        rejected = next(message for message in second.values['messages'] if message.type == 'tool')
+        assert rejected.status == 'error'
+        assert 'native_virtual_path_required' in rejected.content
+        assert 'external MCP' in seen[1][-1].content
+        assert second.values['execution']['status'] == 'waiting_tools'
+        assert second.values['execution']['actions_issued'] == 1
+        assert second.values['execution']['native_actions'] == 1
+        assert second.values['result']['tool_calls'][0]['name'] == 'write_file'
+        for schema in schemas[0]:
+            function = schema['function']
+            if function['name'].removeprefix('native_') in msty_native._VIRTUAL_FS_DESCRIPTIONS:
+                if function['name'].startswith('native_'):
+                    assert 'VIRTUAL ONLY' in function['description']
+                    field = 'file_path' if 'file_path' in function['parameters']['properties'] else 'path'
+                    assert 'Not a Mac path' in function['parameters']['properties'][field]['description']
+                else:
+                    assert schema == data['tools'][0]
+        # Local synthetic MCP runner performs the real isolated file write only
+        # after the external interrupt. Feed its factual receipt through the
+        # existing callback validator and exact tool-ID mapping.
+        target.write_text(body, encoding='utf-8')
+        receipt = json.dumps({'status': 'ok', 'file_path': str(target),
+            'sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
+        resume = external_resume(second.values)
+        resume['input']['messages'][-1]['content'] = receipt
+        external = second.tasks[0].interrupts[0]
+        final, events = await invoke(graph, Command(resume={external.id: resume}), config)
+        assert len(events) == 1 and len(seen) == 3
+        assert seen[2][-1].content == receipt
+        assert target.read_text(encoding='utf-8') == body
+        assert not final.values.get('files')
+        assert final.values['execution']['status'] == 'answered' and not final.next
+    asyncio.run(run())
+
+
+def test_native_root_lists_only_virtual_mountpoints(monkeypatch):
+    seen = scripted(monkeypatch, [answer('', [call('native_ls', {'path': '/'})]), answer()])
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'virtual-mounts'}}
+        state, _ = await invoke(graph, initial(), config)
+        ticket = state.tasks[0].interrupts[0]
+        final, _ = await invoke(graph, Command(resume={ticket.id: {
+            **ticket.value, 'type': 'msty_native_resume'}}), config)
+        content = seen[1]['state']['messages'][-1]['content']
+        assert 'VIRTUAL mountpoints only (not Mac)' in content
+        assert all(root + '/' in content for root in msty_native.VIRTUAL_ROOTS)
+        assert not final.values.get('files')
+    asyncio.run(run())
+
+
+def test_large_external_observation_offload_remains_readable_in_virtual_mount(monkeypatch):
+    observed = 'Synthetic external record; literal read_file stays source text.\n' * 1600
+    seen = scripted(monkeypatch, [answer('', [call('external_read', {'name': 'large'}, 'large-external')]),
+        answer('', [call('native_read_file', {'file_path': '/large_tool_results/large-external', 'limit': 2}, 'offload')]),
+        answer()])
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'native-offload-scope'}}
+        first, _ = await invoke(graph, initial(), config)
+        pending = first.tasks[0].interrupts[0]
+        resume = external_resume(first.values)
+        resume['input']['messages'][-1]['content'] = observed
+        second, _ = await invoke(graph, Command(resume={pending.id: resume}), config)
+        assert second.values['execution']['status'] == 'waiting_native'
+        assert set(second.values['files']) == {'/large_tool_results/large-external'}
+        hint = seen[1]['state']['messages'][-1]['content']
+        assert 'native_read_file tool' in hint
+        ticket = second.tasks[0].interrupts[0]
+        final, _ = await invoke(graph, Command(resume={ticket.id: {
+            **ticket.value, 'type': 'msty_native_resume'}}), config)
+        assert 'literal read_file stays source text.' in seen[2]['state']['messages'][-1]['content']
+        assert final.values['execution']['status'] == 'answered'
+        assert set(final.values['files']) == {'/large_tool_results/large-external'}
+    asyncio.run(run())

@@ -146,7 +146,9 @@ def _learning_outcome(contract, receipt):
 
 
 def _decode(value, depth=0):
-    if depth > 3:
+    # Msty serializes HTTP -> MCP TextContent -> JSON. Bound nesting while
+    # admitting that real transport; a transport envelope is not a receipt.
+    if depth > 8:
         return None
     if isinstance(value, str):
         try:
@@ -160,6 +162,11 @@ def _decode(value, depth=0):
     if isinstance(value, dict):
         if value.get('isError'):
             return None
+        if 'status' in value or 'body' in value:
+            if (set(value) != {'status', 'body'} or type(value['status']) is not int or
+                    not 200 <= value['status'] < 300):
+                return None
+            return _decode(value['body'], depth + 1)
         if 'schema' in value:
             return value
         structured = _decode(value['structuredContent'], depth + 1) if 'structuredContent' in value else None
@@ -293,6 +300,17 @@ def owner_control(state):
 def gate_final(state, result, tools, disabled):
     contract = state.get('task_contract') or {}
     meta = result.response_metadata
+    if contract.get('status') == 'blocked' and not result.tool_calls:
+        # A stop/control phrase suppresses automatic actions; it can never
+        # convert a failed artifact check into successful delivery. Preserve
+        # charged usage, but do not publish unsupported completion prose.
+        return result.model_copy(update={
+            'content': 'Выполнение не подтверждено: проверка артефакта не пройдена. '
+                       'Нужны фактическое исправление и успешная повторная проверка; '
+                       'внутренний список задач не подтверждает результат.',
+            'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
+            'response_metadata': {**meta, 'msty_blocked': True,
+                                  'msty_completion_gate': 'failed_verification_preserved'}})
     if (contract.get('status') != 'planned' or result.tool_calls or result.invalid_tool_calls or disabled or
             owner_control(state) or meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
             meta.get('stop_reason', meta.get('finish_reason')) in
@@ -317,8 +335,9 @@ def gate_final(state, result, tools, disabled):
 
 def after_result(state, result):
     contract = deepcopy(state.get('task_contract'))
-    if contract and result.get('tool_calls'):
-        if any(not _named(c.get('name'), VERIFY_SUFFIX) for c in result['tool_calls']):
+    if contract and contract.get('status') == 'verified_against_observations' and result.get('tool_calls'):
+        if any(not _named(c.get('name'), VERIFY_SUFFIX) and c.get('name') != 'native_write_todos'
+               for c in result['tool_calls']):
             if contract.get('plan_id'):
                 contract['status'] = 'planned'
     return contract
@@ -327,8 +346,11 @@ def after_result(state, result):
 def final_status(state, default_status):
     contract = state.get('task_contract') or {}
     if default_status == 'answered' and contract:
+        if contract.get('status') == 'blocked':
+            return 'blocked'
+        if contract.get('status') == 'verified_against_observations':
+            return 'verified_against_observations'
         if owner_control(state) or state.get('tool_choice') == 'none' or state.get('tool_choice') == {'type': 'none'}:
             return 'answered'
-        return ('verified_against_observations' if contract.get('status') == 'verified_against_observations'
-                else 'blocked')
+        return 'blocked'
     return default_status

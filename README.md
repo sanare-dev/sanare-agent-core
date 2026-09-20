@@ -17,6 +17,17 @@ operator Store updates affect new chats without replacing a Python constant.
 Missing/unavailable Store has an explicit packaged fallback; corrupt approval
 fails closed. Canonical journals/Engram remain the sources, not this projection.
 
+Native filesystem calls enforce this distinction before backend access: reads
+stay in `/scratch/`, `/memory/`, `/skills/`, `/large_tool_results/`; model writes
+stay in `/scratch/`. Mac, relative and traversal paths return an error without
+access. Native write observations explicitly identify virtual-only storage.
+Real local artifacts require external MCP callbacks and actual verification.
+The task verifier decodes the actual Msty HTTP/MCP TextContent envelope, retaining
+the plan identity. Failed checks survive native TODO updates and block unsupported
+completion prose, including when the original request contains an action veto.
+These guards were added after a real-client acceptance exposed a virtual file
+being claimed as local; the failed evidence must remain in the delivery journal.
+
 Every model generation retains a separate reservation. An internal tool batch
 is checkpointed before tools execute; `msty_native_continue` resumes automatically
 after shared-action reservation and stop/budget validation. Native/local actions share24 actions and the existing

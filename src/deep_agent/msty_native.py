@@ -28,6 +28,24 @@ from .msty_native_memory import backend_factory, ApprovedMemoryMiddleware, Appro
 _ORIGINAL_TOOLS = frozenset({'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep', 'write_todos'})
 NATIVE_TOOLS = frozenset('native_' + name for name in _ORIGINAL_TOOLS)
 RESERVED_TOOLS = NATIVE_TOOLS | {'native_execute', 'native_task', 'native_compact_conversation'}
+VIRTUAL_ROOTS = ('/scratch', '/memory', '/skills', '/large_tool_results')
+VIRTUAL_FS_SCOPE = (
+    'VIRTUAL ONLY: this is checkpoint-backed agent storage, NEVER the Mac/local filesystem. '
+    'Read only under /scratch/, /memory/, /skills/, /large_tool_results/. '
+    'Create/edit only under /scratch/. /memory/ and /skills/ are approved read-only mounts; '
+    '/large_tool_results/ is read-only model access to native middleware offloads. '
+    'Mac paths (/Users/, /Volumes/, etc.) and relative paths (work/..., etc.) are forbidden. '
+    'For real local files use the supplied external MCP tools without native_ prefix and wait '
+    'for their actual callback; virtual success is not a local artifact or proof of task completion.'
+)
+_VIRTUAL_FS_DESCRIPTIONS = {
+    'ls': "List a virtual directory. native_ls(path='/') lists virtual mountpoints only.",
+    'read_file': 'Read virtual text with file_path, offset and limit; approved skill bodies use /skills/<name>/SKILL.md.',
+    'write_file': 'Create a virtual scratch file under /scratch/, not a deliverable on the Mac.',
+    'edit_file': 'Replace exact text in an existing virtual /scratch/ file, preserving indentation.',
+    'glob': 'Match a glob pattern within an explicit virtual path; e.g. pattern="**/*.md", path="/scratch/".',
+    'grep': 'Search literal text within an explicit virtual path; e.g. pattern="TODO", path="/scratch/".',
+}
 NATIVE_POLICY = '''
 MSTY_NATIVE_HARNESS_V1: память и индекс навыков загружает штатный middleware.
 Для тела относящегося навыка используй native_read_file по показанному пути.
@@ -36,7 +54,7 @@ Native файловые tools работают с виртуальными scrat
 Не смешивай native и внешние инструменты в одном ответе. Сначала заверши один
 необходимый шаг. Один native_write_todos на ответ; TODO не доказывает выполнение задачи.
 Память/skills защищены от записи моделью. Нет native task, shell или скрытого judge.
-'''
+''' + '\n' + VIRTUAL_FS_SCOPE
 
 
 def _namespace_text(text):
@@ -49,13 +67,69 @@ def _namespace_tools(tools):
     # Keep the exact native functions, schemas and ToolRuntime injection. Rename
     # before ToolNode construction so registry and injection caches agree.
     return [tool.model_copy(update={'name': 'native_' + tool.name,
-             'description': _namespace_text(tool.description)})
+             'description': (VIRTUAL_FS_SCOPE + '\n' + _VIRTUAL_FS_DESCRIPTIONS[tool.name]
+                             if tool.name in _VIRTUAL_FS_DESCRIPTIONS else _namespace_text(tool.description))})
             for tool in tools if tool.name in _ORIGINAL_TOOLS]
+
+
+def _native_tool_schema(tool):
+    schema = deepcopy(convert_to_openai_tool(tool))
+    if tool.name.removeprefix('native_') in _VIRTUAL_FS_DESCRIPTIONS:
+        for name, field in schema['function']['parameters'].get('properties', {}).items():
+            if name in {'file_path', 'path'}:
+                field['description'] = (
+                    'Explicit absolute VIRTUAL path in /scratch/, /memory/, /skills/, /large_tool_results/; '
+                    'writes/edits only /scratch/. Not a Mac path. Only native_ls may list root /. '
+                    'Do not omit path for grep/glob.'
+                )
+    return schema
+
+
+def _valid_virtual_path(path):
+    return (isinstance(path, str) and path.startswith('/') and not path.startswith('//')
+            and not any(ord(char) < 32 for char in path) and '\\' not in path
+            and not any(part in {'.', '..'} for part in path.split('/'))
+            and any(path == root or path.startswith(root + '/') for root in VIRTUAL_ROOTS))
+
+
+def _virtual_path_error(call):
+    """Reject namespace confusion before any native backend access or mutation."""
+    name, args = call['name'], call['args']
+    if name == 'native_write_todos':
+        return None
+    path = args.get('file_path') if name in {'native_read_file', 'native_write_file', 'native_edit_file'} else args.get('path')
+    valid = (name == 'native_ls' and path == '/') or _valid_virtual_path(path)
+    if name in {'native_write_file', 'native_edit_file'}:
+        valid = valid and path.startswith('/scratch/') and path != '/scratch/'
+    # Absolute glob patterns must not escape the virtual mounts; relative glob
+    # patterns are interpreted inside the explicit, already validated base path.
+    glob = args.get('pattern') if name == 'native_glob' else args.get('glob') if name == 'native_grep' else None
+    if isinstance(glob, str):
+        valid = valid and '\\' not in glob and not any(part in {'.', '..'} for part in glob.split('/'))
+        if glob.startswith('/'):
+            valid = valid and _valid_virtual_path(glob)
+    if valid:
+        return None
+    return ToolMessage(content='Error: native_virtual_path_required. Nothing was read or written. ' + VIRTUAL_FS_SCOPE,
+                       name=name, tool_call_id=call['id'], status='error')
+
+
+def _virtual_write_observation(result):
+    """Keep native state updates, but never label a scratch mutation as local IO."""
+    if isinstance(result, ToolMessage) and isinstance(result.content, str):
+        return result.model_copy(update={'content':
+            'VIRTUAL SCRATCH ONLY; no Mac/local file was changed. ' + result.content})
+    if isinstance(result, Command) and isinstance(result.update, dict):
+        return Command(graph=result.graph, goto=result.goto, resume=result.resume,
+            update={**result.update, 'messages': [
+                _virtual_write_observation(message) for message in result.update.get('messages', [])]})
+    return result
 
 
 class NamespacedFilesystemMiddleware(FilesystemMiddleware):
     def __init__(self):
-        super().__init__(backend=backend_factory, system_prompt=_namespace_text(FILESYSTEM_SYSTEM_PROMPT))
+        super().__init__(backend=backend_factory,
+                         system_prompt=VIRTUAL_FS_SCOPE + '\n' + _namespace_text(FILESYSTEM_SYSTEM_PROMPT))
         self.tools = _namespace_tools(self.tools)  # execute is deliberately absent.
 
     async def awrap_tool_call(self, request, handler):
@@ -192,7 +266,7 @@ class NativeMstyMiddleware(AgentMiddleware):
     async def awrap_model_call(self, request, handler):
         state = request.state
         analyst = state.get('brain_task_role') == 'analyst'
-        native = ([] if analyst else [convert_to_openai_tool(tool) for tool in request.tools
+        native = ([] if analyst else [_native_tool_schema(tool) for tool in request.tools
                   if getattr(tool, 'name', None) in NATIVE_TOOLS])
         external = deepcopy(state.get('tools') or [])
         messages = convert_to_openai_messages(request.messages)
@@ -291,7 +365,15 @@ class NativeMstyMiddleware(AgentMiddleware):
         if call['name'] in NATIVE_TOOLS:
             if call['name'] not in request.state.get('native_tool_names', []):
                 raise msty_execution.ExecutionProtocolError('Native инструмент не передавался модели.')
-            return await handler(request)
+            error = _virtual_path_error(call)
+            if error is not None:
+                return error
+            if call['name'] == 'native_ls' and call['args'].get('path') == '/':
+                return ToolMessage(content='VIRTUAL mountpoints only (not Mac): ' + ', '.join(
+                    root + '/' for root in VIRTUAL_ROOTS), name=call['name'], tool_call_id=call['id'])
+            result = await handler(request)
+            return (_virtual_write_observation(result) if call['name'] in {
+                'native_write_file', 'native_edit_file'} else result)
         if call['name'] not in msty.tool_names(request.state.get('tools') or []):
             raise msty_execution.ExecutionProtocolError('Внешний инструмент не передавался модели.')
         observations = request.state.get('native_external_observations') or {}

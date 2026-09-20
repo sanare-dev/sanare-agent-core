@@ -204,3 +204,151 @@ def test_native_resume_cannot_rebind_task_budget_or_compaction(monkeypatch, fiel
             await graph.ainvoke(Command(resume={first['__interrupt__'][0].id: value_to_resume}), cfg)
         assert len(seen['requests']) == 1
     asyncio.run(scenario())
+
+
+def transport_receipt(receipt):
+    return {'status': 200, 'body': [{'type': 'text', 'text': json.dumps(receipt)}]}
+
+
+def failed_contract():
+    contract = task._plan(plan_call(), plan_receipt())
+    failed = verify_receipt()
+    failed.update(state='error', source_hashes=[])
+    failed['checks'][0].update(status='error', code='artifact_unavailable_or_non_utf8',
+                               artifact_sha256=None, size_bytes=None)
+    call = {'id': 'verify-failed', 'name': VERIFY, 'args': {'plan_id': contract['plan_id']}}
+    return task.observe({'task_contract': contract}, {'failed': call},
+                        [{'tool_call_id': 'failed', 'content': json.dumps(transport_receipt(failed))}])
+
+
+def test_msty_transport_receipt_preserves_plan_and_verification_identity():
+    for receipt in (plan_receipt(), verify_receipt()):
+        assert task._decode(json.dumps(transport_receipt(receipt))) == receipt
+    contract = task.observe({}, {'planned': plan_call()}, [{
+        'tool_call_id': 'planned', 'content': json.dumps(transport_receipt(plan_receipt()))}])
+    assert contract['plan_id'] == plan_receipt()['plan_id']
+    assert task._verified(contract, {'args': {'plan_id': contract['plan_id']}},
+                          task._decode(json.dumps(transport_receipt(verify_receipt()))))
+
+
+@pytest.mark.parametrize('status', [True, '200', 199, 300, 403, 500])
+def test_failed_or_malformed_transport_status_never_attests_receipt(status):
+    wrapper = transport_receipt(verify_receipt())
+    wrapper['status'] = status
+    assert task._decode(wrapper) is None
+
+
+def test_transport_and_structured_disagreement_never_attests_receipt():
+    wrapper = transport_receipt(verify_receipt())
+    wrapper['structuredContent'] = plan_receipt()
+    assert task._decode(wrapper) is None
+
+
+def test_transport_receipt_nesting_is_bounded():
+    wrapper = plan_receipt()
+    for _ in range(10):
+        wrapper = {'status': 200, 'body': wrapper}
+    assert task._decode(wrapper) is None
+
+
+@pytest.mark.parametrize('name', ['native_write_todos', 'native_read_file', 'native_write_file', 'write_fixture'])
+def test_failed_verification_survives_unverified_followup_actions(name):
+    contract = failed_contract()
+    assert contract['status'] == 'blocked'
+    updated = task.after_result({'task_contract': contract}, {'tool_calls': [
+        {'id': 'followup', 'name': name, 'args': {}}]})
+    assert updated == contract
+    assert updated['verification_observation_sha256'] != execution.canonical_digest(None)
+
+
+def test_only_valid_followup_verification_recovers_failed_contract_and_todo_preserves_it():
+    contract = failed_contract()
+    call = {'id': 'verify-recovery', 'name': VERIFY, 'args': {'plan_id': contract['plan_id']}}
+    recovered = task.observe({'task_contract': contract}, {'recovery': call}, [{
+        'tool_call_id': 'recovery', 'content': json.dumps(transport_receipt(verify_receipt()))}])
+    assert recovered['status'] == 'verified_against_observations'
+    assert recovered['whole_task_completion_verified'] is False
+    after_todo = task.after_result({'task_contract': recovered}, {'tool_calls': [
+        {'id': 'todo-done', 'name': 'native_write_todos', 'args': {}}]})
+    assert after_todo == recovered
+    state = initial(task_contract=recovered)
+    assert task.final_status(state, 'answered') == 'verified_against_observations'
+
+
+@pytest.mark.parametrize('choice', ['auto', 'none', {'type': 'none'}])
+def test_already_verified_observation_is_not_downgraded_by_action_veto(choice):
+    contract = {**task._plan(plan_call(), plan_receipt()), 'status': 'verified_against_observations'}
+    state = initial(task_contract=contract, tool_choice=choice,
+                    messages=[{'role': 'user', 'content': 'Создай файл, но не запускай публикацию.'}])
+    assert task.owner_control(state)
+    assert task.final_status(state, 'answered') == 'verified_against_observations'
+    guarded = task.gate_final(state, AIMessage(content='Recorded check passed.'), TOOLS, False)
+    assert not guarded.tool_calls
+
+
+@pytest.mark.parametrize('command,choice', [
+    ('Создай файл, но не запускай публикацию.', 'auto'), ('STOP', 'auto'),
+    ('Finish the artifact.', 'none'), ('Finish the artifact.', {'type': 'none'}),
+])
+def test_failed_contract_blocks_success_prose_even_with_owner_veto_or_disabled_tools(command, choice):
+    state = initial(messages=[{'role': 'user', 'content': command}], tool_choice=choice,
+                    task_contract=failed_contract())
+    raw = AIMessage(content='FALSE_SUCCESS_file_created_and_verified', usage_metadata=USAGE)
+    guarded = task.gate_final(state, raw, TOOLS, choice != 'auto')
+    assert 'FALSE_SUCCESS' not in guarded.content
+    assert guarded.response_metadata['msty_blocked'] is True
+    assert not guarded.tool_calls
+    assert guarded.usage_metadata == USAGE
+    assert task.final_status(state, 'answered') == 'blocked'
+
+
+def test_real_native_failed_verify_todo_cannot_erase_failure_or_publish_success(monkeypatch):
+    from deep_agent import msty_native
+    from langgraph.store.memory import InMemoryStore
+
+    verify = {'id': 'verify', 'name': VERIFY, 'args': {'plan_id': plan_receipt()['plan_id']}}
+    todo = {'id': 'todo', 'name': 'native_write_todos', 'args': {'todos': [
+        {'content': 'Synthetic task marked complete', 'status': 'completed'}]}}
+    seen = install(monkeypatch, [
+        AIMessage(content='Plan.', tool_calls=[plan_call()], usage_metadata=USAGE),
+        AIMessage(content='Verify.', tool_calls=[verify], usage_metadata=USAGE),
+        AIMessage(content='Checklist.', tool_calls=[todo], usage_metadata=USAGE),
+        'FALSE_SUCCESS_file_created_and_verified'], [100, 110, 120, 130])
+
+    def external_payload(state, receipt, client):
+        state = {**state, 'messages': deepcopy(state['native_protocol_messages'])}
+        return payload(state, transport_receipt(receipt), client)
+
+    async def scenario():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        cfg = {'configurable': {'thread_id': 'failed-native-todo'}, 'recursion_limit': 64}
+        async def invoke(value):
+            output = await graph.ainvoke(value, cfg)
+            saved = (await graph.aget_state(cfg)).values
+            return {**saved, '__interrupt__': output.get('__interrupt__', ())}
+
+        first = await invoke(initial(tools=deepcopy(TOOLS),
+            messages=[{'role': 'user', 'content': 'Создай файл, но не запускай публикацию.'}]))
+        second = await invoke(Command(resume={first['__interrupt__'][0].id:
+            external_payload(first, plan_receipt(), 'b1_plan')}))
+        assert second['task_contract']['status'] == 'planned'
+        failed = verify_receipt()
+        failed.update(state='error', source_hashes=[])
+        failed['checks'][0].update(status='error', code='artifact_unavailable_or_non_utf8',
+                                   artifact_sha256=None, size_bytes=None)
+        third = await invoke(Command(resume={second['__interrupt__'][0].id:
+            external_payload(second, failed, 'b1_failed')}))
+        assert third['execution']['status'] == 'waiting_native'
+        assert third['task_contract']['status'] == 'blocked'
+        assert third['task_contract']['plan_id'] == plan_receipt()['plan_id']
+        pending = third['__interrupt__'][0]
+        final = await invoke(Command(resume={pending.id: {
+            **pending.value, 'type': 'msty_native_resume'}}))
+        assert final['execution']['status'] == 'blocked'
+        assert final['task_contract'] == third['task_contract']
+        assert 'FALSE_SUCCESS' not in final['result']['content']
+        assert final['result']['usage_metadata'] == USAGE
+        assert not final.get('__interrupt__')
+        assert len(seen['requests']) == 4
+
+    asyncio.run(scenario())
