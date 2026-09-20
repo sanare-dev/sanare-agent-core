@@ -68,6 +68,8 @@ def test_packaged_projection_is_bounded_and_content_addressed():
     assert msty_memory.KEY.endswith(msty_memory.SHA256)
     assert '/Users/vb/Documents/ChatGPT/LLM' in content
     assert 'app.sanaredev.com' in content
+    assert 'sanarelab.health: /Users/vb/Documents/ChatGPT/Sites/sanare/sanarelab-health' in content
+    assert 'НЕ имена GitHub-репозиториев' in content
 
 
 def test_native_runtime_seeds_once_and_reuses_one_cross_thread_projection():

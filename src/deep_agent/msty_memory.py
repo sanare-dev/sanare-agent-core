@@ -47,10 +47,12 @@ msty_project_resolve нужен для запроса актуального dep
 Платёжный модуль /payments/launch — отдельный sanarehq/sanare-payment-accounts;
 его нельзя публиковать исполнителем основного сайта.
 
-ChatGPT Sites — другой контур. Корень /Users/vb/Documents/ChatGPT/Sites:
-sanarelab.health → sanare/sanarelab-health;
-sanarelab.co → sanare/sanarelab-co;
-2thelife-store → life/2thelife-store.
+ChatGPT Sites — другой контур. Точные локальные каталоги исходников:
+sanarelab.health: /Users/vb/Documents/ChatGPT/Sites/sanare/sanarelab-health
+sanarelab.co: /Users/vb/Documents/ChatGPT/Sites/sanare/sanarelab-co
+2thelife-store: /Users/vb/Documents/ChatGPT/Sites/life/2thelife-store
+Это пути на диске, НЕ имена GitHub-репозиториев. Не сокращай и не придумывай путь
+по домену. GitHub-репозитории этих Sites-проектов здесь не утверждаются.
 Идентификаторы и маршруты данных — sites.json, локальные AGENTS.md и SITE.json.
 У каждого отдельная D1/секреты. Живые заказы/клиенты не являются файлами Git.
 Msty site executor сейчас не публикует эти Sites-проекты: нужен их штатный tool.
