@@ -36,6 +36,18 @@ def test_tool_policy_uses_only_current_schemas():
     assert 'установленным' in policy
 
 
+@pytest.mark.parametrize('tools', [[], [
+    {'type': 'function', 'function': {'name': 'read_file',
+                                    'parameters': {'type': 'object'}}},
+]])
+def test_external_component_policy_is_present_with_or_without_tools(tools):
+    policy = msty.policy_for_tools(tools)
+    assert 'MSTY_EXTERNAL_COMPONENTS' in policy
+    assert 'Smithery' in policy and 'Arcade' in policy
+    assert 'источник манифеста, лицензию' in policy
+    assert 'Не трать вызовы инструментов' in policy
+
+
 def test_delegation_is_not_advertised_without_actual_schema():
     absent = msty.policy_for_tools([])
     present = msty.policy_for_tools([
