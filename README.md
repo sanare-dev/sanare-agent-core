@@ -38,6 +38,9 @@ independent turns without explicit identity still start separate graph threads.
 No shared static ID, text-based linking, secret indexing or permission expansion.
 Dependencies are pinned and CI uses frozen uv.lock. Deployment and UI acceptance
 must be checked separately in the owner's unified change journal.
+Hosted Agent Server0.14.2 requires langgraph-sdk>=0.4.4; the client SDK is pinned
+to0.4.4 accordingly and covered by the same offline regression. A locally passing
+SDK0.3.15 pin was rejected by the hosted build; it was never made active.
 
 Sources: [memory](https://docs.langchain.com/oss/python/deepagents/memory),
 [skills](https://docs.langchain.com/oss/python/deepagents/skills),
