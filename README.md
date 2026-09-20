@@ -57,6 +57,39 @@ The stream test exercises the actual `msty.graph.astream`, including a synthetic
 stream that emits unsafe chunks before the guard; only the guarded message is
 present in the custom publication channel.
 
+## Optional five-minute static-prefix cache — 20 September 2026
+
+`MSTY_STATIC_CACHE=0` disables this optimization; the default is on.
+Only the first, gateway-owned `POLICY` plus current tool names receives
+`cache_control={"type":"ephemeral","ttl":"5m"}`. Anthropic's prefix includes
+preceding tool schemas. Msty project instructions, history and results receive
+no new marker. Existing client cache controls are untouched, with no extra
+breakpoint. Text/order, model, budgets, guards and zero-retry behavior stay the
+same. Token preflight sees the same complete system blocks as generation.
+No local content store, automatic history caching or warmup call is introduced.
+
+For Sonnet 4.6, published USD/MTok rates are $3 uncached input, $3.75 five-minute
+writes, $0.30 reads and $15 output. Cache expiry or prefix changes can therefore
+make an isolated request more expensive. The minimum prefix is 1,024 tokens;
+we neither guess tokens from characters nor pad prompts. Hits require actual
+provider usage evidence; tests do not establish savings. See [pricing and
+cache limits](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing).
+
+Privacy: this opts into provider-side ephemeral KV/hash storage, not a local
+database or training. The five-minute lifetime refreshes on reuse; deletion
+after expiry is not instantaneous. Cache isolation is workspace-scoped, not
+per chat. No one-hour TTL is added. ZDR eligibility does not establish this
+account's retention agreement. See [provider data-retention details](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#data-retention).
+
+Accounting must be updated before deploying this version: SDK 1.3.5's
+`usage_metadata.input_tokens` includes uncached input, reads and writes;
+`total_tokens` adds output. Its `input_token_details` (singular) contains
+`cache_read` and either generic `cache_creation` or `ephemeral_5m_input_tokens`
+plus `ephemeral_1h_input_tokens`. When TTL detail is populated the SDK resets
+generic creation to zero; do not charge it twice. Tests exercise that real SDK
+conversion using synthetic usage only. Live cache hits and any measured benefit
+belong in the deployment receipt, not inferred from unit tests.
+
 ## Context admission — 20 September 2026
 
 The local bridge limits transport to 2 MB after bounded directory-tree previews;

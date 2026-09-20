@@ -11,7 +11,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.validators import validator_for
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.chat_models import _format_messages
-from langchain_core.messages import AIMessage, SystemMessage, convert_to_messages
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, convert_to_messages
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
@@ -81,6 +81,51 @@ MSTY_TOOLS_AVAILABLE: только следующие имена имеют сх
 или ответа инструмента в XML/JSON. Дождись настоящего tool-сообщения от Msty.
 Наличие схемы не доказывает работоспособность сервиса: учитывай результат вызова.
 """
+
+
+def _has_cache_control(value) -> bool:
+    if isinstance(value, dict):
+        return 'cache_control' in value or any(_has_cache_control(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_has_cache_control(v) for v in value)
+    return False
+
+
+def cache_system_prefix(messages: list[BaseMessage], tools: list[dict]) -> list[BaseMessage]:
+    """Mark only our first, built-in policy, never client project/history blocks.
+
+    The provider prefix also includes preceding tools. Never add a breakpoint
+    when the client already controls caching: avoid slot/TTL conflicts or a
+    silent retention change. No project system, user message or tool result gets a
+    new marker; no warmup request or local content cache is created.
+    """
+    if os.getenv('MSTY_STATIC_CACHE', '1').strip().lower() in ('0', 'false', 'off'):
+        return messages
+    if _has_cache_control(tools) or any(_has_cache_control(m.content) for m in messages):
+        return messages
+    if not messages or not isinstance(messages[0], SystemMessage):
+        return messages
+    content = messages[0].content
+    blocks = [{'type': 'text', 'text': content}] if isinstance(content, str) else content
+    target = None
+    for block_index, block in enumerate(blocks):
+        if isinstance(block, str):
+            text = block
+        elif isinstance(block, dict) and block.get('type') == 'text':
+            text = block.get('text')
+        else:
+            text = None
+        if isinstance(text, str) and text.strip():
+            target = block_index
+    if target is None:
+        return messages
+    content = list(blocks)
+    block = content[target]
+    content[target] = {**({'type': 'text', 'text': block} if isinstance(block, str) else block),
+                       'cache_control': {'type': 'ephemeral', 'ttl': '5m'}}
+    prepared = list(messages)
+    prepared[0] = messages[0].model_copy(update={'content': content})
+    return prepared
 
 
 class State(TypedDict):
@@ -168,7 +213,7 @@ async def respond(state: State):
         timeout=120, max_retries=0,
     )
     tools = state.get("tools") or []
-    full_messages = [SystemMessage(content=policy_for_tools(tools)), *messages]
+    full_messages = cache_system_prefix([SystemMessage(content=policy_for_tools(tools)), *messages], tools)
     # Byte size is only the preflight trigger, never a tokenizer estimate.
     # Count the exact complete messages and schemas used for generation below.
     input_bytes = len(json.dumps({'messages': [m.model_dump(mode='json') for m in full_messages],

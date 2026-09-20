@@ -8,6 +8,11 @@ from langchain_core.messages import AIMessage
 from deep_agent import msty
 
 
+@pytest.fixture(autouse=True)
+def isolated_cache_default(monkeypatch):
+    monkeypatch.delenv('MSTY_STATIC_CACHE', raising=False)
+
+
 def test_no_tools_policy_is_explicit_and_does_not_advertise_supervisor():
     policy = msty.policy_for_tools([])
     assert 'MSTY_TOOLS_UNAVAILABLE' in policy
@@ -57,7 +62,7 @@ def test_empty_tools_are_not_bound_and_receive_unavailable_policy(monkeypatch):
     result = asyncio.run(msty.respond({'messages': [
         {'role': 'user', 'content': 'Прочитай файл'},
     ], 'tools': [], 'max_tokens': 32}))
-    assert 'MSTY_TOOLS_UNAVAILABLE' in seen['messages'][0].content
+    assert 'MSTY_TOOLS_UNAVAILABLE' in seen['messages'][0].content[0]['text']
     assert result['result']['tool_calls'] == []
     assert 'не проверен' in result['result']['content']
 
@@ -176,7 +181,8 @@ def test_large_context_is_counted_in_a_worker_before_generation_without_truncati
     assert seen['count_thread'] != current_thread
     assert seen['count_options']['timeout'] == 20.0
     assert seen['count_messages'] == seen['generation_messages']
-    assert seen['count_messages'][0].content == msty.policy_for_tools(tools)
+    assert seen['count_messages'][0].content == [{'type': 'text',
+        'text': msty.policy_for_tools(tools), 'cache_control': {'type': 'ephemeral', 'ttl': '5m'}}]
     assert seen['count_messages'][1].content == 'KEEP ALL POLICY'
     assert seen['count_messages'][-1].content == state['messages'][-1]['content']
     assert seen['count_tools'] == seen['generation_tools'] == tools
@@ -262,7 +268,7 @@ def test_large_graph_policy_is_part_of_preflight_size_and_count(monkeypatch):
     monkeypatch.setattr(msty, 'POLICY', 'POLICY ' * 30000)
     result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}], 'tools': []}))
     assert seen['events'] == ['count', 'generate']
-    assert seen['count_messages'][0].content.startswith(msty.POLICY)
+    assert seen['count_messages'][0].content[0]['text'].startswith(msty.POLICY)
     assert result['context_budget_check']['status'] == 'accepted'
 
 
@@ -304,6 +310,8 @@ def test_real_sdk_counter_receives_all_system_blocks_including_project_policy(mo
     assert any('PROJECT_POLICY_SENTINEL' == block['text'] for block in seen['request']['system'])
     assert any('BLOCK_POLICY_SENTINEL' == block['text'] for block in seen['request']['system'])
     assert seen['request']['system'][0]['text'].startswith(msty.POLICY)
+    assert seen['request']['system'][0]['cache_control'] == {'type': 'ephemeral', 'ttl': '5m'}
+    assert all('cache_control' not in block for block in seen['request']['system'][1:])
     assert seen['request']['messages'] == seen['generation_messages']
     assert seen['request']['tools'][0]['name'] == 'inspect'
     assert seen['request']['timeout'] == 20.0
