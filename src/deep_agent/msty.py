@@ -3,12 +3,19 @@
 State is replaced with the client's canonical conversation on each turn, avoiding
 duplicate messages when a persisted thread is resumed.
 """
+import asyncio
 import json
 import os
 from typing import TypedDict
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage, convert_to_messages
+from langchain_anthropic.chat_models import _format_messages
+from langchain_core.messages import AIMessage, SystemMessage, convert_to_messages
 from langgraph.graph import StateGraph, START, END
+
+COUNT_TRIGGER_BYTES = 200000
+INPUT_TOKEN_LIMIT = 180000
+CONTEXT_BUDGET_PROTOCOL = 'anthropic-count-v1'
+COUNT_TIMEOUT_SECONDS = 20.0
 
 POLICY = """Ты — Sanare Brain. Отвечай на языке пользователя, кратко и по существу.
 Простой вопрос решай одним прямым ответом. Для действий используй переданные
@@ -78,6 +85,17 @@ class State(TypedDict):
     tool_choice: str | dict | None
     max_tokens: int
     result: dict
+    context_budget: str | None
+    context_budget_check: dict | None
+
+
+def rejected_context_budget(explanation: str, input_tokens: int | None = None):
+    """A local blocker is not generated inference and does not consume its tokens."""
+    result = AIMessage(content=explanation, usage_metadata={
+        'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})
+    return {'result': result.model_dump(), 'context_budget_check': {
+        'version': 1, 'status': 'rejected', 'input_tokens': input_tokens,
+        'limit': INPUT_TOKEN_LIMIT}}
 
 
 async def respond(state: State):
@@ -88,6 +106,48 @@ async def respond(state: State):
         timeout=120, max_retries=0,
     )
     tools = state.get("tools") or []
+    full_messages = [SystemMessage(content=policy_for_tools(tools)), *messages]
+    # Byte size is only the preflight trigger, never a tokenizer estimate.
+    # Count the exact complete messages and schemas used for generation below.
+    input_bytes = len(json.dumps({'messages': [m.model_dump(mode='json') for m in full_messages],
+                                 'tools': tools}, ensure_ascii=False).encode('utf-8'))
+    budget_check = None
+    protocol = state.get('context_budget')
+    if protocol not in (None, CONTEXT_BUDGET_PROTOCOL):
+        return rejected_context_budget(
+            'Генерация не запущена: неподдерживаемая версия проверки контекста. '
+            'Сообщения и инструкции не сокращались.')
+    if protocol == CONTEXT_BUDGET_PROTOCOL or input_bytes > COUNT_TRIGGER_BYTES:
+        try:
+            count_options = {'timeout': COUNT_TIMEOUT_SECONDS}
+            formatted_system, _ = _format_messages(full_messages)
+            if isinstance(formatted_system, list):
+                # Installed langchain-anthropic drops block-form system prompts
+                # in get_num_tokens_from_messages unless explicitly supplied.
+                # Generation uses this same SDK formatter; count every block.
+                count_options['system'] = formatted_system
+            # This SDK exposes the official counter synchronously. Keep the
+            # event loop free and bound this extra request; never retry/count
+            # via a second model. The same model has max_retries=0 above.
+            tokens = await asyncio.to_thread(
+                model.get_num_tokens_from_messages, full_messages, tools=tools,
+                **count_options)
+            if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+                raise ValueError('Invalid token count')
+        except Exception:
+            # Provider exceptions may contain prompts, headers or credentials;
+            # keep raw details out of both the user result and our own logs.
+            return rejected_context_budget(
+                'Генерация не запущена: подсчёт токенов Anthropic не завершился. '
+                'Контекст сохранён без обрезки; требуется восстановить проверку его размера.')
+        if tokens > INPUT_TOKEN_LIMIT:
+            return rejected_context_budget(
+                f'Генерация не запущена: входной контекст превышает безопасный лимит '
+                f'{INPUT_TOKEN_LIMIT} токенов. Сообщения, инструкции и результаты '
+                'инструментов не сокращались; нужно уменьшить выбранные вложения '
+                'или разделить задачу.', tokens)
+        budget_check = {'version': 1, 'status': 'accepted', 'input_tokens': tokens,
+                        'limit': INPUT_TOKEN_LIMIT}
     if tools:
         choice = state.get("tool_choice") or "auto"
         if choice == "required":
@@ -95,7 +155,7 @@ async def respond(state: State):
         elif isinstance(choice, dict) and choice.get("type") == "function":
             choice = choice["function"]["name"]
         model = model.bind_tools(tools, tool_choice=choice)
-    result = await model.ainvoke([SystemMessage(content=policy_for_tools(tools)), *messages])
+    result = await model.ainvoke(full_messages)
     allowed = tool_names(tools)
     if result.invalid_tool_calls or any(call.get('name') not in allowed for call in result.tool_calls):
         # Fail closed before the client can execute an invented operation. Keep
@@ -105,7 +165,9 @@ async def respond(state: State):
                        'Модель запросила неподключённый или некорректный инструмент; вызов не выполнен.')
         result = result.model_copy(update={'content': explanation, 'tool_calls': [],
                                           'invalid_tool_calls': []})
-    return {"result": result.model_dump()}
+    # Explicit None clears any check left in a persisted LangGraph thread;
+    # an earlier accepted count must never attest a different request.
+    return {"result": result.model_dump(), "context_budget_check": budget_check}
 
 
 builder = StateGraph(State)

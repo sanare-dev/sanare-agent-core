@@ -1,4 +1,9 @@
 import asyncio
+from copy import deepcopy
+import threading
+from types import SimpleNamespace
+
+import pytest
 from langchain_core.messages import AIMessage
 from deep_agent import msty
 
@@ -128,3 +133,187 @@ def test_client_tool_roundtrip(monkeypatch):
     assert seen['tools'][0]['function']['name'] == 'inspect'
     assert result['result']['type'] == 'ai'
     assert seen['config']['max_retries'] == 0
+
+
+def budget_model(monkeypatch, tokens=120000, count_error=None):
+    seen = {'events': []}
+    class Model:
+        def __init__(self, **kwargs):
+            seen['config'] = kwargs
+        def get_num_tokens_from_messages(self, messages, *, tools, **kwargs):
+            seen['events'].append('count')
+            seen['count_thread'] = threading.get_ident()
+            seen['count_messages'] = deepcopy(messages)
+            seen['count_tools'] = deepcopy(tools)
+            seen['count_options'] = kwargs
+            if count_error is not None:
+                raise count_error
+            return tokens
+        def bind_tools(self, tools, **kwargs):
+            seen['events'].append('bind')
+            seen['generation_tools'] = deepcopy(tools)
+            return self
+        async def ainvoke(self, messages):
+            seen['events'].append('generate')
+            seen['generation_messages'] = deepcopy(messages)
+            return AIMessage(content='verified', usage_metadata={
+                'input_tokens': 120010, 'output_tokens': 3, 'total_tokens': 120013})
+    monkeypatch.setattr(msty, 'ChatAnthropic', Model)
+    return seen
+
+
+def test_large_context_is_counted_in_a_worker_before_generation_without_truncation(monkeypatch):
+    seen = budget_model(monkeypatch)
+    current_thread = threading.get_ident()
+    tools = [{'type': 'function', 'function': {'name': 'inspect',
+              'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}}}}}]
+    state = {'messages': [{'role': 'system', 'content': 'KEEP ALL POLICY'},
+                           {'role': 'user', 'content': 'я' * 105000}],
+             'tools': tools, 'max_tokens': 8192}
+    before = deepcopy(state)
+    result = asyncio.run(msty.respond(state))
+    assert seen['events'] == ['count', 'bind', 'generate']
+    assert seen['count_thread'] != current_thread
+    assert seen['count_options']['timeout'] == 20.0
+    assert seen['count_messages'] == seen['generation_messages']
+    assert seen['count_messages'][0].content == msty.policy_for_tools(tools)
+    assert seen['count_messages'][1].content == 'KEEP ALL POLICY'
+    assert seen['count_messages'][-1].content == state['messages'][-1]['content']
+    assert seen['count_tools'] == seen['generation_tools'] == tools
+    assert state == before
+    assert seen['config']['max_tokens'] == 8192
+    assert seen['config']['max_retries'] == 0
+    assert result['context_budget_check'] == {
+        'version': 1, 'status': 'accepted', 'input_tokens': 120000, 'limit': 180000}
+    assert result['result']['usage_metadata']['input_tokens'] == 120010
+
+
+def test_required_budget_flag_counts_even_a_short_request(monkeypatch):
+    seen = budget_model(monkeypatch, tokens=42)
+    result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}],
+                                       'tools': [], 'context_budget': 'anthropic-count-v1'}))
+    assert seen['events'] == ['count', 'generate']
+    assert result['context_budget_check']['input_tokens'] == 42
+    assert result['context_budget_check']['status'] == 'accepted'
+
+
+def test_short_request_does_not_count_and_clears_stale_check(monkeypatch):
+    seen = budget_model(monkeypatch, count_error=AssertionError('must not count'))
+    result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}],
+        'tools': [], 'context_budget': None,
+        'context_budget_check': {'version': 1, 'status': 'accepted', 'input_tokens': 999}}))
+    assert seen['events'] == ['generate']
+    assert result['context_budget_check'] is None
+
+
+@pytest.mark.parametrize('tokens,accepted', [(180000, True), (180001, False)])
+def test_input_token_limit_is_inclusive_and_overflow_never_generates(monkeypatch, tokens, accepted):
+    seen = budget_model(monkeypatch, tokens=tokens)
+    result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}],
+        'tools': [], 'context_budget': 'anthropic-count-v1'}))
+    assert result['context_budget_check'] == {
+        'version': 1, 'status': 'accepted' if accepted else 'rejected',
+        'input_tokens': tokens, 'limit': 180000}
+    if accepted:
+        assert seen['events'] == ['count', 'generate']
+    else:
+        assert seen['events'] == ['count']
+        assert result['result']['type'] == 'ai'
+        assert '180000' in result['result']['content']
+        assert result['result']['tool_calls'] == []
+        assert result['result']['usage_metadata'] == {
+            'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+
+
+def test_count_failure_is_fail_closed_without_raw_exception_or_generation(monkeypatch):
+    seen = budget_model(monkeypatch, count_error=RuntimeError('PRIVATE_PROVIDER_RESPONSE_SENTINEL'))
+    result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}],
+        'tools': [], 'context_budget': 'anthropic-count-v1'}))
+    assert seen['events'] == ['count']
+    assert result['context_budget_check'] == {
+        'version': 1, 'status': 'rejected', 'input_tokens': None, 'limit': 180000}
+    assert 'PRIVATE_PROVIDER_RESPONSE_SENTINEL' not in str(result)
+    assert result['result']['usage_metadata']['total_tokens'] == 0
+    assert 'не запущена' in result['result']['content']
+
+
+@pytest.mark.parametrize('tokens', [None, '120000', -1, True])
+def test_invalid_token_count_never_generates(monkeypatch, tokens):
+    seen = budget_model(monkeypatch, tokens=tokens)
+    result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}],
+        'tools': [], 'context_budget': 'anthropic-count-v1'}))
+    assert seen['events'] == ['count']
+    assert result['context_budget_check']['status'] == 'rejected'
+    assert result['context_budget_check']['input_tokens'] is None
+
+
+def test_large_tool_schema_counts_even_when_messages_are_short(monkeypatch):
+    seen = budget_model(monkeypatch, tokens=80000)
+    tools = [{'type': 'function', 'function': {'name': 'inspect',
+        'description': 'x' * 205000, 'parameters': {'type': 'object'}}}]
+    result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}], 'tools': tools}))
+    assert seen['events'] == ['count', 'bind', 'generate']
+    assert seen['count_tools'] == tools
+    assert result['context_budget_check']['status'] == 'accepted'
+
+
+def test_large_graph_policy_is_part_of_preflight_size_and_count(monkeypatch):
+    seen = budget_model(monkeypatch, tokens=80000)
+    monkeypatch.setattr(msty, 'POLICY', 'POLICY ' * 30000)
+    result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}], 'tools': []}))
+    assert seen['events'] == ['count', 'generate']
+    assert seen['count_messages'][0].content.startswith(msty.POLICY)
+    assert result['context_budget_check']['status'] == 'accepted'
+
+
+def test_real_sdk_counter_receives_all_system_blocks_including_project_policy(monkeypatch):
+    # Exercise the installed real conversion/count method with only its network
+    # client replaced. Its native implementation omits list-form system prompts
+    # unless our adapter supplies them explicitly as keyword arguments.
+    sdk_counter = msty.ChatAnthropic.get_num_tokens_from_messages
+    seen = {'events': []}
+    def count_tokens(**kwargs):
+        seen['events'].append('count')
+        seen['request'] = kwargs
+        return SimpleNamespace(input_tokens=1400)
+    class Model:
+        model = 'claude-sonnet-4-6'
+        context_management = None
+        betas = None
+        get_num_tokens_from_messages = sdk_counter
+        def __init__(self, **kwargs):
+            self._client = SimpleNamespace(messages=SimpleNamespace(count_tokens=count_tokens))
+        def bind_tools(self, *args, **kwargs):
+            return self
+        async def ainvoke(self, messages):
+            seen['events'].append('generate')
+            seen['generation_system'], seen['generation_messages'] = msty._format_messages(messages)
+            return AIMessage(content='ok')
+    monkeypatch.setattr(msty, 'ChatAnthropic', Model)
+    result = asyncio.run(msty.respond({
+        'messages': [{'role': 'system', 'content': 'PROJECT_POLICY_SENTINEL'},
+                     {'role': 'system', 'content': [{'type': 'text', 'text': 'BLOCK_POLICY_SENTINEL'}]},
+                     {'role': 'user', 'content': 'USER_SENTINEL'}],
+        'tools': [{'type': 'function', 'function': {'name': 'inspect',
+                   'parameters': {'type': 'object', 'properties': {}}}}],
+        'context_budget': 'anthropic-count-v1',
+    }))
+    assert seen['events'] == ['count', 'generate']
+    assert seen['request']['system'] == seen['generation_system']
+    assert isinstance(seen['request']['system'], list)
+    assert any('PROJECT_POLICY_SENTINEL' == block['text'] for block in seen['request']['system'])
+    assert any('BLOCK_POLICY_SENTINEL' == block['text'] for block in seen['request']['system'])
+    assert seen['request']['system'][0]['text'].startswith(msty.POLICY)
+    assert seen['request']['messages'] == seen['generation_messages']
+    assert seen['request']['tools'][0]['name'] == 'inspect'
+    assert seen['request']['timeout'] == 20.0
+    assert result['context_budget_check']['input_tokens'] == 1400
+
+
+def test_unknown_budget_protocol_is_fail_closed(monkeypatch):
+    seen = budget_model(monkeypatch)
+    result = asyncio.run(msty.respond({'messages': [{'role': 'user', 'content': 'ok'}],
+        'tools': [], 'context_budget': 'unknown-v999'}))
+    assert seen['events'] == []
+    assert result['context_budget_check']['status'] == 'rejected'
+    assert result['result']['usage_metadata']['total_tokens'] == 0

@@ -17,6 +17,30 @@ Stacks. Existing old conversations do not necessarily inherit changed project
 defaults; use a fresh conversation for acceptance. Check actual tool results,
 not just HTTP success or generated prose.
 
+## Context admission — 20 September 2026
+
+The local bridge limits transport to 2 MB after bounded directory-tree previews;
+it does not cut system instructions, conversation, ordinary file reads or tools.
+The former 240 KB cap was a byte heuristic, not the model's context window.
+For larger requests the bridge requires `context_budget: anthropic-count-v1`.
+It clears this field and `context_budget_check` on every new request so persisted
+thread state cannot reuse an earlier admission receipt.
+
+Before generation, `msty` counts the **actual** policy + messages + tool schemas
+with Anthropic's official token-counting API if serialized input exceeds 200 KB
+or the flag is set. Admission is at most 180,000 input tokens, leaving room for
+the existing 8,192 output cap and counting variance. Count failure/overflow
+returns a visible blocker and does not call generation. Small requests do not
+pay the counting round trip. No summarization, automatic retry, model swap or
+budget increase is introduced.
+
+Deploy this graph before reloading the updated bridge. The bridge validates a
+fresh version1 admission receipt before forwarding tool calls on large requests.
+Only byte/token counts, status and request IDs enter gateway diagnostics, never
+raw prompts or tool contents. Token counting is not a provider invoice or a
+guarantee of unlimited history. References: [token counting](https://platform.claude.com/docs/en/build-with-claude/token-counting),
+[transport limits](https://platform.claude.com/docs/en/api/errors).
+
 Deployment template for a deep agent built with `create_deep_agent(...)`.
 
 ## What this template gives you
