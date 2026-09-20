@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, conve
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
-from . import msty_execution, msty_models, msty_compaction, msty_task, msty_stream
+from . import msty_execution, msty_models, msty_compaction, msty_task, msty_stream, msty_memory
 
 COUNT_TRIGGER_BYTES = 200000
 INPUT_TOKEN_LIMIT = 180000
@@ -86,9 +86,8 @@ MSTY_ECONOMICAL_EXECUTION_V1 — работай сам; не переписыв�
 выполни разрешённую работу своими инструментами и проверь фактический результат.
 Не запускай совет или дорогие модели автоматически. Не организуй голосование.
 
-MSTY_PROJECT_OPERATING_CONTEXT_V2 — постоянный краткий паспорт, не история чата.
-Основной проект llm: /Users/vb/Documents/ChatGPT/LLM. Файлы и браузер исполняются
-локально через подключённые инструменты Msty; ты уже имеешь их схемы в запросе.
+MSTY_PROJECT_OPERATING_CONTEXT_V3 — операционные границы; карта в общей памяти.
+Файлы и браузер исполняются локально через подключённые инструменты Msty.
 Ведущий Luna, необязательный DeepSeek Flash аналитик; msty_worker_start создаёт
 исполняющего Luna-воркера с отдельной рабочей папкой и реальными файловыми tools.
 Это не текстовая карточка и не публикация сайта. Проверяй msty_worker_status,
@@ -97,15 +96,12 @@ MSTY_PROJECT_OPERATING_CONTEXT_V2 — постоянный краткий пас
 его статуса bounded wait, проверь результат и продолжи работу. Не создавай дубли.
 Все платные шаги остаются в общем бюджете задачи; только нужные подзадачи.
 
-app.sanaredev.com — существующий Vercel/GitHub проект sanarehq/sanare-dev-v3,
-канон GitHub main. Исходники уже представлены рабочими копиями в llm/work.
-Для конкретного запроса по этому сайту сначала msty_project_resolve(URL): он
-находит текущие ссылки, commit и штатный путь доступа. Нельзя объявлять отсутствие
+Краткая межчатовая карта уже передана. Для вопроса о сайте не нужен discovery.
+Для новой правки сразу используй msty_site_prepare, он проверяет исходный репозиторий.
+msty_project_resolve(URL) нужен при запросе актуального deployment/access/commit
+или неоднозначности проекта. Нельзя объявлять отсутствие
 доступа, не вызвав доступный resolver/инструмент и не проверив его точный результат.
 Не редактируй чужие грязные worktrees; рабочая копия и publication — разные этапы.
-Платёжный модуль имеет отдельный репозиторий sanarehq/sanare-payment-accounts.
-ChatGPT Sites — другой контур: /Users/vb/Documents/ChatGPT/Sites/sites.json;
-sanarelab.health, sanarelab.co, 2thelife-store имеют отдельные исходники и данные.
 Штатная публикация основного app: существующий local sanare-site-delivery,
 авторизация находится у инструмента; знание пути само не даёт shell-инструмент.
 Если переданы msty_site_*: prepare создаёт СВОЮ копию app-sanaredev-com;
@@ -121,14 +117,9 @@ release(push_pr) ожидает base_sha, merge — commit_sha; verify свер�
 Сборка без production secrets не доказывает runtime/UI; проверь сценарий отдельно.
 Не называй неподключённый tool доступным. Разрешён только этот зарегистрированный сайт.
 
-NAS смонтирован /Volumes/LLM-Data; инфраструктурный каталог ai-knowledge:
-MACHINE_MAP.md, MODEL_ROLES.md, SITES_AND_PROJECTS.md, ACCESS_AND_KEYS.md, roster.json.
-Секреты провайдеров — protected provider-keys.json на NAS; сервисные ключи сайтов
-также в macOS Keychain. Знать место/id достаточно: значения не загружай в контекст.
-msty_system_overview даёт доступные точки входа. Не начинай каждую задачу с инвентаря
-всего диска, чтения всей истории или PROJECT_MEMORY.md. Этот паспорт уже доставлен.
-Дополняй его только относящимися к работе фактами: выборочный memory_search,
-msty_project_read(project_slug='llm',path=...,offset=...,limit<=12000).
+msty_system_overview нужен лишь при отсутствии относящейся записи в памяти.
+Для недостающей детали читай msty_project_read(project_slug='llm',path=...,
+offset=...,limit<=12000), а не весь журнал или системный каталог.
 Если большое чтение вернуло incomplete preview, исходник не потерян; запроси нужную
 страницу. Не проси новый чат и не повторяй тот же полный read_multiple_files.
 
@@ -252,6 +243,7 @@ class State(TypedDict):
     compaction_skip_once: bool
     task_contract: dict | None
     text_stream_protocol: str | None
+    project_memory_delivery: dict
 
 
 def selected_profile(state: State) -> str:
@@ -375,7 +367,8 @@ async def _respond_step(state: State):
                                base_url='https://api.anthropic.com', timeout=120, max_retries=0)
                  if profile == 'sonnet' and not msty_models.msty_gateway.enabled()
                  else msty_models.make_model(profile, output_limit))
-        policy = ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else policy_for_tools(tools)
+        policy = (ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else
+                  policy_for_tools(tools) + '\n\n' + msty_memory.system_context())
         if consultations >= 2:
             policy += '\nЛимит консультаций исчерпан. Продолжай своими инструментами; не вызывай консультанта снова.'
         if any(msty_task._named(name, msty_task.PLAN_SUFFIX) for name in tool_names(tools)):
@@ -562,10 +555,12 @@ async def respond(state: State):
 
 
 builder = StateGraph(State)
+builder.add_node("load_project_memory", msty_memory.load_context)
 builder.add_node("respond", respond)
 builder.add_node("wait_external", msty_execution.wait_external)
 builder.add_node("wait_compaction", msty_compaction.wait_compaction)
-builder.add_edge(START, "respond")
+builder.add_edge(START, "load_project_memory")
+builder.add_edge("load_project_memory", "respond")
 builder.add_conditional_edges("respond", msty_execution.next_node,
                               {"wait_external": "wait_external", "wait_compaction": "wait_compaction", "__end__": END})
 builder.add_edge("wait_external", "respond")

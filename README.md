@@ -1,5 +1,28 @@
 # Deep Agents Template
 
+## Native cross-thread startup memory — 20 September 2026
+
+`msty_memory.load_context` uses the Agent Server's native `Runtime.store`, shared
+across chats in this single-owner private deployment. One version/hash-pinned
+projection is seeded once, then read without an LLM, MCP discovery or filesystem
+scan. It contains curated stable project/repository/storage locations, not secrets,
+raw chat history, fresh deployment status or new authority. Canonical project
+documents and Engram remain the sources; changing this projection requires a
+reviewed version update, it is not autonomous free-form learning.
+
+The exact verified projection is automatically in the lead model's system context.
+Analysts do not receive it. Store failures or a mismatching item fall back to the
+packaged projection within one second and expose `project_memory_delivery` status;
+they do not trigger disk discovery or overwrite corrupt data. Requests cannot choose
+a namespace or substitute memory content. New chats share knowledge, not messages,
+task permissions or publication grants. Source/permission checks still apply before
+mutations. `msty_project_resolve` is now conditional, not mandatory onboarding for
+every familiar-site question. Saved Msty project and existing-chat prompts must be
+updated separately through UI; code alone cannot override their stale instructions.
+
+Built on [native LangGraph Store](https://docs.langchain.com/oss/python/langgraph/stores).
+No new database/service, embeddings, scheduler, paid judge or model-weight training.
+
 ## Local isolated site executor — 20 September 2026
 
 The compact operating passport documents optional `msty_site_prepare/file/check/
@@ -16,7 +39,7 @@ current acceptance are tracked by the owner's unified local change journal.
 
 ## Compact operating context and bounded artifact workers — 20 September 2026
 
-The server-owned `MSTY_PROJECT_OPERATING_CONTEXT_V2` policy supplies a compact
+The server-owned operating policy and native memory projection supply a compact
 project/access map automatically on every lead step. It is not a request to read
 the complete project history, a credential dump or weight training. Unchanging
 entry points need no repeated discovery; mutable source/deployment state still

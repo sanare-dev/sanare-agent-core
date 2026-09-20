@@ -182,7 +182,8 @@ def test_large_context_is_counted_in_a_worker_before_generation_without_truncati
     assert seen['count_options']['timeout'] == 20.0
     assert seen['count_messages'] == seen['generation_messages']
     assert seen['count_messages'][0].content == [{'type': 'text',
-        'text': msty.policy_for_tools(tools), 'cache_control': {'type': 'ephemeral', 'ttl': '5m'}}]
+        'text': msty.policy_for_tools(tools) + '\n\n' + msty.msty_memory.system_context(),
+        'cache_control': {'type': 'ephemeral', 'ttl': '5m'}}]
     assert seen['count_messages'][1].content == 'KEEP ALL POLICY'
     assert seen['count_messages'][-1].content == state['messages'][-1]['content']
     assert seen['count_tools'] == seen['generation_tools'] == tools
