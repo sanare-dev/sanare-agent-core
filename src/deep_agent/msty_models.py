@@ -49,12 +49,26 @@ from langchain_core.messages import (
     AIMessage, BaseMessage, HumanMessage, ToolMessage, convert_to_messages,
     convert_to_openai_messages,
 )
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI as _ChatOpenAI
 from deep_agent import msty_gateway
 
 
 class ModelAdapterError(ValueError):
     """Content-free error: never include SDK exceptions, messages or credentials."""
+
+
+class ChatOpenAI(_ChatOpenAI):
+    """Pinned langchain-openai1.1.11 stream converter, raw accounting only.
+
+    The native adapter keeps normalized usage (which can default missing fields
+    to zero) but not the raw stream usage. Preserve the latter for our existing
+    fail-unknown validator, without changing inference payloads or nonstreaming.
+    """
+    def _convert_chunk_to_generation_chunk(self, chunk, default_chunk_class, base_generation_info):
+        result = super()._convert_chunk_to_generation_chunk(chunk, default_chunk_class, base_generation_info)
+        if result is not None and chunk.get('usage') is not None:
+            result.message.response_metadata['token_usage'] = deepcopy(chunk['usage'])
+        return result
 
 
 @dataclass(frozen=True)

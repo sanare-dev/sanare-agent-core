@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, conve
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
-from . import msty_execution, msty_models, msty_compaction, msty_task
+from . import msty_execution, msty_models, msty_compaction, msty_task, msty_stream
 
 COUNT_TRIGGER_BYTES = 200000
 INPUT_TOKEN_LIMIT = 180000
@@ -195,6 +195,7 @@ class State(TypedDict):
     compaction_stage: dict | None
     compaction_skip_once: bool
     task_contract: dict | None
+    text_stream_protocol: str | None
 
 
 def selected_profile(state: State) -> str:
@@ -275,7 +276,7 @@ def valid_tool_calls(result: AIMessage, tools: list[dict]) -> bool:
 
 
 def publish_result(result: AIMessage, budget_check: dict | None):
-    """The sole public stream event is a complete, already guarded message."""
+    """Authoritative complete guarded message; optional prior text is provisional."""
     message = result.model_dump()
     try:
         writer = get_stream_writer()
@@ -300,6 +301,10 @@ def rejected_context_budget(explanation: str, input_tokens: int | None = None):
 
 async def _respond_step(state: State):
     tools = state.get("tools") or []
+    try:
+        incremental = msty_stream.enabled(state)
+    except ValueError as error:
+        return rejected_context_budget(str(error))
     try:
         compaction_enabled = msty_compaction.enabled(state)
         if compaction_enabled and not msty_execution.enabled(state):
@@ -391,12 +396,20 @@ async def _respond_step(state: State):
         elif isinstance(choice, dict) and choice.get("type") == "function":
             choice = choice["function"]["name"]
         model = model.bind_tools(tools, tool_choice=choice)
-    raw_result = await model.ainvoke(full_messages)
+    stream = msty_stream.TextStream(state) if incremental else None
+    try:
+        raw_result = (await stream.invoke(model, full_messages) if stream else
+                      await model.ainvoke(full_messages))
+    except msty_stream.StreamFailure as error:
+        return publish_result(AIMessage(content=str(error), usage_metadata=None,
+            response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
     try:
         result = msty_models.stamp_usage(profile, raw_result)
     except msty_models.ModelAdapterError:
         # Generation already happened. Keep checked current usage but omit an
         # unverified identity; gateway retains unknown cost rather than zero.
+        if stream:
+            stream.invalidate()
         return publish_result(AIMessage(content='Ответ пришёл от неподтверждённой модели; '
             'действия не выполнены. Требуется проверить модель провайдера.',
             usage_metadata=msty_models.checked_usage(profile, raw_result),
@@ -431,6 +444,8 @@ async def _respond_step(state: State):
             'response_metadata': {**result.response_metadata, 'msty_blocked': True}})
     # Explicit None clears any check left in a persisted LangGraph thread;
     # an earlier accepted count must never attest a different request.
+    if stream:
+        stream.finish(result)
     return publish_result(result, budget_check)
 
 

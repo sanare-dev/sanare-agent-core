@@ -1,5 +1,56 @@
 # Deep Agents Template
 
+## Optional incremental text transport — 20 September 2026
+
+`text_stream_protocol=msty-text-delta-v1` opts one ordinary response step into
+the existing model's native `astream(..., stream_usage=True)`. Without it, the
+original single `ainvoke` path is unchanged. This is a rendering flag, not a
+model, budget or authority selector: verified tool callbacks may enable it or
+clear it with `None` (omission also clears it). Unknown versions fail before
+generation. Native compaction remains a separate, nonstreaming counted call.
+
+LangGraph `custom` events before the existing `validated_result` may be:
+
+```json
+{"type":"text_delta","version":1,"seq":0,"text":"nonempty provisional text"}
+{"type":"text_invalidated","version":1}
+```
+
+Sequence numbers are consecutive from zero; cumulative text is limited to
+256 KiB UTF-8. Only ordinary text is exposed, never tool arguments, reasoning
+blocks or executable tool fragments. All tool/schema/model/consultation limits
+and artifact-completion gates still apply to the fully aggregated final message.
+Every step with a nonempty artifact task contract is buffered, including failed
+or verified contracts, so the model cannot show a premature completion claim
+before the native verification gate. Buffered final responses need not produce
+any delta events. The current gateway starts an independent user turn in a fresh
+thread; an old contract does not turn off streaming for future new tasks. This
+does not introduce stable identity across unidentified user turns.
+There is no fallback inference or stream retry.
+
+Deltas are **provisional**, not accepted output or proof of completed work.
+After a final guard changes their text, rejects model identity, or a stream
+error, `text_invalidated` precedes any guarded final. A consumer must reject that
+provisional answer and release no actions; appended OpenAI SSE cannot erase text
+already shown. Known `length`/filter/refusal termination with unchanged text is
+not invalidated: it retains its provider finish reason, measured usage and
+incomplete status, with no executable partial tool calls. For a successful
+streamed answer, concatenated deltas must equal the final ordinary text.
+The local bridge must still validate the final message, usage/model identity and
+checkpoint before releasing any tools. Cancellation propagates without retry;
+an EOF without a provider finish marker is blocked.
+
+The pinned LangChain adapter aggregates full usage and finish metadata. A narrow
+OpenAI chunk-converter override preserves raw stream usage for the existing
+fail-unknown accounting validator: SDK-filled zeros must not replace missing
+provider counts. Duplicate usage receipts and broken streams are unknown, never
+zero-cost successes; output rejected by final guards retains measured usage.
+Tests use the real compiled graph and installed chunk conversion with mocked
+providers. Their success does not establish deployment, native UI latency or
+provider/Gateway support. See `test_msty_stream.py`; sources:
+[LangGraph custom writer](https://reference.langchain.com/python/langgraph/config/get_stream_writer),
+[LangChain OpenAI streaming](https://github.com/langchain-ai/langchain/blob/master/libs/partners/openai/langchain_openai/chat_models/base.py).
+
 ## Bounded task criteria and metered compaction — 20 September 2026
 
 This source increment requires the matching gateway and native Admin MCP release.
