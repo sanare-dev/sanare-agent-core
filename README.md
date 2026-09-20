@@ -1,5 +1,19 @@
 # Deep Agents Template
 
+## Local isolated site executor — 20 September 2026
+
+The compact operating passport documents optional `msty_site_prepare/file/check/
+status/cancel/release`. Only supplied MCP schemas are usable; installing source
+does not imply native-client reconnection. The cloud graph remains a planner and
+tool-call loop: source checkout, offline non-root Docker Node22/pnpm11.7 checks,
+and credential-owning GitHub/Vercel delivery are local. No cloud shell or new
+orchestrator is added. Local checks bind to exact source content; CI and explicit
+original-user release scope are mandatory. Connection-only tasks cannot publish.
+The existing parent budget/action limits apply; bounded status waits reduce polls.
+No production changes are made merely to validate this integration. Build success
+without runtime secrets is not UI or business acceptance. Native integration and
+current acceptance are tracked by the owner's unified local change journal.
+
 ## Compact operating context and bounded artifact workers — 20 September 2026
 
 The server-owned `MSTY_PROJECT_OPERATING_CONTEXT_V2` policy supplies a compact

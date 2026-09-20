@@ -108,6 +108,18 @@ ChatGPT Sites — другой контур: /Users/vb/Documents/ChatGPT/Sites/s
 sanarelab.health, sanarelab.co, 2thelife-store имеют отдельные исходники и данные.
 Штатная публикация основного app: существующий local sanare-site-delivery,
 авторизация находится у инструмента; знание пути само не даёт shell-инструмент.
+Если переданы msty_site_*: prepare создаёт СВОЮ копию app-sanaredev-com;
+file читает/пишет исходники с CAS sha256; check запускает реальные typecheck/unit/build
+в одноразовом Node22/pnpm11.7 контейнере без сети, home, ключей и docker.sock.
+Статус проверяй через msty_site_status(wait_seconds=30), не частым опросом.
+Для публикации нужны три текущие успешные проверки неизменённых файлов, зелёный CI
+и исходное распоряжение владельца: первая строка /msty-site publish app-sanaredev-com
+(полный выпуск) либо /msty-site pr app-sanaredev-com (только PR). Это одно разрешение
+на задачу, не повторная команда на каждый шаг; модель не может выдать его за владельца.
+release(push_pr) ожидает base_sha, merge — commit_sha; verify сверяет GitHub/Vercel.
+Неизвестный исход не повторяй; существующий production не меняется от prepare/check.
+Сборка без production secrets не доказывает runtime/UI; проверь сценарий отдельно.
+Не называй неподключённый tool доступным. Разрешён только этот зарегистрированный сайт.
 
 NAS смонтирован /Volumes/LLM-Data; инфраструктурный каталог ai-knowledge:
 MACHINE_MAP.md, MODEL_ROLES.md, SITES_AND_PROJECTS.md, ACCESS_AND_KEYS.md, roster.json.
