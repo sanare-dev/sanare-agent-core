@@ -84,10 +84,22 @@ PROFILES = MappingProxyType({
     'luna': Profile('openai', 'gpt-5.6-luna', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'deepseek': Profile('deepseek', 'deepseek-flash', 'https://api.deepseek.com/v1', 'DEEPSEEK_API_KEY'),
     'sonnet': Profile('anthropic', 'claude-sonnet-4-6', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
+    # Consult-only profiles (2026-09-21): reached through the LLM Gateway BYOK
+    # wire with provider-prefixed ids; never the lead profile. See CONSULT_PROFILES.
+    'astra': Profile('openai', 'gpt-6-astra', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
+    'sol': Profile('openai', 'gpt-5.6-sol', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
+    'opus': Profile('anthropic', 'claude-opus-4-8', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
+    'fable': Profile('anthropic', 'claude-fable-5-1', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
 })
+# Server-owned allowlist for the optional analyst consultation profile. The
+# model never supplies this directly: the bridge validates the parent-issued
+# request field before it reaches the graph.
+CONSULT_PROFILES = frozenset(('deepseek', 'astra', 'sol', 'opus', 'fable'))
 COUNT_METHODS = MappingProxyType({
     'luna': 'tiktoken-admission-v1', 'deepseek': 'conservative-text-v1',
     'sonnet': 'anthropic-exact-v1',
+    'astra': 'tiktoken-admission-v1', 'sol': 'tiktoken-admission-v1',
+    'opus': 'anthropic-exact-v1', 'fable': 'anthropic-exact-v1',
 })
 COUNT_TIMEOUT_SECONDS = 20.0
 LUNA_IMAGE_PATCH_LIMITS = MappingProxyType({'low': 256, 'high': 2500, 'original': 30000, 'auto': 30000})
@@ -123,14 +135,21 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
         # Keep gateway credentials and routing metadata on the fixed host.
         common.update(http_client=httpx.Client(follow_redirects=False),
                       http_async_client=httpx.AsyncClient(follow_redirects=False))
-    if profile == 'sonnet':
+    if config.provider == 'anthropic' and not gateway:
         try:
             return ChatAnthropic(**common)
         except Exception:
             raise ModelAdapterError('Клиент выбранного провайдера не создан.') from None
     options = dict(use_responses_api=False, stream_usage=False)
-    if profile == 'luna':
+    if profile in ('luna', 'sol'):
         options.update(reasoning_effort='none', store=False)
+    elif profile == 'astra':
+        # gpt-6-astra has no 'none' tier; 'low' is its minimal reasoning effort.
+        options.update(reasoning_effort='low', store=False)
+    elif config.provider == 'anthropic':
+        # Anthropic-family consult profiles ride the gateway's OpenAI-compatible
+        # wire (provider-prefixed BYOK id); keep the payload minimal there.
+        pass
     else:
         # ChatOpenAI 1.1.11 renames max_tokens to OpenAI's
         # max_completion_tokens; DeepSeek documents max_tokens instead.
@@ -412,7 +431,12 @@ def stamp_usage(profile: str, result: AIMessage) -> AIMessage:
     if msty_gateway.enabled() and reported is None:
         raise ModelAdapterError('LLM Gateway не подтвердил модель ответа; результат не принят.')
     if reported is not None:
-        if not isinstance(reported, str) or not re.fullmatch(re.escape(config.model) + r'(?:-\d{4}-\d{2}-\d{2})?', reported):
+        accepted = [re.escape(config.model) + r'(?:-\d{4}-\d{2}-\d{2})?']
+        if profile in msty_gateway.CONSULT_WIRE and msty_gateway.enabled():
+            # The gateway echoes the provider-prefixed BYOK selector verbatim
+            # (live-proven 2026-09-21); accept exactly that id as well.
+            accepted.append(re.escape(msty_gateway.CONSULT_WIRE[profile]) + r'(?:-\d{4}-\d{2}-\d{2})?')
+        if not isinstance(reported, str) or not re.fullmatch('(?:' + '|'.join(accepted) + ')', reported):
             raise ModelAdapterError('Ответ получен от неожиданной модели; результат не принят.')
         metadata['provider_model_name'] = reported
     usage = checked_usage(profile, result)

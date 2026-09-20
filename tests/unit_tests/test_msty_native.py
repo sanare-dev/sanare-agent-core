@@ -684,3 +684,16 @@ def test_200_checkpointed_native_actions_then_201_blocks_at_recursion_limit_64(m
         prepared = msty_models.prepare_messages('luna', seen[-1]['state']['messages'], seen[-1]['state']['tools'])
         assert len(prepared) == 401 < msty_models.MAX_MESSAGES
     asyncio.run(run())
+
+
+def test_analyst_consult_profile_allowlist():
+    state = {'brain_task_role': 'analyst', 'tools': [],
+             'messages': [{'role': 'user', 'content': 'synthetic brief'}]}
+    assert msty.selected_profile(state) == 'deepseek'
+    assert msty.selected_profile({**state, 'consult_profile': None}) == 'deepseek'
+    for profile in ('astra', 'sol', 'opus', 'fable'):
+        assert msty.selected_profile({**state, 'consult_profile': profile}) == profile
+    # Lead-only and unknown profiles are never a valid consultation target.
+    for bad in ('luna', 'sonnet', 'unknown', '', 42):
+        with pytest.raises(msty_models.ModelAdapterError):
+            msty.selected_profile({**state, 'consult_profile': bad})

@@ -215,6 +215,7 @@ class State(AgentState, total=False):
     compaction_skip_once: bool
     task_contract: dict | None
     text_stream_protocol: str | None
+    consult_profile: str | None
     native_needs_admission: Annotated[NotRequired[bool], PrivateStateAttr]
     native_protocol_messages: Annotated[NotRequired[list[dict]], PrivateStateAttr]
     native_external_observations: Annotated[NotRequired[dict], PrivateStateAttr]

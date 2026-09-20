@@ -257,6 +257,7 @@ class State(TypedDict):
     task_contract: dict | None
     text_stream_protocol: str | None
     project_memory_delivery: dict
+    consult_profile: str | None
 
 
 def selected_profile(state: State) -> str:
@@ -268,7 +269,12 @@ def selected_profile(state: State) -> str:
         if (state.get('tools') or any(not isinstance(m.get('content'), str) or m.get('tool_calls') for m in history)
                 or len(json.dumps(history, ensure_ascii=False).encode()) > 96000):
             raise msty_models.ModelAdapterError('Аналитик принимает только ограниченный текст без инструментов.')
-        return 'deepseek'
+        consult = state.get('consult_profile')
+        if consult is None:
+            return 'deepseek'
+        if consult not in msty_models.CONSULT_PROFILES:
+            raise msty_models.ModelAdapterError('Недопустимый профиль консультанта.')
+        return consult
     profile = os.getenv('MSTY_MODEL_PROFILE', msty_models.DEFAULT_PROFILE)
     if profile not in msty_models.PROFILES:
         raise msty_models.ModelAdapterError('Недопустимый серверный профиль Brain.')

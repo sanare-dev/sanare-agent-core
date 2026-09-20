@@ -11,6 +11,14 @@ HOST = 'https://gateway.smith.langchain.com'
 DEEPSEEK_CONFIG_ID = 'ae7376e7-fea6-43cb-b50c-97db118c8c47'
 DEEPSEEK_SELECTOR = 'custom/Msty%20DeepSeek%20Flash'
 VERSION = 'msty-langsmith-routing-v1'
+# Consult-only profiles (2026-09-21) ride the OpenAI-compatible wire with
+# provider-prefixed BYOK ids; all four proven live against this gateway.
+CONSULT_WIRE = {
+    'astra': 'openai/gpt-6-astra',
+    'sol': 'openai/gpt-5.6-sol',
+    'opus': 'anthropic/claude-opus-4-8',
+    'fable': 'anthropic/claude-fable-5-1',
+}
 
 
 class GatewayConfigurationError(ValueError):
@@ -27,7 +35,7 @@ def enabled():
 def overrides(profile):
     if not enabled():
         return {}
-    if profile not in ('luna', 'deepseek'):
+    if profile not in ('luna', 'deepseek') and profile not in CONSULT_WIRE:
         raise GatewayConfigurationError('Профиль не допущен к активному LLM Gateway.')
     key = os.getenv('LANGSMITH_GATEWAY_API_KEY')
     if not key or not key.strip():
@@ -38,8 +46,10 @@ def overrides(profile):
     }}
     if profile == 'luna':
         result.update(base_url=HOST + '/openai/v1', model='gpt-5.6-luna')
-    else:
+    elif profile == 'deepseek':
         if os.getenv('MSTY_LLM_GATEWAY_DEEPSEEK_CONFIG_ID') != DEEPSEEK_CONFIG_ID:
             raise GatewayConfigurationError('Проверенная конфигурация DeepSeek Gateway не настроена.')
         result.update(base_url=HOST + '/v1', model=DEEPSEEK_SELECTOR)
+    else:
+        result.update(base_url=HOST + '/v1', model=CONSULT_WIRE[profile])
     return result
