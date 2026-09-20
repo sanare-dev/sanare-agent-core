@@ -312,7 +312,8 @@ async def _respond_step(state: State):
         msty_execution.validate_binding(state, profile, output_limit)
         model = (ChatAnthropic(model='claude-sonnet-4-6', max_tokens=output_limit,
                                base_url='https://api.anthropic.com', timeout=120, max_retries=0)
-                 if profile == 'sonnet' else msty_models.make_model(profile, output_limit))
+                 if profile == 'sonnet' and not msty_models.msty_gateway.enabled()
+                 else msty_models.make_model(profile, output_limit))
         policy = ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else policy_for_tools(tools)
         if consultations >= 2:
             policy += '\nЛимит консультаций исчерпан. Продолжай своими инструментами; не вызывай консультанта снова.'
@@ -325,7 +326,8 @@ async def _respond_step(state: State):
         full_messages = [SystemMessage(content=policy), *messages]
         full_messages = (cache_system_prefix(full_messages, tools) if profile == 'sonnet'
                          else msty_models.prepare_messages(profile, full_messages, tools))
-    except (msty_models.ModelAdapterError, msty_execution.ExecutionProtocolError) as error:
+    except (msty_models.ModelAdapterError, msty_models.msty_gateway.GatewayConfigurationError,
+            msty_execution.ExecutionProtocolError) as error:
         return rejected_context_budget(str(error))
     # Byte size is only the preflight trigger, never a tokenizer estimate.
     # Count the exact complete messages and schemas used for generation below.

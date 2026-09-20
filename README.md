@@ -52,6 +52,32 @@ See `test_msty_compaction.py` and `test_msty_task.py` for offline acceptance.
 
 ## Economical Msty Brain — 20 September 2026
 
+### Unified inference transport
+
+Operator setting `MSTY_LLM_GATEWAY_ENABLED=1` routes both existing profiles through
+LangSmith Gateway. Luna uses `/openai/v1/chat/completions` with its native model ID;
+DeepSeek uses `/v1/chat/completions` and the saved `custom/Msty%20DeepSeek%20Flash`
+configuration. The latter must match server config ID
+`ae7376e7-fea6-43cb-b50c-97db118c8c47` in
+`MSTY_LLM_GATEWAY_DEEPSEEK_CONFIG_ID`. The Gateway credential is supplied only by
+the deployment secret `LANGSMITH_GATEWAY_API_KEY`; provider keys reside in the
+workspace's Provider Secrets. No secret belongs in Git, prompts or tool arguments.
+
+Fixed `X-Gateway-App: sanare-msty` scopes the additional $5/day spend policy and
+60 requests/minute policy. These are not a universal account/invoice ceiling:
+unrelated apps and external paid tools remain outside their scope. Existing local
+task reservations, usage accounting and stop checks remain authoritative too.
+No automatic retry, model fallback, redirects or direct-provider fallback occurs
+on Gateway failure. `0` is an explicit operator rollback, never a model action.
+Unknown model identity or usage is rejected; an uncertain charge stays reserved.
+Gateway does not plan tasks, execute MCP, train weights or trigger a council.
+
+References: [native model access](https://docs.langchain.com/langsmith/llm-gateway-direct-model-access),
+[header policies](https://docs.langchain.com/langsmith/llm-gateway-header-policies).
+Offline coverage: `tests/unit_tests/test_msty_gateway.py`. Deployment and native
+acceptance evidence live in the owning project's change journal, not this source
+increment. Engine, sandboxes and subscription preferences are unchanged.
+
 The `msty` graph now defaults to server profile `luna` (`gpt-5.6-luna`,
 reasoning `none`). There is no compulsory prompt rewriter, council or hidden
 second model. Each cloud run performs at most one billed generation; the explicit

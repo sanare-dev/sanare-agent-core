@@ -41,6 +41,7 @@ import os
 import re
 from types import MappingProxyType
 import tiktoken
+import httpx
 
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.chat_models import _format_messages
@@ -49,6 +50,7 @@ from langchain_core.messages import (
     convert_to_openai_messages,
 )
 from langchain_openai import ChatOpenAI
+from deep_agent import msty_gateway
 
 
 class ModelAdapterError(ValueError):
@@ -93,11 +95,20 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
         raise ModelAdapterError('Недопустимый предел ответа модели.')
     # Explicit key + endpoint prevent generic SDK base-url environment overrides
     # from accidentally sending this provider's credential elsewhere.
-    key = os.getenv(config.key_variable)
+    try:
+        gateway = msty_gateway.overrides(profile)
+    except msty_gateway.GatewayConfigurationError as error:
+        raise ModelAdapterError(str(error)) from None
+    key = gateway.get('api_key') or os.getenv(config.key_variable)
     if not key or not key.strip():
         raise ModelAdapterError('Ключ выбранного провайдера не настроен на сервере.')
     common = dict(model=config.model, api_key=key, base_url=config.endpoint,
                   max_tokens=max_tokens, timeout=120, max_retries=0)
+    common.update(gateway)
+    if gateway:
+        # Keep gateway credentials and routing metadata on the fixed host.
+        common.update(http_client=httpx.Client(follow_redirects=False),
+                      http_async_client=httpx.AsyncClient(follow_redirects=False))
     if profile == 'sonnet':
         try:
             return ChatAnthropic(**common)
@@ -384,6 +395,8 @@ def stamp_usage(profile: str, result: AIMessage) -> AIMessage:
         raise ModelAdapterError('Провайдер вернул неподдерживаемое сообщение.')
     metadata = deepcopy(result.response_metadata)
     reported = metadata.get('model_name') or metadata.get('model')
+    if msty_gateway.enabled() and reported is None:
+        raise ModelAdapterError('LLM Gateway не подтвердил модель ответа; результат не принят.')
     if reported is not None:
         if not isinstance(reported, str) or not re.fullmatch(re.escape(config.model) + r'(?:-\d{4}-\d{2}-\d{2})?', reported):
             raise ModelAdapterError('Ответ получен от неожиданной модели; результат не принят.')
