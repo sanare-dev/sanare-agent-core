@@ -1,5 +1,26 @@
 # Deep Agents Template
 
+## Compact operating context and bounded artifact workers — 20 September 2026
+
+The server-owned `MSTY_PROJECT_OPERATING_CONTEXT_V2` policy supplies a compact
+project/access map automatically on every lead step. It is not a request to read
+the complete project history, a credential dump or weight training. Unchanging
+entry points need no repeated discovery; mutable source/deployment state still
+requires a task-relevant check. Only actually supplied tool schemas are usable.
+
+Local Admin 1.5.0 adds paged project reads, existing-project resolution and real
+artifact-worker start/status/cancel. Workers have isolated declared file outputs,
+not arbitrary shell, site publication or independent budgets. The local gateway
+issues one-use worker capabilities and accounts lead/consultants/workers against
+one parent task cap and aggregate action quota. No council or retired supervisor
+is restored. Installation and native client reconnect are separate release gates.
+
+Task-plan and task-verification receipts optionally include strictly validated
+`learning` metadata. Local verification records evidence-linked candidate lessons
+and attempts projection to the existing Engram. Local file success, NAS delivery,
+retrieved hints and observed same-plan recovery remain separate facts; none proves
+actual lesson application or causal improvement. Legacy receipts stay supported.
+
 ## Optional incremental text transport — 20 September 2026
 
 `text_stream_protocol=msty-text-delta-v1` opts one ordinary response step into

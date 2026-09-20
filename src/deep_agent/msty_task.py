@@ -4,6 +4,8 @@ Coverage is model_proposed, never owner-approved completeness. Hashes bind data
 integrity, not client authenticity. A passed local artifact check proves only
 verified_against_observations, not business delivery or universal correctness.
 No shell, model invocation, local I/O or new autonomous controller lives here.
+Optional learning receipts are bounded reference-only observations: retrieval is
+not demonstrated use, and unknown Engram delivery is never recorded success.
 """
 from copy import deepcopy
 import json
@@ -17,6 +19,16 @@ VERIFY_SUFFIX = 'msty_task_verify'
 PLAN_KEYS = {'schema', 'state', 'plan_id', 'plan_sha256', 'project_slug',
              'requirements_count', 'checks_count', 'criteria_origin', 'whole_task_completion_verified'}
 VERIFY_KEYS = PLAN_KEYS | {'checks', 'source_hashes', 'receipt_path', 'receipt_sha256'}
+CONTEXT_KEYS = {'schema', 'state', 'authority', 'retrieved_lesson_count', 'used_lesson_count',
+                'lessons', 'quarantined_count', 'scan_truncated', 'reuse_receipt_path',
+                'reuse_receipt_sha256', 'code'}
+LESSON_KEYS = {'id', 'lesson', 'source', 'source_sha256', 'lesson_sha256', 'state',
+               'authority', 'published', 'semantic_verification'}
+OUTCOME_KEYS = {'schema', 'state', 'lesson_id', 'lesson_receipt_path', 'lesson_receipt_sha256',
+                'source_sha256', 'metrics', 'engram', 'code'}
+METRIC_KEYS = {'outcome', 'passed_checks', 'failed_checks', 'error_checks', 'baseline_outcome',
+               'baseline_source_sha256', 'recovery_observed', 'retrieved_lesson_count', 'used_lesson_count'}
+JOURNAL = 'project-governance/changes/'
 HASH = re.compile(r'[0-9a-f]{64}\Z')
 PLAN_ID = re.compile(r'taskplan-[0-9a-f]{32}\Z')
 CONTROL = re.compile(r'(?:\b(?:stop|wait|pause)\b|only\s+(?:a\s+)?(?:plan|explain)|'
@@ -32,6 +44,105 @@ def _named(name, suffix):
 
 def _hash(value):
     return isinstance(value, str) and HASH.fullmatch(value) is not None
+
+
+def _receipt_keys(receipt, required):
+    return isinstance(receipt, dict) and set(receipt) in (required, required | {'learning'})
+
+
+def _bounded_json(value, limit):
+    try:
+        return len(json.dumps(value, ensure_ascii=False, allow_nan=False,
+                              separators=(',', ':')).encode('utf-8')) <= limit
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return False
+
+
+def _count(value, maximum):
+    return type(value) is int and 0 <= value <= maximum
+
+
+def _learning_context(receipt):
+    """Validate the additive v1 context without promoting its untrusted text."""
+    value = receipt.get('learning')
+    if (not isinstance(value, dict) or set(value) != CONTEXT_KEYS or not _bounded_json(value, 8192) or
+            value['schema'] != 'msty.learning.context.v1' or
+            value['state'] not in ('loaded', 'unavailable') or value['authority'] != 'reference_only' or
+            value['used_lesson_count'] is not None or not _count(value['retrieved_lesson_count'], 3) or
+            not _count(value['quarantined_count'], 256) or type(value['scan_truncated']) is not bool or
+            not isinstance(value['lessons'], list) or len(value['lessons']) != value['retrieved_lesson_count']):
+        return False
+    if value['state'] == 'loaded':
+        if value['code'] is not None:
+            return False
+    elif value['code'] not in ('learning_context_unavailable', 'learning_reuse_not_persisted'):
+        return False
+    expected_path = JOURNAL + 'msty-learning-reuse-' + receipt['plan_id'][9:] + '.json'
+    if value['reuse_receipt_path'] is None:
+        if value['reuse_receipt_sha256'] is not None or value['state'] != 'unavailable':
+            return False
+    elif value['reuse_receipt_path'] != expected_path or not _hash(value['reuse_receipt_sha256']):
+        return False
+    identities = set()
+    for lesson in value['lessons']:
+        if (not isinstance(lesson, dict) or set(lesson) != LESSON_KEYS or
+                not isinstance(lesson['id'], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,110}', lesson['id']) or
+                lesson['id'] in identities or not isinstance(lesson['lesson'], str) or
+                not 10 <= len(lesson['lesson']) <= 2000 or
+                not isinstance(lesson['source'], str) or len(lesson['source']) > 255 or
+                not re.fullmatch(r'[A-Za-z0-9_.-]+\.json', lesson['source']) or
+                not _hash(lesson['source_sha256']) or not _hash(lesson['lesson_sha256']) or
+                lesson['state'] != 'candidate' or lesson['authority'] != 'reference_only' or
+                lesson['published'] is not False or lesson['semantic_verification'] != 'not_performed'):
+            return False
+        identities.add(lesson['id'])
+    return True
+
+
+def _learning_outcome(contract, receipt):
+    """Bind counters to this observation; NAS status remains a separate fact."""
+    value = receipt.get('learning')
+    if (not isinstance(value, dict) or set(value) != OUTCOME_KEYS or not _bounded_json(value, 4096) or
+            value['schema'] != 'msty.learning.outcome.v1'):
+        return False
+    if value['state'] == 'error':
+        return (value['code'] == 'local_learning_not_persisted' and
+                all(value[key] is None for key in ('lesson_id', 'lesson_receipt_path',
+                    'lesson_receipt_sha256', 'source_sha256', 'metrics')) and
+                value['engram'] == {'state': 'not_attempted', 'code': 'local_lesson_not_persisted',
+                                    'event_id': None})
+    source = receipt['receipt_sha256']
+    lesson_id = 'msty-brain-lesson-auto-' + source
+    if (value['state'] != 'recorded' or value['code'] is not None or value['source_sha256'] != source or
+            value['lesson_id'] != lesson_id or value['lesson_receipt_path'] != JOURNAL + lesson_id + '.json' or
+            not _hash(value['lesson_receipt_sha256'])):
+        return False
+    metrics, engram = value['metrics'], value['engram']
+    if (not isinstance(metrics, dict) or set(metrics) != METRIC_KEYS or
+            metrics['outcome'] != receipt['state'] or
+            metrics['baseline_outcome'] not in ('passed', 'failed', 'error') or
+            not _hash(metrics['baseline_source_sha256']) or type(metrics['recovery_observed']) is not bool or
+            metrics['recovery_observed'] != (metrics['baseline_outcome'] in ('failed', 'error') and
+                                            receipt['state'] == 'passed') or
+            not _count(metrics['retrieved_lesson_count'], 3) or metrics['used_lesson_count'] is not None):
+        return False
+    context = contract.get('learning_context')
+    if context is not None and metrics['retrieved_lesson_count'] != context['retrieved_lesson_count']:
+        return False
+    for outcome in ('passed', 'failed', 'error'):
+        count = metrics[outcome + '_checks']
+        if not _count(count, 24) or count != sum(check['status'] == outcome for check in receipt['checks']):
+            return False
+    if (not isinstance(engram, dict) or set(engram) != {'state', 'code', 'event_id'} or
+            engram['event_id'] != 'msty-auto-' + source):
+        return False
+    if engram['state'] == 'recorded':
+        return engram['code'] is None
+    if engram['state'] == 'not_attempted':
+        return engram['code'] in ('engram_adapter_unavailable', 'engram_adapter_error')
+    return engram['state'] == 'unknown' and engram['code'] in (
+        'engram_timeout_no_retry', 'engram_failed_outcome_unknown', 'engram_adapter_error',
+        'engram_prior_attempt_unconfirmed', 'engram_delivery_record_unavailable')
 
 
 def _decode(value, depth=0):
@@ -62,7 +173,7 @@ def _decode(value, depth=0):
 def _plan(call, receipt):
     args = call.get('args') or {}
     requirements, checks = args.get('requirements'), args.get('checks')
-    if (not isinstance(receipt, dict) or set(receipt) != PLAN_KEYS or
+    if (not _receipt_keys(receipt, PLAN_KEYS) or
             receipt.get('schema') != 'msty.task.plan.v1' or receipt.get('state') != 'planned' or
             receipt.get('criteria_origin') != 'model_proposed' or
             receipt.get('whole_task_completion_verified') is not False or
@@ -85,15 +196,25 @@ def _plan(call, receipt):
                           'kind': check['kind'], 'path': check['path']})
     if {c['requirement_index'] for c in summaries} != set(range(len(requirements))):
         return None
-    return {'version': 1, 'status': 'planned', 'criteria_origin': 'model_proposed',
+    if 'learning' in receipt and not _learning_context(receipt):
+        return None
+    contract = {'version': 1, 'status': 'planned', 'criteria_origin': 'model_proposed',
             'whole_task_completion_verified': False, 'plan_id': receipt['plan_id'],
             'plan_sha256': receipt['plan_sha256'], 'project_slug': receipt['project_slug'],
             'requirements_count': len(requirements), 'checks_count': len(checks),
             'checks': summaries, 'plan_call_sha256': canonical_digest(call)}
+    if 'learning' in receipt:
+        context = deepcopy(receipt['learning'])
+        # The native message already carries candidate text. The checkpoint only
+        # retains receipt references, never a second privileged instruction copy.
+        context['lesson_refs'] = [{key: item[key] for key in
+            ('id', 'source', 'source_sha256', 'lesson_sha256')} for item in context.pop('lessons')]
+        contract['learning_context'] = context
+    return contract
 
 
 def _verified(contract, call, receipt):
-    if (not isinstance(receipt, dict) or set(receipt) != VERIFY_KEYS or
+    if (not _receipt_keys(receipt, VERIFY_KEYS) or
             receipt.get('schema') != 'msty.task.verification.v1' or receipt.get('state') != 'passed' or
             call.get('args') != {'plan_id': contract.get('plan_id')} or
             receipt.get('criteria_origin') != 'model_proposed' or
@@ -124,7 +245,7 @@ def _verified(contract, call, receipt):
                 observed['artifact_sha256'] != sources[expected['path']]['sha256'] or
                 type(observed['size_bytes']) is not int or observed['size_bytes'] != sources[expected['path']]['size_bytes']):
             return False
-    return True
+    return 'learning' not in receipt or _learning_outcome(contract, receipt)
 
 
 def observe(state, issued_calls, results):
@@ -152,6 +273,11 @@ def observe(state, issued_calls, results):
                 'verification_call_sha256': canonical_digest(call),
                 'verification_observation_sha256': canonical_digest(receipt),
                 'reason': None if passed else 'checks_not_confirmed'}
+            # Clear a prior successful learning observation on every new verify;
+            # only the current, valid, issued receipt can set it again.
+            contract.pop('learning_outcome', None)
+            if passed and 'learning' in receipt:
+                contract['learning_outcome'] = deepcopy(receipt['learning'])
     return contract
 
 
