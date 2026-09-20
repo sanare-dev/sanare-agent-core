@@ -30,11 +30,23 @@ being claimed as local; the failed evidence must remain in the delivery journal.
 
 Every model generation retains a separate reservation. An internal tool batch
 is checkpointed before tools execute; `msty_native_continue` resumes automatically
-after shared-action reservation and stop/budget validation. Native/local actions share24 actions and the existing
-$1 estimated task cap. External callbacks retain exact batch/ID/schema/task checks.
+after shared-action reservation and stop/budget validation. The owner-approved
+task ceilings are 200 shared native/local actions and a $10 estimated task cap.
+The local gateway owns monetary reservation and atomic parent/worker aggregation;
+the cloud asserts the unchanged pricing binding and cumulative action ceiling.
+Existing counters, task IDs and pending batches are retained, never reset by this
+increase. An action after 24 is now allowed; action 201 is rejected. Stop and all
+per-generation budget tickets still apply. External callbacks retain exact batch/ID/schema/task checks.
 Internal narration is buffered; no internal tool call is sent to Msty for execution.
 Native tools have no hidden model calls. Only task-relevant skills/tools are needed;
 an ordinary answer does not require planning, a council or a consultant.
+
+Cloud code has no separate dollar cap or `MAX_STEPS` to raise. Recursion is a
+per-invocation graph bound, not the cumulative task-action counter: 200 sequential
+native actions with checkpoint/resume are covered offline at recursion limit 64.
+The separate 24-check verifier receipt bound, two-consultation cap, 512-message
+input bound, eight compaction segments, and 180000-token admission remain unchanged.
+Those independent bounds can still stop a large task before its action ceiling.
 
 The stack is composed with `create_agent`: Deep Agents0.4.11 `create_deep_agent`
 unconditionally installs summary/subagent model calls outside the local accounting
@@ -185,7 +197,7 @@ When real `msty_task_plan` / `msty_task_verify` tools are attached, an actual-is
 plan and its typed MCP observation establish bounded, **model-proposed** artifact
 criteria. Before a plain final with pending checks, the code emits the existing
 native verification tool call without an extra model generation. Explicit current
-user stop/wait/plan-only/explain-only phrases, disabled tools and the 24-action cap
+user stop/wait/plan-only/explain-only phrases, disabled tools and the 200-action cap
 veto it. The phrase veto is conservative, not a complete intent classifier.
 Tool-output prose cannot trigger this veto. A passed receipt with matched plan ID,
 source hashes and every declared check allows `verified_against_observations`;
@@ -269,7 +281,7 @@ The primary Luna reads sources and performs authorized work through Msty's
 existing MCP tools. It may ask for analysis/review when justified, then checks
 the opinion against actual sources and observes the result of its own actions.
 At most two issued consultations are counted in the native task checkpoint;
-the ordinary 24-action limit still applies. Role changes inside a pending
+the ordinary 200-action limit still applies. Role changes inside a pending
 callback are rejected. This is not a new background worker system and does not
 reactivate retired teams, Paperclip jobs or `brain_supervisor`.
 
@@ -379,7 +391,7 @@ expected call/result. The checkpoint retains its original instructions and
 history; only this batch's tool observations are appended. Root/RAG settings
 changed while waiting are not silently substituted; they apply on a new user
 turn. Canonical `b1_` client IDs are preserved in subsequent history. Provider
-`length`/refusal responses cannot create executable pending calls. The 24-action
+`length`/refusal responses cannot create executable pending calls. The 200-action
 cap is cumulative in checkpoint state, not recomputed from shortened history.
 
 Statuses `waiting_tools`, `answered`, `incomplete` and `blocked` describe the

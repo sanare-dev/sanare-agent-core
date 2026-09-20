@@ -12,7 +12,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
-from deep_agent import msty, msty_compaction, msty_execution, msty_native
+from deep_agent import msty, msty_compaction, msty_execution, msty_models, msty_native
 
 TOOLS = [{'type': 'function', 'function': {'name': 'external_read',
     'description': 'Read one synthetic external item.',
@@ -158,7 +158,7 @@ def test_unsafe_batches_block_before_publication_or_execution(monkeypatch, mode)
         calls = [call('native_read_file', {'file_path': '/memory/PROJECT.md'}, 'native'),
                  call('external_read', {'name': 'fixture'}, 'external')]
     elif mode == 'limit':
-        data['execution'] = {'actions_issued': 1, 'native_actions': 23}
+        data['execution'] = {'actions_issued': 1, 'native_actions': 199}
         calls = [call('external_read', {'name': 'fixture'})]
     else:
         calls = [call('native_write_todos', {'todos': []}, 'a'), call('native_write_todos', {'todos': []}, 'b')]
@@ -242,7 +242,8 @@ def test_validated_external_resume_preserves_none_tool_choice_and_lower_cap(monk
     asyncio.run(run())
 
 
-def test_existing_compaction_keeps_native_count_and_uses_own_resume_ticket(monkeypatch):
+@pytest.mark.parametrize('prior_native', [0, 24, 199])
+def test_existing_compaction_keeps_native_count_and_uses_own_resume_ticket(monkeypatch, prior_native):
     seen = []
 
     async def step(state, **kwargs):
@@ -265,20 +266,23 @@ def test_existing_compaction_keeps_native_count_and_uses_own_resume_ticket(monke
         graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
         config = {'configurable': {'thread_id': 'compaction-ticket'}}
         data = initial()
+        data['execution'] = {'native_actions': prior_native, 'consultations': 1}
         data['compaction_protocol'] = msty_compaction.PROTOCOL
         first, _ = await invoke(graph, data, config)
         ticket = first.tasks[0].interrupts[0]
         second, events = await invoke(graph, Command(resume={ticket.id: {
             **ticket.value, 'type': 'msty_native_resume'}}), config)
         assert len(events) == 1 and len(seen) == 2
-        assert second.values['execution']['native_actions'] == 1
+        assert second.values['execution']['native_actions'] == prior_native + 1
+        assert second.values['execution']['consultations'] == 1
         assert second.values['execution']['harness_version'] == 'msty-native-v1'
         compact = second.tasks[0].interrupts[0]
         resume = {key: value for key, value in compact.value.items() if key != 'result_sha256'}
         resume['type'] = 'msty_compaction_resume'
         final, events = await invoke(graph, Command(resume={compact.id: resume}), config)
         assert len(events) == 1 and len(seen) == 3
-        assert final.values['execution']['native_actions'] == 1
+        assert final.values['execution']['native_actions'] == prior_native + 1
+        assert final.values['execution']['consultations'] == 1
         assert final.values['execution']['harness_version'] == 'msty-native-v1'
         assert final.values['execution']['status'] == 'answered'
         assert not final.next
@@ -574,4 +578,109 @@ def test_large_external_observation_offload_remains_readable_in_virtual_mount(mo
         assert 'literal read_file stays source text.' in seen[2]['state']['messages'][-1]['content']
         assert final.values['execution']['status'] == 'answered'
         assert set(final.values['files']) == {'/large_tool_results/large-external'}
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('external_count,native_count', [(24, 0), (12, 12), (0, 24), (199, 0), (100, 99), (0, 199)])
+def test_raised_native_action_limit_inherits_counts_task_and_budget_binding(monkeypatch, external_count, native_count):
+    seen = scripted(monkeypatch, [answer('', [call('native_ls', {'path': '/'})]), answer()])
+    data = initial()
+    identifier = '18e447fe-1862-4d25-8448-b4522c1a63cf'
+    binding = {'version': 1, 'pricing_version': msty_execution.PRICING_VERSION,
+               'profile': 'luna', 'input_limit': 180000, 'output_limit': 128}
+    data.update(execution_task_id=identifier, task_budget_binding=deepcopy(binding),
+        execution={'version': 1, 'task_id': identifier, 'step': 209,
+                   'actions_issued': external_count, 'native_actions': native_count,
+                   'consultations': 2, 'status': 'running', 'pending': None})
+
+    async def run():
+        saver, store = InMemorySaver(), InMemoryStore()
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        config = {'configurable': {'thread_id': f'inherited-{external_count}-{native_count}'}, 'recursion_limit': 64}
+        first, events = await invoke(graph, data, config)
+        assert len(events) == len(seen) == 1
+        assert first.values['execution']['native_actions'] == native_count + 1
+        assert first.values['execution']['actions_issued'] == external_count
+        assert first.values['execution']['status'] == 'waiting_native'
+        assert first.values['execution']['step'] == 210  # No hidden MAX_STEPS=200.
+        assert first.values['execution']['consultations'] == 2
+        assert first.values['execution']['task_id'] == identifier
+        assert first.values['task_budget_binding'] == binding
+        ticket = first.tasks[0].interrupts[0]
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        final, events = await invoke(graph, Command(resume={ticket.id: {
+            **ticket.value, 'type': 'msty_native_resume'}}), config)
+        assert len(events) == 1 and len(seen) == 2
+        assert final.values['execution']['native_actions'] == native_count + 1
+        assert final.values['execution']['actions_issued'] == external_count
+        assert final.values['execution']['step'] == 211
+        assert final.values['execution']['consultations'] == 2
+        assert final.values['execution']['task_id'] == identifier
+        assert final.values['task_budget_binding'] == binding
+        assert final.values['execution']['status'] == 'answered'
+        assert not final.next
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('external_count,native_count', [(200, 0), (1, 199), (100, 100), (0, 200)])
+@pytest.mark.parametrize('tool', ['native_ls', 'external_read'])
+def test_action_201_is_blocked_for_combined_native_external_counters(monkeypatch, external_count, native_count, tool):
+    args = {'path': '/'} if tool == 'native_ls' else {'name': 'fixture'}
+    seen = scripted(monkeypatch, [answer('', [call(tool, args)])])
+    data = initial()
+    data['execution'] = {'actions_issued': external_count, 'native_actions': native_count,
+                         'consultations': 2, 'step': 209, 'task_id': 'retained-shared-task'}
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        final, events = await invoke(graph, data, {'configurable': {
+            'thread_id': f'cap-201-{external_count}-{native_count}-{tool}'}})
+        assert len(events) == len(seen) == 1
+        assert not events[0]['tool_calls']
+        assert final.values['execution']['status'] == 'blocked'
+        assert final.values['execution']['actions_issued'] == external_count
+        assert final.values['execution']['native_actions'] == native_count
+        assert final.values['execution']['consultations'] == 2
+        assert final.values['execution']['task_id'] == 'retained-shared-task'
+        assert final.values['execution']['step'] == 210
+        assert not any(message.type == 'tool' for message in final.values['messages'])
+        assert not final.next
+    asyncio.run(run())
+
+
+def test_200_checkpointed_native_actions_then_201_blocks_at_recursion_limit_64(monkeypatch):
+    assert msty_execution.MAX_ACTIONS == 200
+    seen = scripted(monkeypatch, [answer('', [call('native_ls', {'path': '/'}, f'action-{index}')])
+                                  for index in range(1, 202)])
+
+    async def run():
+        saver, store = InMemorySaver(), InMemoryStore()
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        config = {'configurable': {'thread_id': 'all-200-checkpointed-actions'}, 'recursion_limit': 64}
+        state, events = await invoke(graph, initial(), config)
+        task_id = state.values['execution']['task_id']
+        for count in range(1, 201):
+            assert len(events) == 1 and len(seen) == count
+            assert state.values['execution']['status'] == 'waiting_native'
+            assert state.values['execution']['native_actions'] == count
+            assert state.values['execution']['actions_issued'] == 0
+            assert state.values['execution']['step'] == count
+            assert state.values['execution']['task_id'] == task_id
+            assert sum(message.type == 'tool' for message in state.values['messages']) == count - 1
+            if count == 24:
+                graph = msty_native.build_graph(checkpointer=saver, store=store)
+            ticket = state.tasks[0].interrupts[0]
+            state, events = await invoke(graph, Command(resume={ticket.id: {
+                **ticket.value, 'type': 'msty_native_resume'}}), config)
+        assert len(events) == 1 and len(seen) == 201
+        assert state.values['execution']['status'] == 'blocked'
+        assert state.values['execution']['native_actions'] == 200
+        assert state.values['execution']['actions_issued'] == 0
+        assert state.values['execution']['step'] == 201
+        assert sum(message.type == 'tool' for message in state.values['messages']) == 200
+        assert not state.values['result']['tool_calls'] and not state.next
+        # The independent 512-message preparation bound admits this ordinary
+        # 200-action tool chain without changing token/context safety limits.
+        prepared = msty_models.prepare_messages('luna', seen[-1]['state']['messages'], seen[-1]['state']['tools'])
+        assert len(prepared) == 401 < msty_models.MAX_MESSAGES
     asyncio.run(run())

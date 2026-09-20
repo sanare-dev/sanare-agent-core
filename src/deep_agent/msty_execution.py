@@ -13,7 +13,9 @@ from langgraph.types import interrupt
 
 
 PROTOCOL = 'msty-local-tools-v1'
-MAX_ACTIONS = 24
+# Owner-approved task ceiling. Native and external counters remain cumulative;
+# the local gateway atomically accounts for shared parent/worker consumption.
+MAX_ACTIONS = 200
 PRICING_VERSION = '2026-09-20-brain-model-profiles-v1'
 
 

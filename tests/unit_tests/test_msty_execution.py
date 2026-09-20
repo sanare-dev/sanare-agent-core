@@ -178,10 +178,53 @@ def test_provider_length_never_creates_executable_interrupt(monkeypatch):
 def test_persisted_action_limit_cannot_be_reset_by_shortened_history(monkeypatch):
     model_sequence(monkeypatch, [operation()])
     state = initial()
-    state['execution'] = {'version': 1, 'task_id': 'already-issued', 'step': 24,
-                          'actions_issued': 24, 'status': 'running', 'pending': None}
+    state['execution'] = {'version': 1, 'task_id': 'already-issued', 'step': 200,
+                          'actions_issued': 200, 'status': 'running', 'pending': None}
     with pytest.raises(execution.ExecutionProtocolError, match='лимит'):
         asyncio.run(msty.respond(state))
+
+
+@pytest.mark.parametrize('issued', [24, 199])
+def test_action_25_and_action_200_keep_existing_checkpoint_counters(monkeypatch, issued):
+    seen = model_sequence(monkeypatch, [operation(), AIMessage(content='Observed final.')])
+
+    async def scenario():
+        state = initial()
+        state['execution'] = {'version': 1, 'task_id': 'retained-parent-task', 'step': issued + 7,
+                              'actions_issued': issued, 'consultations': 1, 'status': 'running', 'pending': None}
+        saver = InMemorySaver()
+        graph = msty.builder.compile(checkpointer=saver)
+        config = {'configurable': {'thread_id': 'raised-action-cap-' + str(issued)}, 'recursion_limit': 64}
+        first = await graph.ainvoke(state, config)
+        assert first['execution']['actions_issued'] == issued + 1
+        assert first['execution']['step'] == issued + 8
+        assert first['execution']['consultations'] == 1
+        assert first['execution']['task_id'] == 'retained-parent-task'
+        assert first['execution']['status'] == 'waiting_tools'
+        # A rebuilt graph and a shortened callback cannot reset consumed actions.
+        graph = msty.builder.compile(checkpointer=saver)
+        resume = resume_value(first)
+        resume['input']['messages'] = [state['messages'][0], *resume['input']['messages'][-2:]]
+        final = await graph.ainvoke(Command(resume={first['__interrupt__'][0].id: resume}), config)
+        assert final['execution']['actions_issued'] == issued + 1
+        assert final['execution']['step'] == issued + 9
+        assert final['execution']['consultations'] == 1
+        assert final['execution']['task_id'] == 'retained-parent-task'
+        assert final['execution']['status'] == 'answered'
+        assert len(seen) == 2 and not final.get('__interrupt__')
+    asyncio.run(scenario())
+
+
+def test_persisted_action_201_is_rejected_without_counter_mutation():
+    assert execution.MAX_ACTIONS == 200
+    state = initial()
+    state['execution'] = {'version': 1, 'task_id': 'retained-parent-task', 'step': 207,
+                          'actions_issued': 200, 'consultations': 2, 'status': 'running', 'pending': None}
+    original = deepcopy(state)
+    update = {'result': operation().model_dump(mode='json')}
+    with pytest.raises(execution.ExecutionProtocolError, match='лимит'):
+        execution.execution_after(state, update)
+    assert state == original
 
 
 def test_legacy_request_is_backwards_compatible(monkeypatch):
