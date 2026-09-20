@@ -22,6 +22,8 @@ INPUT_TOKEN_LIMIT = 180000
 CONTEXT_BUDGET_PROTOCOL = 'anthropic-count-v1'
 MODEL_BUDGET_PROTOCOL = 'msty-model-count-v1'
 COUNT_TIMEOUT_SECONDS = 20.0
+POLL_SUFFIX = 'msty_brain_job'
+MAX_IDENTICAL_POLLS = 3
 
 POLICY = """Ты — Sanare Brain. Отвечай на языке пользователя, кратко и по существу.
 Простой вопрос решай одним прямым ответом. Для действий используй переданные
@@ -38,6 +40,8 @@ POLICY = """Ты — Sanare Brain. Отвечай на языке пользов
 не делает его доступным. Не придумывай названия, параметры и результаты вызовов.
 Если сервис сообщает, что он отключён или недоступен, не обещай его запуск и не
 опрашивай бесконечно; сообщи точный блокер. Консультанту не приписывай локальных рук.
+Не используй браузер, fetch или другой посторонний инструмент только как таймер или
+способ ожидания; если асинхронное задание не меняет состояние, сообщи это вместо ожидания.
 Для действий используй установленным способом переданные инструменты Msty, проверь
 фактический результат; local-only данные нельзя отправлять облачным консультантам.
 Для существенной проектной работы используй доступную память. После исправления
@@ -266,6 +270,83 @@ def consult_name(name: str) -> bool:
     return isinstance(name, str) and name.endswith('msty_brain_consult')
 
 
+def poll_name(name: str) -> bool:
+    return isinstance(name, str) and name.endswith(POLL_SUFFIX)
+
+
+def canonical_args(args) -> str:
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    except (TypeError, ValueError):
+        return repr(args)
+
+
+def _tool_call_parts(call: dict) -> tuple[str, object]:
+    function = call.get('function') if isinstance(call, dict) else None
+    if isinstance(function, dict):
+        return function.get('name', ''), function.get('arguments', {})
+    return (call.get('name', ''), call.get('args', {})) if isinstance(call, dict) else ('', {})
+
+
+def _matching_poll_call(call: dict, name: str, args) -> bool:
+    call_name, call_args = _tool_call_parts(call)
+    return call_name == name and canonical_args(call_args) == canonical_args(args)
+
+
+def _is_ai_message(message: dict) -> bool:
+    return message.get('role', message.get('type')) in ('assistant', 'ai')
+
+
+def poll_count(state: State, name: str, args) -> int:
+    count = 0
+    for message in reversed(state.get('messages') or []):
+        if message.get('role', message.get('type')) in ('user', 'human'):
+            break
+        if _is_ai_message(message):
+            count += sum(_matching_poll_call(call, name, args) for call in message.get('tool_calls') or [])
+    return count
+
+
+def _latest_poll_state(state: State, name: str, args) -> str | None:
+    matching_ids = set()
+    latest_state = None
+    for message in state.get('messages') or []:
+        if message.get('role', message.get('type')) in ('user', 'human'):
+            matching_ids.clear()
+            latest_state = None
+            continue
+        for call in message.get('tool_calls') or [] if _is_ai_message(message) else []:
+            if _matching_poll_call(call, name, args) and call.get('id'):
+                matching_ids.add(call['id'])
+        if message.get('role', message.get('type')) != 'tool' or message.get('tool_call_id') not in matching_ids:
+            continue
+        content = message.get('content')
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except (TypeError, ValueError):
+                continue
+        if isinstance(content, dict) and isinstance(content.get('state'), str):
+            latest_state = content['state']
+    return latest_state
+
+
+def _latest_poll_candidate(state: State):
+    for message in reversed(state.get('messages') or []):
+        if message.get('role', message.get('type')) in ('user', 'human'):
+            break
+        for call in reversed(message.get('tool_calls') or [] if _is_ai_message(message) else []):
+            name, args = _tool_call_parts(call)
+            if poll_name(name):
+                return name, args
+    return None
+
+
 def consultation_count(state: State) -> int:
     if msty_execution.enabled(state):
         count = (state.get('execution') or {}).get('consultations', 0)
@@ -373,6 +454,10 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                   policy_for_tools(tools) + '\n\n' + msty_memory.system_context())
         if consultations >= 2:
             policy += '\nЛимит консультаций исчерпан. Продолжай своими инструментами; не вызывай консультанта снова.'
+        poll_candidate = _latest_poll_candidate(state)
+        if poll_candidate and poll_count(state, *poll_candidate) >= MAX_IDENTICAL_POLLS:
+            policy += ('\nНе повторяй этот идентичный опрос msty_brain_job; сообщи job_id и последнее '
+                       'наблюдавшееся состояние и спроси, диагностировать ли зависание.')
         if any(msty_task._named(name, msty_task.PLAN_SUFFIX) for name in tool_names(tools)):
             policy += ('\nДля поручения с изменениями проверяемых локальных артефактов используй msty_task_plan '
                 'с требованиями и конкретными read-only проверками, затем реальные рабочие инструменты. '
@@ -487,6 +572,18 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     if consultations + sum(consult_name(c['name']) for c in result.tool_calls) > 2:
         result = result.model_copy(update={'content': 'Лимит двух консультаций этого хода исчерпан; '
             'новые вызовы не выполнены. Нужна работа основного Brain с имеющимися доказательствами.',
+            'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {}})
+    stalled_poll = next((call for call in result.tool_calls
+                         if poll_name(call.get('name', '')) and
+                         poll_count(state, call['name'], call.get('args', {})) >= MAX_IDENTICAL_POLLS), None)
+    if stalled_poll is not None:
+        poll_args = stalled_poll.get('args', {})
+        job_id = poll_args.get('job_id') if isinstance(poll_args, dict) else None
+        latest_state = _latest_poll_state(state, stalled_poll['name'], poll_args)
+        job_text = job_id if isinstance(job_id, str) else 'не указан'
+        state_text = latest_state if latest_state is not None else 'не наблюдалось'
+        result = result.model_copy(update={'content': f'Опрос задания остановлен: job_id={job_text}, '
+            f'последнее состояние={state_text}. Диагностировать зависание?',
             'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {}})
     result = msty_task.gate_final(state, result, tools, tools_disabled)
     if not valid_tool_calls(result, tools):

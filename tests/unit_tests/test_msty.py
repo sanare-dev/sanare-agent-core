@@ -1,5 +1,6 @@
 import asyncio
 from copy import deepcopy
+import json
 import threading
 from types import SimpleNamespace
 
@@ -115,6 +116,78 @@ def test_valid_tool_call_is_preserved_for_real_msty_execution(monkeypatch):
                                                    'parameters': {'type': 'object'}}}]}))
     assert result['result']['tool_calls'][0]['name'] == 'read_file'
     assert result['result']['tool_calls'][0]['args'] == {'path': 'README.md'}
+
+
+def _brain_poll_state(polls, job_id='job-1'):
+    messages = [{'role': 'user', 'content': 'wait'}]
+    for index in range(polls):
+        call_id = f'poll-{index}'
+        messages.extend([
+            {'role': 'assistant', 'content': '', 'tool_calls': [{
+                'id': call_id, 'type': 'function', 'function': {
+                    'name': 'msty_brain_job', 'arguments': json.dumps({'job_id': job_id})}}]},
+            {'role': 'tool', 'tool_call_id': call_id, 'content': json.dumps({'state': 'running'})},
+        ])
+    return messages
+
+
+@pytest.mark.parametrize('polls', [0, 1, 2])
+def test_brain_job_first_three_identical_polls_are_preserved(monkeypatch, polls):
+    class Model:
+        def __init__(self, **kw):
+            pass
+        def bind_tools(self, *args, **kw):
+            return self
+        async def ainvoke(self, messages):
+            return AIMessage(content='', tool_calls=[{
+                'id': 'next-poll', 'name': 'msty_brain_job', 'args': {'job_id': 'job-1'}}])
+    monkeypatch.setattr(msty, 'ChatAnthropic', Model)
+    result = asyncio.run(msty.respond({'messages': _brain_poll_state(polls), 'tools': [
+        {'type': 'function', 'function': {'name': 'msty_brain_job', 'parameters': {
+            'type': 'object', 'properties': {'job_id': {'type': 'string'}}, 'required': ['job_id']}}}]}))
+    assert result['result']['tool_calls'][0]['name'] == 'msty_brain_job'
+
+
+def test_fourth_identical_brain_job_poll_reports_stalled_job(monkeypatch):
+    class Model:
+        def __init__(self, **kw):
+            pass
+        def bind_tools(self, *args, **kw):
+            return self
+        async def ainvoke(self, messages):
+            return AIMessage(content='', tool_calls=[{
+                'id': 'next-poll', 'name': 'msty_brain_job', 'args': {'job_id': 'job-1'}}])
+    monkeypatch.setattr(msty, 'ChatAnthropic', Model)
+    result = asyncio.run(msty.respond({'messages': _brain_poll_state(3), 'tools': [
+        {'type': 'function', 'function': {'name': 'msty_brain_job', 'parameters': {
+            'type': 'object', 'properties': {'job_id': {'type': 'string'}}, 'required': ['job_id']}}}]}))
+    assert result['result']['tool_calls'] == []
+    assert 'job-1' in result['result']['content']
+    assert 'running' in result['result']['content']
+
+
+def test_brain_job_poll_counts_are_independent_per_job(monkeypatch):
+    state = {'messages': _brain_poll_state(3, 'job-1') + _brain_poll_state(1, 'job-2')[1:]}
+    assert msty.poll_count(state, 'msty_brain_job', {'job_id': 'job-1'}) == 3
+    assert msty.poll_count(state, 'msty_brain_job', {'job_id': 'job-2'}) == 1
+
+
+def test_unrelated_browser_tool_is_not_blocked_as_a_poll(monkeypatch):
+    class Model:
+        def __init__(self, **kw):
+            pass
+        def bind_tools(self, *args, **kw):
+            return self
+        async def ainvoke(self, messages):
+            return AIMessage(content='', tool_calls=[{
+                'id': 'browser', 'name': 'browser_wait_for', 'args': {'timeout': 1}}])
+    monkeypatch.setattr(msty, 'ChatAnthropic', Model)
+    result = asyncio.run(msty.respond({'messages': _brain_poll_state(3), 'tools': [
+        {'type': 'function', 'function': {'name': 'msty_brain_job', 'parameters': {
+            'type': 'object', 'properties': {'job_id': {'type': 'string'}}}}},
+        {'type': 'function', 'function': {'name': 'browser_wait_for', 'parameters': {
+            'type': 'object', 'properties': {'timeout': {'type': 'integer'}}}}}]}))
+    assert result['result']['tool_calls'][0]['name'] == 'browser_wait_for'
 
 def test_client_tool_roundtrip(monkeypatch):
     seen = {}
