@@ -1,6 +1,54 @@
 # Deep Agents Template
 
-## Native cross-thread startup memory — 20 September 2026
+## Native lead harness — current implementation, 20 September 2026
+
+New lead tasks use internal graph `msty_native`: native LangChain `create_agent`,
+ToolNode, TodoListMiddleware and Deep Agents Filesystem/Memory/Skills middleware.
+Previous graph `msty` remains for old checkpoints, text-only analysts and bounded
+workers. This is compatibility, not a second visible Brain. The gateway chooses
+by its saved execution version, never by matching message text.
+
+Actual approved Store contents are read through StoreBackend/CompositeBackend.
+`/memory/PROJECT.md` is shared across chats; `/skills/` supplies three progressive
+descriptors, with bodies read on demand. Memory/skills are model-read-only.
+Virtual scratch uses StateBackend, not the Mac disk. Real file/browser/build/
+publication actions still require existing local MCP tools and grants. Reviewed
+operator Store updates affect new chats without replacing a Python constant.
+Missing/unavailable Store has an explicit packaged fallback; corrupt approval
+fails closed. Canonical journals/Engram remain the sources, not this projection.
+
+Every model generation retains a separate reservation. An internal tool batch
+is checkpointed before tools execute; `msty_native_continue` resumes automatically
+after shared-action reservation and stop/budget validation. Native/local actions share24 actions and the existing
+$1 estimated task cap. External callbacks retain exact batch/ID/schema/task checks.
+Internal narration is buffered; no internal tool call is sent to Msty for execution.
+Native tools have no hidden model calls. Only task-relevant skills/tools are needed;
+an ordinary answer does not require planning, a council or a consultant.
+
+The stack is composed with `create_agent`: Deep Agents0.4.11 `create_deep_agent`
+unconditionally installs summary/subagent model calls outside the local accounting
+gate. Offline probes demonstrated swallowed interrupts and summary replay. Native
+summarization and native `task` remain disabled pending separate metered integration;
+existing explicit compaction and bounded local workers remain available. This is
+not activation of every Deep Agents feature or proof of autonomous weight learning.
+
+Shared knowledge is distinct from chat history. Msty2.9.11 normal chat requests do
+not automatically pass stable split IDs. Tool chains have durable identity, while
+independent turns without explicit identity still start separate graph threads.
+No shared static ID, text-based linking, secret indexing or permission expansion.
+Dependencies are pinned and CI uses frozen uv.lock. Deployment and UI acceptance
+must be checked separately in the owner's unified change journal.
+
+Sources: [memory](https://docs.langchain.com/oss/python/deepagents/memory),
+[skills](https://docs.langchain.com/oss/python/deepagents/skills),
+[middleware](https://docs.langchain.com/oss/python/langchain/middleware/built-in).
+
+## Historical startup projection — superseded for new lead tasks
+
+Correction: the old path below verified a Store copy but supplied the packaged
+Python constant to the model. It was not dynamic Store-backed memory. The new
+native path above reads actual approved Store content. Old checkpoints preserve
+their existing behavior for compatibility; previous evidence is not rewritten.
 
 `msty_memory.load_context` uses the Agent Server's native `Runtime.store`, shared
 across chats in this single-owner private deployment. One version/hash-pinned

@@ -3,7 +3,8 @@
   "dependencies": ["."],
   "graphs": {
     "agent": "deep_agent.graph:get_agent",
-    "msty": "deep_agent.msty:graph"
+    "msty": "deep_agent.msty:graph",
+    "msty_native": "deep_agent.msty_native:graph"
   },
   "env": ".env",
   "image_distro": "wolfi"

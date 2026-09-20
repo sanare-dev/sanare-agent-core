@@ -10,5 +10,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install . pytest
-      - run: python tools/verify_release.py
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.26'
+      - run: uv sync --frozen
+      - run: uv run --frozen python tools/verify_release.py

@@ -347,7 +347,8 @@ def rejected_context_budget(explanation: str, input_tokens: int | None = None):
         'limit': INPUT_TOKEN_LIMIT})
 
 
-async def _respond_step(state: State):
+async def _respond_step(state: State, *, native_system_prompt: str | None = None,
+                        native_result_filter=None):
     tools = state.get("tools") or []
     try:
         incremental = msty_stream.enabled(state)
@@ -368,6 +369,7 @@ async def _respond_step(state: State):
                  if profile == 'sonnet' and not msty_models.msty_gateway.enabled()
                  else msty_models.make_model(profile, output_limit))
         policy = (ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else
+                  native_system_prompt if native_system_prompt is not None else
                   policy_for_tools(tools) + '\n\n' + msty_memory.system_context())
         if consultations >= 2:
             policy += '\nЛимит консультаций исчерпан. Продолжай своими инструментами; не вызывай консультанта снова.'
@@ -491,6 +493,9 @@ async def _respond_step(state: State):
         result = result.model_copy(update={'content': 'Схема проверки плана не подтверждена; действие не выдано.',
             'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
             'response_metadata': {**result.response_metadata, 'msty_blocked': True}})
+    if native_result_filter is not None:
+        # Trusted Python integration only; never selected by request/state data.
+        result = native_result_filter(result)
     # Explicit None clears any check left in a persisted LangGraph thread;
     # an earlier accepted count must never attest a different request.
     if stream:

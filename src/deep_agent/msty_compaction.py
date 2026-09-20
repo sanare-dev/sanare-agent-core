@@ -2,8 +2,10 @@
 
 Uses LangGraph checkpoint/interrupt/Command (MIT, langchain-ai/langgraph).
 https://docs.langchain.com/oss/python/langgraph/interrupts
-Stock SummarizationMiddleware would add a hidden model invocation and remove
-messages; we instead keep canonical messages and publish one paid stage/run.
+Stock Deep Agents SummarizationMiddleware also preserves canonical messages.
+Its helper call is not yet integrated with the local per-generation budget
+admission protocol; this metered compatibility path stays until that migration
+passes pause/replay and usage-accounting acceptance.
 Only complete old tool bundles are projected out. User/system text, recent and
 pending tool pairs stay intact. A summary is untrusted memory, never evidence.
 Sources remain retrievable from checkpoint messages through source_messages().
