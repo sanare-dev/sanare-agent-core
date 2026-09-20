@@ -19,11 +19,17 @@ conservative admission ESTIMATE, not a mathematical upper-bound proof, exact
 provider count, or billable usage. No unknown-model tokenizer fallback is used.
 DeepSeek has no verified installed tokenizer: four units per UTF-8 wire byte,
 plus 4096 fixed, 1024/message and 2048/tool framing allowances are charged.
-Only bounded, ordinary text/function messages are supported by that admission
-method. Images are preserved for ordinary small requests; when the caller needs
-a large-request preflight they are rejected because no verified multimodal
-counter is installed. No image URL is fetched, no chars/4 heuristic or guessed
-image dimensions are used. The caller must enforce its existing input limit.
+Luna image admission adds the official server-enforced per-image patch envelope,
+not a guessed size conversion: low<=256 patches, high<=2500, auto/original<=30000;
+multiply by1.2, round up, add one rounding token and128 framing allowance/image.
+https://developers.openai.com/api/docs/guides/images-vision (verified 2026-09-20).
+Only the image component is a documented upper bound; combined text/schema
+admission remains the above estimate, NOT an exact count or provider bill.
+Image bytes/URLs are replaced only in the local counting copy, never generation.
+No download, model change, Responses migration, extra API call or chars/4 occurs.
+The exact /responses/input_tokens endpoint counts Responses payloads, not our
+different Chat Completions wire format. DeepSeek images and Chat Completions
+tool-role image blocks fail closed. The caller enforces the existing input cap.
 """
 from __future__ import annotations
 
@@ -68,6 +74,9 @@ COUNT_METHODS = MappingProxyType({
     'sonnet': 'anthropic-exact-v1',
 })
 COUNT_TIMEOUT_SECONDS = 20.0
+LUNA_IMAGE_PATCH_LIMITS = MappingProxyType({'low': 256, 'high': 2500, 'original': 30000, 'auto': 30000})
+LUNA_IMAGE_COUNT_METHOD = 'tiktoken-image-envelope-v1'
+MAX_ADMISSION_IMAGES = 32
 MAX_MESSAGES = 512
 MAX_TOOLS = 128
 
@@ -282,9 +291,8 @@ async def count_input(profile: str, model, messages, tools: list[dict]) -> int:
             raise ModelAdapterError('Точный подсчёт контекста не завершился; запрос не допущен.') from None
     prepared = prepare_messages(profile, messages, tools)
     wire = convert_to_openai_messages(prepared, pass_through_unknown_blocks=False)
-    if any(isinstance(m.get('content'), list) and any(b.get('type') == 'image_url' for b in m['content']) for m in wire):
-        raise ModelAdapterError('Большой запрос с изображениями требует проверенного мультимодального подсчёта; запрос не допущен.')
-    payload = _canonical({'messages': wire, 'tools': schemas})
+    counting_wire, image_envelope = _image_counting_projection(profile, wire)
+    payload = _canonical({'messages': counting_wire, 'tools': schemas})
     if profile == 'luna':
         def admission():
             # Official pinned tiktoken maps gpt-5* to o200k_base. Unknown mapping
@@ -293,7 +301,7 @@ async def count_input(profile: str, model, messages, tools: list[dict]) -> int:
             # content is tokenized locally and never sent to a counting model.
             encoding = tiktoken.encoding_for_model(PROFILES['luna'].model)
             tokens = len(encoding.encode(payload, disallowed_special=()))
-            return (tokens * 5 + 3) // 4 + 4096 + 128 * len(wire) + 512 * len(schemas)
+            return (tokens * 5 + 3) // 4 + 4096 + 128 * len(wire) + 512 * len(schemas) + image_envelope
         try:
             async with asyncio.timeout(COUNT_TIMEOUT_SECONDS):
                 return await asyncio.to_thread(admission)
@@ -301,6 +309,56 @@ async def count_input(profile: str, model, messages, tools: list[dict]) -> int:
             raise ModelAdapterError('Локальный подсчёт контекста не завершился; запрос не допущен.') from None
     payload_bytes = len(payload.encode('utf-8'))
     return 4 * payload_bytes + 4096 + 1024 * len(wire) + 2048 * len(schemas)
+
+
+def _image_counting_projection(profile, wire):
+    """Return a counting-only copy and a per-image envelope, never fetch images.
+
+    Server limits reject oversized patch inputs; URLs may change but every
+    accepted image still obeys the same cap. Unsupported forms fail closed.
+    """
+    projected, envelope, images = [deepcopy(message) for message in wire], 0, 0
+    for message in projected:
+        content = message.get('content')
+        if not isinstance(content, list):
+            continue
+        for index, block in enumerate(content):
+            if not isinstance(block, dict) or block.get('type') != 'image_url':
+                continue
+            if profile != 'luna':
+                raise ModelAdapterError('Запрос с изображениями не допущен: для этого профиля нет проверенного учёта.')
+            if message.get('role') != 'user':
+                raise ModelAdapterError('Изображение в результате инструмента не поддержано текущим Chat Completions '
+                                        'маршрутом. Используйте текстовый результат или пользовательское вложение.')
+            spec = block.get('image_url')
+            if (set(block) != {'type', 'image_url'} or not isinstance(spec, dict) or
+                    set(spec) - {'url', 'detail'} or not isinstance(spec.get('url'), str) or not spec['url']):
+                raise ModelAdapterError('Некорректный формат изображения; бюджетный допуск не выполнен.')
+            detail = spec.get('detail', 'auto')
+            if not isinstance(detail, str) or detail not in LUNA_IMAGE_PATCH_LIMITS:
+                raise ModelAdapterError('Неподдерживаемый уровень детализации изображения; генерация не запущена.')
+            url = spec['url']
+            if not (url.startswith(('https://', 'http://')) or
+                    re.match(r'^data:image/(?:png|jpeg|webp|gif);base64,', url)):
+                raise ModelAdapterError('Неподдерживаемый адрес или тип изображения; генерация не запущена.')
+            images += 1
+            if images > MAX_ADMISSION_IMAGES:
+                raise ModelAdapterError('Для одного запроса разрешено не более 32 изображений; генерация не запущена.')
+            patches = LUNA_IMAGE_PATCH_LIMITS[detail]
+            # ceil(patches * 1.2) + documented +/-1 rounding + framing safety.
+            envelope += (patches * 6 + 4) // 5 + 1 + 128
+            content[index] = {'type': 'image_url', 'image_url': {
+                **spec, 'url': '[image content counted separately]'}}
+    return projected, envelope
+
+
+def count_method(profile, messages):
+    if profile == 'luna':
+        for message in messages:
+            content = message.content if isinstance(message, BaseMessage) else message.get('content')
+            if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'image_url' for b in content):
+                return LUNA_IMAGE_COUNT_METHOD
+    return COUNT_METHODS[profile]
 
 
 def checked_usage(profile: str, result: AIMessage):

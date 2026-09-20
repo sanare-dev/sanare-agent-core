@@ -152,13 +152,18 @@ def test_mixed_human_text_and_tool_result_not_reordered():
     {'type': 'image_url', 'image_url': {'url': 'https://example.invalid/synthetic.png', 'detail': 'low'}},
     {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'AAA='}},
 ])
-def test_small_images_preserved_but_large_counter_fails_closed(profile, block):
+def test_images_preserved_with_luna_envelope_other_profiles_fail_closed(profile, block):
     history = [HumanMessage(content=[{'type': 'text', 'text': 'Look'}, block])]
     result = adapter.prepare_messages(profile, history, [])
     assert result[0].content[0] == {'type': 'text', 'text': 'Look'}
     assert result[0].content[1]['type'] == 'image_url'
-    with pytest.raises(adapter.ModelAdapterError, match='изображениями'):
-        asyncio.run(adapter.count_input(profile, object(), result, []))
+    if profile == 'luna':
+        original = deepcopy(result)
+        assert asyncio.run(adapter.count_input(profile, object(), result, [])) > 4000
+        assert result == original
+    else:
+        with pytest.raises(adapter.ModelAdapterError, match='изображениями'):
+            asyncio.run(adapter.count_input(profile, object(), result, []))
 
 
 def test_sonnet_history_is_preserved_copy():

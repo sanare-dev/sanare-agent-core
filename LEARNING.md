@@ -39,35 +39,57 @@ those IDs use their complete supplied conversation as state; the bridge never
 guesses identity from text. Cross-project retrieval remains the existing Msty
 Knowledge Stack / project MCP responsibility.
 
-Minimum routing evaluations:
+## Current routing and evidence (2026-09-20)
 
-- A one-word or simple factual request returns directly without subagents.
-- A complex research request may use one researcher.
-- A high-risk or explicitly requested review may use one critic.
-- A council is used for explicit requests or consequential unresolved alternatives;
-  the owner authorized adaptive delegation on 2026-09-19. Explain the reason first.
-- A claimed external action must be backed by a real tool result.
+The main `msty` graph uses Luna; the separate demonstration `agent` graph is not
+its supervisor. The retired `msty_brain_delegate`/job/council path MUST NOT be
+restored from old instructions. `msty_brain_consult` is the optional bounded
+DeepSeek Flash text analyst: maximum two consultations in the current native
+task chain, no filesystem/browser/subagents of its own. Msty owns real MCP actions.
+The local architect remains a separate, explicitly selected route.
 
-## Adaptive supervisor (2026-09-19)
+Minimum acceptance scenarios:
 
-Use the existing Msty Admin MCP tools `msty_brain_delegate`, `msty_brain_job`,
-and `msty_brain_lessons`. No additional framework or subscription is introduced.
-This follows the tool-calling supervisor pattern recommended by
-https://github.com/langchain-ai/langgraph-supervisor-py (MIT), not the older
-mandatory multi-agent loop. One lead retains actual Msty execution tools.
+- A simple one-word request returns directly, with zero tools or consultations.
+- A multi-step synthetic task reads actual fixtures, creates an artifact and
+  reads it back; a printed plan or fabricated tool narrative fails acceptance.
+- A justified consultation preserves restrictions and receives only necessary
+  non-secret evidence; its advice alone never proves execution.
+- A blocked tool, budget exhaustion or a failed check cannot become success.
+- Native Msty delivery is checked separately from a successful API request.
+- Long-context compaction must preserve system/user instructions and unresolved
+  tool pairs, record its own usage, and never substitute a summary for evidence.
 
-Delegation is a consultation: worker selects DeepSeek Flash/Luna/GLM/Gemini/Qwen;
-parallel gives DeepSeek implementation and Luna architecture/risk analysis;
-review selects Luna or DeepSeek from a different family than the declared author;
-council invokes the installed council via the existing budgeted gateway.
-Two live delegation jobs maximum, six per task ID, no blind automatic retries.
-Local-only is restricted to Qwen single-worker; no cloud fallback is requested.
-Do not rename tasks to bypass limits. Job completion is not business completion.
-Arbitrary external bots are not registered or claimed operational.
+No automatic council, expensive fallback, mandatory prompt rewriter, arbitrary
+external bots or self-publishing agent is part of this route. Task-chain limits
+do not by themselves identify every future user turn as one business project.
 
 For substantive project work retrieve lessons. After a verified correction,
-record an evidence-linked candidate in the existing primary change journal.
+record an evidence-linked candidate using `msty_brain_lessons` in the existing
+primary change journal. New receipt evidence must have an exact `project_slug`
+(or exact `project`) match, a structured non-empty `verification` field, and an
+intact recorded SHA-256. Failed checks are valid evidence for a proposed lesson;
+they are NOT relabeled passed. Retrieval rechecks the source and quarantines
+changed, missing or legacy-unbound evidence without erasing it.
 Candidates are reference material, not executable policy or permissions.
 Before reuse check current applicability; before changing code add a regression
 and independent review where justified. No weight training or automatic promotion
-is claimed. Local MCP outcomes, not model narratives, are the evidence.
+is claimed. Local MCP outcomes, not model narratives, are the evidence. Structural
+receipt checks and model tool observations do not establish semantic truth.
+
+## Promotion gate
+
+Use the existing release process, not a second self-update service:
+
+1. Capture the failure as a redacted, project-bound primary receipt and candidate.
+2. Add a reproducing offline regression; keep the negative case as well as the fix.
+3. Run `tools/verify_release.py` and the affected gateway/MCP regressions.
+4. Run only justified bounded synthetic live acceptance, within its explicit cap.
+   Measure task result, tool correctness, latency and token-based cost separately.
+5. Deploy the exact reviewed commit only after CI succeeds; record revision,
+   rollback target and native Msty readback in the primary journal.
+
+LangSmith tracing is already used; Engine, paid judges, Gateway and cloud Sandboxes
+are separate optional products, not prerequisites for this loop. Engine analysis
+requires its own approved budget. Synthetic protocol dataset delivery alone is
+not a quality experiment. A lesson is not an instruction or new authorization.

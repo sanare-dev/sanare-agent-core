@@ -14,6 +14,7 @@ from langgraph.types import interrupt
 
 PROTOCOL = 'msty-local-tools-v1'
 MAX_ACTIONS = 24
+PRICING_VERSION = '2026-09-20-brain-model-profiles-v1'
 
 
 class ExecutionProtocolError(ValueError):
@@ -34,6 +35,34 @@ def enabled(state):
     if protocol not in (None, PROTOCOL):
         raise ExecutionProtocolError('Неподдерживаемая версия продолжения Msty.')
     return protocol == PROTOCOL
+
+
+def task_id(state):
+    previous = (state.get('execution') or {}).get('task_id')
+    supplied = state.get('execution_task_id')
+    if supplied is not None:
+        try:
+            if not isinstance(supplied, str) or str(uuid.UUID(supplied)) != supplied:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise ExecutionProtocolError('Неподтверждённый идентификатор задачи.') from None
+        if previous is not None and previous != supplied:
+            raise ExecutionProtocolError('Идентификатор задачи нельзя менять при продолжении.')
+    return previous or supplied or str(uuid.uuid4())
+
+
+def validate_binding(state, profile, output_limit):
+    """Assert the gateway's pricing manifest; never select a model from it."""
+    task_id(state)
+    binding = state.get('task_budget_binding')
+    if state.get('execution_task_id') is None and binding is None:
+        return
+    expected = {'version': 1, 'pricing_version': PRICING_VERSION,
+                'profile': profile, 'input_limit': 180000, 'output_limit': output_limit}
+    if (state.get('execution_task_id') is None or profile not in ('luna', 'deepseek') or
+            not isinstance(binding, dict) or binding != expected or
+            any(type(binding.get(k)) is not int for k in ('version', 'input_limit', 'output_limit'))):
+        raise ExecutionProtocolError('Модель и лимиты не совпадают с бюджетом задачи; генерация не запущена.')
 
 
 def execution_after(state, update):
@@ -64,12 +93,14 @@ def execution_after(state, update):
                    'calls': [{'id': c['id'], 'name': c['name'], 'args': deepcopy(c['args'])}
                              for c in calls]}
         issued += len(calls)
-    return {'version': 1, 'task_id': previous.get('task_id') or str(uuid.uuid4()),
+    return {'version': 1, 'task_id': task_id(state),
             'status': status, 'step': step + 1, 'actions_issued': issued,
             'pending': pending}
 
 
 def next_node(state):
+    if enabled(state) and (state.get('execution') or {}).get('status') == 'waiting_compaction':
+        return 'wait_compaction'
     if enabled(state) and (state.get('execution') or {}).get('status') == 'waiting_tools':
         return 'wait_external'
     return '__end__'
@@ -99,7 +130,8 @@ def validate_resume(state, resume):
         raise ExecutionProtocolError('Продолжение относится к другому шагу Msty.')
     incoming = resume.get('input')
     permitted = {'messages', 'tools', 'tool_choice', 'max_tokens', 'result',
-                 'context_budget', 'context_budget_check', 'execution_protocol', 'brain_task_role'}
+                 'context_budget', 'context_budget_check', 'execution_protocol', 'brain_task_role',
+                 'execution_task_id', 'task_budget_binding', 'compaction_protocol'}
     if not isinstance(incoming, dict) or set(incoming) - permitted:
         raise ExecutionProtocolError('Некорректные поля продолжения Msty.')
     if incoming.get('execution_protocol') != PROTOCOL or incoming.get('result') != {}:
@@ -108,12 +140,17 @@ def validate_resume(state, resume):
         raise ExecutionProtocolError('Нельзя повторно использовать проверку старого контекста.')
     if incoming.get('brain_task_role', 'lead') != state.get('brain_task_role', 'lead'):
         raise ExecutionProtocolError('Роль Brain нельзя менять внутри текущего шага.')
+    for immutable in ('execution_task_id', 'task_budget_binding', 'compaction_protocol'):
+        if incoming.get(immutable) != state.get(immutable):
+            raise ExecutionProtocolError('Протокол и бюджет задачи нельзя менять при продолжении.')
     if canonical_digest(incoming.get('tools') or []) != canonical_digest(state.get('tools') or []):
         raise ExecutionProtocolError('Набор инструментов изменён внутри ожидающего шага.')
     maximum = incoming.get('max_tokens')
     previous_maximum = state.get('max_tokens') or 4096
     if type(maximum) is not int or not 1 <= maximum <= min(previous_maximum, 8192):
         raise ExecutionProtocolError('Лимит ответа нельзя увеличить при продолжении.')
+    if state.get('task_budget_binding') is not None and maximum != previous_maximum:
+        raise ExecutionProtocolError('Привязанный лимит ответа должен сохраняться при продолжении.')
     mapping = resume.get('tool_id_map')
     if not isinstance(mapping, list) or len(mapping) != len(pending['calls']):
         raise ExecutionProtocolError('Неполная привязка результатов Msty.')
@@ -177,8 +214,11 @@ def validate_resume(state, resume):
     messages = [*deepcopy(state['messages']),
                 {'role': 'assistant', 'content': content, 'tool_calls': canonical_calls},
                 *new_results]
+    from . import msty_task
+    contract = msty_task.observe(state, client_calls, new_results)
     return {**deepcopy(incoming), 'messages': messages,
-            'execution': {**execution, 'status': 'running', 'pending': None}}
+            'execution': {**execution, 'status': 'running', 'pending': None},
+            'task_contract': contract}
 
 
 def wait_external(state):

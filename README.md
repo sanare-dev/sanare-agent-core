@@ -1,10 +1,61 @@
 # Deep Agents Template
 
+## Bounded task criteria and metered compaction — 20 September 2026
+
+This source increment requires the matching gateway and native Admin MCP release.
+Offline tests are not evidence of deployment or native UI acceptance. The gateway
+supplies an immutable task UUID and pricing/profile/output manifest; the cloud
+asserts it against its server-selected model and counts **every** bound input.
+Luna user image attachments use the bounded image admission described below;
+unsupported image forms still fail before generation. Combined admission remains
+180000 tokens, and no public/local-network access is added.
+
+When real `msty_task_plan` / `msty_task_verify` tools are attached, an actual-issued
+plan and its typed MCP observation establish bounded, **model-proposed** artifact
+criteria. Before a plain final with pending checks, the code emits the existing
+native verification tool call without an extra model generation. Explicit current
+user stop/wait/plan-only/explain-only phrases, disabled tools and the 24-action cap
+veto it. The phrase veto is conservative, not a complete intent classifier.
+Tool-output prose cannot trigger this veto. A passed receipt with matched plan ID,
+source hashes and every declared check allows `verified_against_observations`;
+this is neither signed execution proof nor verified business-task delivery.
+Further actions invalidate earlier verification. Unknown/mismatching observations
+remain blocked; no verdict is inferred from an assistant's prose.
+
+With `compaction_protocol=msty-compaction-v1`, a lead context reaching 120000
+admission tokens may summarize one contiguous range of old complete text-only tool bundles
+(16–400 KB), keeping the newest two bundles, pending pairs and **all** user/system
+messages verbatim. Up to eight hash-bound summaries are persisted in the same
+checkpoint. The canonical source messages are never replaced; checkpoint state
+and `msty_compaction.source_messages` provide source readback. This does not add a
+model-visible retrieval tool. The model-visible summary is explicitly unverified
+historical memory and never completion evidence. Source-reference/size validation
+cannot prove semantic completeness of a lossy summary.
+
+Each summary is one separately published, metered generation (`msty_stage=compaction`)
+followed by a native `msty_compaction` interrupt. The gateway settles that run and
+resumes once with no new input for the ordinary generation, under the same task
+budget. At most one summary plus one normal generation occur in a client HTTP leg;
+each remains a separate cloud run and accounting record. Summary output is capped
+at `min(2048, original_output_limit)`. Malformed/partial summaries retain usage,
+preserve originals and block without a repair generation. If the projection is
+still over 180000, it blocks instead of silently cutting owner instructions.
+
+Compaction is disabled for analysts and legacy requests. It does not solve the
+2 MB incoming transport bound, create stable identity across unidentified new
+user turns, or make long chats unlimited. Old pending pre-manifest callbacks need
+a fresh user turn under the new gateway; they are not silently upgraded.
+Quick answers remain one generation with no plan or compaction pass. Native
+LangGraph MIT checkpoint/interrupt is reused; stock summary middleware is not
+used because its hidden model calls/history replacement violate this boundary.
+See `test_msty_compaction.py` and `test_msty_task.py` for offline acceptance.
+
 ## Economical Msty Brain — 20 September 2026
 
 The `msty` graph now defaults to server profile `luna` (`gpt-5.6-luna`,
 reasoning `none`). There is no compulsory prompt rewriter, council or hidden
-second model. One graph invocation still performs one billed generation.
+second model. Each cloud run performs at most one billed generation; the explicit
+compaction protocol above may require two separately counted runs in one client leg.
 `MSTY_MODEL_PROFILE=sonnet` is an explicit operator rollback, not an automatic
 expensive fallback. The old `MSTY_MODEL` variable is not a free-form selector.
 
@@ -39,10 +90,32 @@ fees and are not provider invoices. No shared budget limit is changed here.
 Context admission uses `msty-model-count-v1` (legacy flag accepted for rollout).
 For Luna it uses the official tiktoken model mapping plus a documented safety
 allowance: an admission estimate, not an exact provider count or billable usage.
-DeepSeek uses a conservative text charge; the short analyst normally needs no
-large-input preflight. Sonnet retains its official token counter. Large media
-requiring a preflight fails closed until a verified multimodal counter exists;
-no source text, rules or unknown blocks are silently discarded. The 180000
+DeepSeek uses a conservative text charge; budget-bound requests always run
+admission counting. Sonnet retains its official token counter.
+
+Luna user `image_url` blocks retain their full original URLs/base64 and detail
+when sent to Chat Completions. Only the local counting copy substitutes their
+payload with a marker. Per-image admission uses OpenAI's server-enforced patch
+limits: `low` 256, `high` 2500, `auto`/`original` 30000, multiplied by 1.2 and
+rounded up, plus one documented rounding token and 128 framing allowance.
+This image component is an upper bound, not a dimension guess; the combined
+text/schema/image value is still an **admission estimate**, not an exact count or
+provider bill. Up to 32 images are accepted subject to the combined 180000 cap;
+several small `auto` images can be conservatively rejected because their actual
+dimensions are not fetched. The receipt says `tiktoken-image-envelope-v1`.
+Unknown detail, malformed image blocks, DeepSeek images, and image blocks in
+tool results fail closed. Current Chat Completions tool content supports text,
+so a screenshot returned directly as a tool image is **not** enabled by this
+change; a user image attachment is supported. No image download, extra API call,
+expensive fallback or Responses migration is introduced. The Responses exact
+input-token endpoint counts a different request format and is not claimed as an
+exact counter for this route. Binary tool bundles are never serialized into a
+text compaction prompt. Source: [OpenAI image-token rules](https://developers.openai.com/api/docs/guides/images-vision),
+[Responses token counting](https://developers.openai.com/api/docs/guides/token-counting).
+See `test_msty_image_envelope.py` for offline preservation and zero-generation
+rejection checks; offline mocks do not establish native UI or paid API success.
+
+No source text, rules or unknown blocks are silently discarded. The 180000
 admission limit and 2 MB transport limit remain; memory is not unlimited.
 
 The official MIT `langchain-openai==1.1.11` adapter and existing LangGraph native
@@ -81,9 +154,10 @@ Explicit stop, explanation/plan-only requests, unavailable tools, access and
 budget/action limits still take priority. Unknown write outcomes require readback,
 not blind retry. Once the requested outcome is verified, the task ends.
 
-This is a behavioral instruction, **not a deterministic completion controller**.
-No regex-based regeneration, extra model pass, forced tool choice, permission
-expansion or hidden background loop is added. Each invocation returns one model
+This continuity policy alone is a behavioral instruction, **not a deterministic completion controller**.
+The newer bounded artifact-check gate is described above, separately from this
+historical prompt-only change. No regex-based regeneration, permission expansion
+or hidden background loop is added. Each cloud run returns one model
 step for Msty's native tool loop. A text-only response remains a protocol-valid
 answer, not proof of task completion. Tests in `test_msty_continuity.py` check
 policy delivery and preserved user stop/history/tool choice, not model accuracy.

@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, conve
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
-from . import msty_execution, msty_models
+from . import msty_execution, msty_models, msty_compaction, msty_task
 
 COUNT_TRIGGER_BYTES = 200000
 INPUT_TOKEN_LIMIT = 180000
@@ -188,6 +188,13 @@ class State(TypedDict):
     execution_protocol: str | None
     execution: dict
     brain_task_role: str
+    execution_task_id: str
+    task_budget_binding: dict
+    compaction_protocol: str
+    context_memory: dict
+    compaction_stage: dict | None
+    compaction_skip_once: bool
+    task_contract: dict | None
 
 
 def selected_profile(state: State) -> str:
@@ -292,23 +299,33 @@ def rejected_context_budget(explanation: str, input_tokens: int | None = None):
 
 
 async def _respond_step(state: State):
-    messages = convert_to_messages(state.get("messages") or [])
     tools = state.get("tools") or []
     try:
+        compaction_enabled = msty_compaction.enabled(state)
+        if compaction_enabled and not msty_execution.enabled(state):
+            raise msty_execution.ExecutionProtocolError('Сжатие требует checkpoint-протокола Msty.')
+        messages = convert_to_messages(msty_compaction.project_messages(state))
         profile = selected_profile(state)
         consultations = consultation_count(state)
         cap = 2048 if state.get('brain_task_role') == 'analyst' else 8192
         output_limit = min(max(int(state.get('max_tokens') or 4096), 1), cap)
+        msty_execution.validate_binding(state, profile, output_limit)
         model = (ChatAnthropic(model='claude-sonnet-4-6', max_tokens=output_limit,
                                base_url='https://api.anthropic.com', timeout=120, max_retries=0)
                  if profile == 'sonnet' else msty_models.make_model(profile, output_limit))
         policy = ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else policy_for_tools(tools)
         if consultations >= 2:
             policy += '\nЛимит консультаций исчерпан. Продолжай своими инструментами; не вызывай консультанта снова.'
+        if any(msty_task._named(name, msty_task.PLAN_SUFFIX) for name in tool_names(tools)):
+            policy += ('\nДля поручения с изменениями проверяемых локальных артефактов используй msty_task_plan '
+                'с требованиями и конкретными read-only проверками, затем реальные рабочие инструменты. '
+                'Для простого ответа, обсуждения или просьбы только составить план запуск проверок не нужен. '
+                'Критерии, предложенные тобой, не доказывают полноту требований владельца. '
+                'Результат msty_task_verify подтверждает лишь указанные наблюдения, не всю бизнес-задачу.')
         full_messages = [SystemMessage(content=policy), *messages]
         full_messages = (cache_system_prefix(full_messages, tools) if profile == 'sonnet'
                          else msty_models.prepare_messages(profile, full_messages, tools))
-    except msty_models.ModelAdapterError as error:
+    except (msty_models.ModelAdapterError, msty_execution.ExecutionProtocolError) as error:
         return rejected_context_budget(str(error))
     # Byte size is only the preflight trigger, never a tokenizer estimate.
     # Count the exact complete messages and schemas used for generation below.
@@ -320,7 +337,7 @@ async def _respond_step(state: State):
         return rejected_context_budget(
             'Генерация не запущена: неподдерживаемая версия проверки контекста. '
             'Сообщения и инструкции не сокращались.')
-    if protocol is not None or input_bytes > COUNT_TRIGGER_BYTES:
+    if protocol is not None or state.get('task_budget_binding') is not None or input_bytes > COUNT_TRIGGER_BYTES:
         try:
             if profile == 'sonnet':
                 count_options = {'timeout': COUNT_TIMEOUT_SECONDS}
@@ -333,12 +350,19 @@ async def _respond_step(state: State):
                 tokens = await msty_models.count_input(profile, model, full_messages, tools)
             if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
                 raise ValueError('Invalid token count')
+        except msty_models.ModelAdapterError as error:
+            return rejected_context_budget(str(error))
         except Exception:
             # Provider exceptions may contain prompts, headers or credentials;
             # keep raw details out of both the user result and our own logs.
             return rejected_context_budget(
                 'Генерация не запущена: проверка размера контекста не завершилась. '
                 'Контекст сохранён без обрезки; требуется восстановить проверку его размера.')
+        if (compaction_enabled and not state.get('compaction_skip_once') and
+                tokens >= msty_compaction.TRIGGER_TOKENS):
+            plan = msty_compaction.make_plan(state)
+            if plan is not None:
+                return await _compact_step(state, profile, output_limit, policy, plan)
         if tokens > INPUT_TOKEN_LIMIT:
             return rejected_context_budget(
                 f'Генерация не запущена: входной контекст превышает безопасный лимит '
@@ -346,7 +370,7 @@ async def _respond_step(state: State):
                 'инструментов не сокращались; нужно уменьшить выбранные вложения '
                 'или разделить задачу.', tokens)
         budget_check = {'version': 1, 'status': 'accepted', 'input_tokens': tokens,
-                        'limit': INPUT_TOKEN_LIMIT, 'method': msty_models.COUNT_METHODS[profile],
+                        'limit': INPUT_TOKEN_LIMIT, 'method': msty_models.count_method(profile, full_messages),
                         'model_profile': profile}
     choice = state.get("tool_choice") or "auto"
     tools_disabled = choice == 'none' or (isinstance(choice, dict) and choice.get('type') == 'none')
@@ -398,26 +422,79 @@ async def _respond_step(state: State):
         result = result.model_copy(update={'content': 'Лимит двух консультаций этого хода исчерпан; '
             'новые вызовы не выполнены. Нужна работа основного Brain с имеющимися доказательствами.',
             'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {}})
+    result = msty_task.gate_final(state, result, tools, tools_disabled)
+    if not valid_tool_calls(result, tools):
+        result = result.model_copy(update={'content': 'Схема проверки плана не подтверждена; действие не выдано.',
+            'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
+            'response_metadata': {**result.response_metadata, 'msty_blocked': True}})
     # Explicit None clears any check left in a persisted LangGraph thread;
     # an earlier accepted count must never attest a different request.
     return publish_result(result, budget_check)
+
+
+async def _compact_step(state, profile, output_limit, policy, plan):
+    """Exactly one model call, published/charged before the internal resume."""
+    cap = min(msty_compaction.SUMMARY_OUTPUT_CAP, output_limit)
+    try:
+        model = msty_models.make_model(profile, cap)
+        messages = [SystemMessage(content=policy), *convert_to_messages(
+            msty_compaction.summary_messages(state, plan))]
+        messages = msty_models.prepare_messages(profile, messages, [])
+        tokens = await msty_models.count_input(profile, model, messages, [])
+        if type(tokens) is not int or not 0 <= tokens <= INPUT_TOKEN_LIMIT:
+            return rejected_context_budget('Сводка не помещается в безопасный контекст; исходники сохранены.', tokens)
+        model = msty_models.bind_tools(profile, model, [], 'none')
+    except Exception:
+        return rejected_context_budget('Не удалось проверить вход сводки; исходники сохранены без обрезки.')
+    budget_check = {'version': 1, 'status': 'accepted', 'input_tokens': tokens,
+                    'limit': INPUT_TOKEN_LIMIT, 'method': msty_models.count_method(profile, messages),
+                    'model_profile': profile}
+    raw = await model.ainvoke(messages)
+    try:
+        result = msty_models.stamp_usage(profile, raw)
+    except msty_models.ModelAdapterError:
+        return publish_result(AIMessage(content='Модель сводки не подтверждена; исходники сохранены.',
+            usage_metadata=msty_models.checked_usage(profile, raw),
+            response_metadata={'msty_generation': 'rejected_model', 'msty_blocked': True}), budget_check)
+    try:
+        reason = result.response_metadata.get('stop_reason', result.response_metadata.get('finish_reason'))
+        if reason in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'):
+            raise msty_execution.ExecutionProtocolError('Сводка не завершена; исходники сохранены.')
+        update = msty_compaction.accept_summary(state, plan, result)
+    except msty_execution.ExecutionProtocolError as error:
+        blocked = result.model_copy(update={'content': str(error), 'tool_calls': [],
+            'invalid_tool_calls': [], 'additional_kwargs': {},
+            'response_metadata': {**result.response_metadata, 'msty_blocked': True}})
+        return publish_result(blocked, budget_check)
+    result = result.model_copy(update={'content': '', 'tool_calls': [], 'invalid_tool_calls': [],
+        'additional_kwargs': {}, 'response_metadata': {**result.response_metadata, 'msty_stage': 'compaction'}})
+    return {**publish_result(result, budget_check), **update}
 
 
 async def respond(state: State):
     durable = msty_execution.enabled(state)
     result = await _respond_step(state)
     if durable:
-        result['execution'] = msty_execution.execution_after(state, result)
+        compacted = (result.get('compaction_stage') or {}).get('status') == 'ready'
+        result['execution'] = (msty_compaction.execution_after(state) if compacted else
+                               msty_execution.execution_after(state, result))
         result['execution']['consultations'] = consultation_count(state) + sum(
             consult_name(c['name']) for c in result['result'].get('tool_calls', []))
+        result['task_contract'] = msty_task.after_result(state, result['result'])
+        result['execution']['status'] = msty_task.final_status(
+            {**state, 'task_contract': result['task_contract']}, result['execution']['status'])
+    if not result.get('compaction_stage'):
+        result.update(compaction_skip_once=False, compaction_stage=None)
     return result
 
 
 builder = StateGraph(State)
 builder.add_node("respond", respond)
 builder.add_node("wait_external", msty_execution.wait_external)
+builder.add_node("wait_compaction", msty_compaction.wait_compaction)
 builder.add_edge(START, "respond")
 builder.add_conditional_edges("respond", msty_execution.next_node,
-                              {"wait_external": "wait_external", "__end__": END})
+                              {"wait_external": "wait_external", "wait_compaction": "wait_compaction", "__end__": END})
 builder.add_edge("wait_external", "respond")
+builder.add_edge("wait_compaction", "respond")
 graph = builder.compile()

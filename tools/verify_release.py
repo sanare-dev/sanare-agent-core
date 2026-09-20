@@ -8,7 +8,15 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 def fingerprint():
-    paths = sorted([*ROOT.glob('src/**/*.py'), *ROOT.glob('tests/unit_tests/**/*.py'), ROOT/'langgraph.json', ROOT/'pyproject.toml'])
+    # Dependency locks, executable release/eval helpers, fixtures and active
+    # instructions affect the release too. Never recurse into .env, .git or venv.
+    paths = sorted(set([
+        *ROOT.glob('src/**/*.py'), *ROOT.glob('tests/unit_tests/**/*.py'),
+        *ROOT.glob('tools/**/*.py'), *ROOT.glob('tools/**/*.json'),
+        *ROOT.glob('tools/**/*.md'), *ROOT.glob('.github/workflows/*.yml'),
+        ROOT/'langgraph.json', ROOT/'pyproject.toml', ROOT/'uv.lock',
+        ROOT/'LEARNING.md', ROOT/'README.md',
+    ]))
     digest = hashlib.sha256()
     for path in paths:
         digest.update(str(path.relative_to(ROOT)).encode())
