@@ -13,6 +13,22 @@ def isolated_cache_default(monkeypatch):
     monkeypatch.delenv('MSTY_STATIC_CACHE', raising=False)
 
 
+def test_external_component_policy_present_with_and_without_tools():
+    no_tools = msty.policy_for_tools([])
+    with_tools = msty.policy_for_tools([
+        {'type': 'function', 'function': {'name': 'msty_project_read',
+                                        'parameters': {'type': 'object'}}},
+    ])
+    for policy in (no_tools, with_tools):
+        assert 'Smithery' in policy
+        assert 'Arcade' in policy
+        assert 'нельзя установить или зарегистрировать внутри диалога' in policy
+        assert 'манифест' in policy
+        assert 'лицензия' in policy
+        assert 'версия' in policy
+        assert 'область действия' in policy
+
+
 def test_no_tools_policy_is_explicit_and_does_not_advertise_supervisor():
     policy = msty.policy_for_tools([])
     assert 'MSTY_TOOLS_UNAVAILABLE' in policy
