@@ -17,6 +17,26 @@ Stacks. Existing old conversations do not necessarily inherit changed project
 defaults; use a fresh conversation for acceptance. Check actual tool results,
 not just HTTP success or generated prose.
 
+## Task continuity policy — 20 September 2026
+
+`MSTY_TASK_CONTINUITY_V1` is included in the server-owned policy for every model
+step, including existing Msty conversations and tool-result callbacks. A task
+authorizes its ordinary necessary in-scope steps; the model must not ask for a
+new command after each partial result. A minimal route is not a one-action limit.
+Explicit stop, explanation/plan-only requests, unavailable tools, access and
+budget/action limits still take priority. Unknown write outcomes require readback,
+not blind retry. Once the requested outcome is verified, the task ends.
+
+This is a behavioral instruction, **not a deterministic completion controller**.
+No regex-based regeneration, extra model pass, forced tool choice, permission
+expansion or hidden background loop is added. The graph still returns one model
+step for Msty's native tool loop. A text-only response remains a protocol-valid
+answer, not proof of task completion. Tests in `test_msty_continuity.py` check
+policy delivery and preserved user stop/history/tool choice, not model accuracy.
+Real behavioral canaries and the old conversation's saved prompt need separate
+verification. Old saved prompts are changed only through Msty GUI, not by editing
+its obfuscated config or live database.
+
 ## Validated publication contract — 20 September 2026
 
 The `msty` graph publishes one `custom` event after the model step and guards:
