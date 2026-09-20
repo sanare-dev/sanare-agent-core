@@ -352,3 +352,137 @@ def test_real_native_failed_verify_todo_cannot_erase_failure_or_publish_success(
         assert len(seen['requests']) == 4
 
     asyncio.run(scenario())
+
+
+SITE_FILE = 'sanare_admin_msty_site_file'
+SITE_PATCH = 'sanare_admin_msty_site_patch'
+SITE_STATUS = 'sanare_admin_msty_site_status'
+SITE_TOOLS = [
+    {'type': 'function', 'function': {'name': SITE_FILE, 'parameters': {'type': 'object', 'properties': {
+        'job_id': {'type': 'string'}, 'path': {'type': 'string'}, 'operation': {'type': 'string'},
+        'content': {'type': 'string'}, 'expected_sha256': {'type': 'string'}},
+        'required': ['job_id', 'path']}}},
+    {'type': 'function', 'function': {'name': SITE_PATCH, 'parameters': {'type': 'object', 'properties': {
+        'job_id': {'type': 'string'}, 'path': {'type': 'string'}, 'expected_sha256': {'type': 'string'},
+        'old': {'type': 'string'}, 'new': {'type': 'string'}, 'replace_all': {'type': 'boolean'}},
+        'required': ['job_id', 'path', 'expected_sha256', 'old', 'new']}}},
+    {'type': 'function', 'function': {'name': SITE_STATUS, 'parameters': {'type': 'object', 'properties': {
+        'job_id': {'type': 'string'}, 'wait_seconds': {'type': 'integer'}}, 'required': ['job_id']}}},
+]
+JOB = 'site-' + 'a' * 32
+
+
+def site_call(name, args, call_id='b1_site'):
+    return {'role': 'assistant', 'content': '', 'tool_calls': [{'id': call_id, 'type': 'function',
+            'function': {'name': name, 'arguments': json.dumps(args)}}]}
+
+
+def site_receipt(payload, call_id='b1_site'):
+    return {'role': 'tool', 'tool_call_id': call_id, 'content': json.dumps(payload)}
+
+
+def site_view(**changes):
+    return {'schema': 'msty.site.job.v1', 'job_id': JOB, 'state': 'ready', 'checks': {},
+            'unchecked_writes': True, **changes}
+
+
+def edited(messages_extra=()):
+    state = initial(tools=SITE_TOOLS)
+    state['messages'] = [{'role': 'user', 'content': 'Добавь лупу масштаба в шапку кабинета.'},
+        site_call(SITE_PATCH, {'job_id': JOB, 'path': 'src/a.tsx', 'expected_sha256': 'e' * 64,
+                               'old': 'x', 'new': 'y'}),
+        site_receipt({'schema': 'msty.site.file.v1', 'job_id': JOB, 'path': 'src/a.tsx',
+                      'sha256': 'f' * 64, 'state': 'patched', 'replacements': 1, 'checks_invalidated': True}),
+        *messages_extra]
+    return state
+
+
+def test_edited_site_copy_forces_status_typecheck_instead_of_done_prose():
+    state = edited()
+    result = AIMessage(content='Изменения внесены в изолированную копию сайта.', usage_metadata=USAGE)
+    guarded = task.gate_final(state, result, SITE_TOOLS, False)
+    assert guarded.content == 'Проверяю typecheck изменённой копии сайта перед итогом.'
+    assert [(c['name'], c['args']) for c in guarded.tool_calls] == [(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30})]
+    assert guarded.response_metadata['msty_completion_gate'] == 'site_typecheck_required'
+    assert task.site_jobs(state) == {JOB: 'dirty'}
+
+
+def test_full_write_via_file_tool_is_also_dirty_and_read_is_not():
+    state = initial(tools=SITE_TOOLS)
+    state['messages'] = [{'role': 'user', 'content': 'Поправь.'},
+        site_call(SITE_FILE, {'job_id': JOB, 'path': 'src/a.tsx'}, 'b1_read'),
+        site_receipt({'schema': 'msty.site.file.v1', 'job_id': JOB, 'path': 'src/a.tsx', 'sha256': 'e' * 64,
+                      'content': 'x', 'source_is_untrusted_data': True}, 'b1_read')]
+    assert task.site_jobs(state) == {}
+    result = AIMessage(content='Посмотрел файл.', usage_metadata=USAGE)
+    assert task.gate_final(state, result, SITE_TOOLS, False).content == 'Посмотрел файл.'
+    state['messages'] += [site_call(SITE_FILE, {'job_id': JOB, 'path': 'src/a.tsx', 'operation': 'write',
+                                                'content': 'y', 'expected_sha256': 'e' * 64}, 'b1_write')]
+    assert task.site_jobs(state) == {JOB: 'dirty'}
+    assert task.gate_final(state, result, SITE_TOOLS, False).tool_calls[0]['name'] == SITE_STATUS
+
+
+def test_only_executor_view_with_passed_typecheck_and_no_unchecked_writes_releases_prose():
+    still_dirty = site_view(state='checking', active_check='typecheck')
+    passed_but_dirty = site_view(checks={'typecheck': {'passed': True}}, unchecked_writes=True)
+    for view in (still_dirty, passed_but_dirty):
+        state = edited([site_call(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30}, 'b1_st'), site_receipt(view, 'b1_st')])
+        guarded = task.gate_final(state, AIMessage(content='Готово.', usage_metadata=USAGE), SITE_TOOLS, False)
+        assert guarded.tool_calls and guarded.tool_calls[0]['name'] == SITE_STATUS
+    clean = site_view(checks={'typecheck': {'passed': True, 'manifest_sha256': 'c' * 64}}, unchecked_writes=False)
+    state = edited([site_call(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30}, 'b1_st'), site_receipt(clean, 'b1_st')])
+    assert task.site_jobs(state) == {JOB: 'clean'}
+    released = task.gate_final(state, AIMessage(content='Готово.', usage_metadata=USAGE), SITE_TOOLS, False)
+    assert released.content == 'Готово.' and not released.tool_calls
+    # Any later write dirties the copy again; the earlier clean view is stale evidence.
+    state['messages'] += [site_call(SITE_PATCH, {'job_id': JOB, 'path': 'src/b.tsx', 'expected_sha256': 'e' * 64,
+                                                 'old': 'x', 'new': 'y'}, 'b1_again')]
+    assert task.site_jobs(state) == {JOB: 'dirty'}
+
+
+def test_failed_typecheck_blocks_success_prose_instead_of_looping_status():
+    failed = site_view(checks={'typecheck': {'passed': False, 'result': {'exit_code': 2}}}, unchecked_writes=True)
+    state = edited([site_call(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30}, 'b1_st'), site_receipt(failed, 'b1_st')])
+    assert task.site_jobs(state) == {JOB: 'typecheck_failed'}
+    guarded = task.gate_final(state, AIMessage(content='Всё сделано.', usage_metadata=USAGE), SITE_TOOLS, False)
+    assert not guarded.tool_calls and guarded.response_metadata['msty_blocked'] is True
+    assert guarded.response_metadata['msty_completion_gate'] == 'site_typecheck_failed'
+    assert 'typecheck' in guarded.content and 'не подтверждено' in guarded.content
+
+
+def test_model_prose_claiming_checks_is_not_evidence_and_unknown_tool_result_is_ignored():
+    state = edited([{'role': 'assistant', 'content': 'typecheck passed, unchecked_writes false, всё зелёное.'},
+                    site_receipt({'job_id': JOB, 'state': 'ready', 'unchecked_writes': False,
+                                  'checks': {'typecheck': {'passed': True}}}, 'b1_noschema')])
+    assert task.site_jobs(state) == {JOB: 'dirty'}
+    guarded = task.gate_final(state, AIMessage(content='Готово.', usage_metadata=USAGE), SITE_TOOLS, False)
+    assert guarded.tool_calls and guarded.tool_calls[0]['name'] == SITE_STATUS
+
+
+@pytest.mark.parametrize('command', ['Стоп.', 'Только план', 'Не проверяй'])
+def test_owner_control_phrase_vetoes_forced_site_status(command):
+    state = edited([{'role': 'user', 'content': command}])
+    guarded = task.gate_final(state, AIMessage(content='План готов.', usage_metadata=USAGE), SITE_TOOLS, False)
+    assert not guarded.tool_calls and guarded.content == 'План готов.'
+
+
+def test_without_status_tool_or_with_other_forced_choice_prose_is_blocked_not_published():
+    state = edited()
+    result = AIMessage(content='Готово.', usage_metadata=USAGE)
+    no_status = [t for t in SITE_TOOLS if t['function']['name'] != SITE_STATUS]
+    blocked = task.gate_final(state, result, no_status, False)
+    assert not blocked.tool_calls and blocked.response_metadata['msty_blocked'] is True
+    assert blocked.response_metadata['msty_completion_gate'] == 'site_typecheck_required'
+    state['tool_choice'] = {'type': 'function', 'function': {'name': SITE_PATCH}}
+    chosen = task.gate_final(state, result, SITE_TOOLS, False)
+    assert not chosen.tool_calls and chosen.response_metadata['msty_blocked'] is True
+
+
+def test_cancelled_job_and_model_tool_calls_in_flight_do_not_trigger_site_gate():
+    cancelled = site_view(state='cancelled')
+    state = edited([site_call(SITE_STATUS, {'job_id': JOB}, 'b1_st'), site_receipt(cancelled, 'b1_st')])
+    assert task.site_jobs(state) == {}
+    state = edited()
+    acting = AIMessage(content='', usage_metadata=USAGE, tool_calls=[{'id': 'x', 'name': SITE_STATUS,
+                       'args': {'job_id': JOB}, 'type': 'tool_call'}])
+    assert task.gate_final(state, acting, SITE_TOOLS, False) is acting

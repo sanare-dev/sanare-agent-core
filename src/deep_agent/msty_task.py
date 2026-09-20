@@ -16,6 +16,11 @@ from .msty_execution import MAX_ACTIONS, canonical_digest
 
 PLAN_SUFFIX = 'msty_task_plan'
 VERIFY_SUFFIX = 'msty_task_verify'
+SITE_FILE_SUFFIX = 'msty_site_file'
+SITE_PATCH_SUFFIX = 'msty_site_patch'
+SITE_STATUS_SUFFIX = 'msty_site_status'
+SITE_JOB_SCHEMA = 'msty.site.job.v1'
+SITE_FILE_SCHEMA = 'msty.site.file.v1'
 PLAN_KEYS = {'schema', 'state', 'plan_id', 'plan_sha256', 'project_slug',
              'requirements_count', 'checks_count', 'criteria_origin', 'whole_task_completion_verified'}
 VERIFY_KEYS = PLAN_KEYS | {'checks', 'source_hashes', 'receipt_path', 'receipt_sha256'}
@@ -297,6 +302,102 @@ def owner_control(state):
     return True
 
 
+def _call_args(call):
+    if not isinstance(call, dict):
+        return None, None
+    function = call.get('function')
+    if isinstance(function, dict):
+        name, raw = function.get('name'), function.get('arguments')
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                raw = None
+        return name, raw if isinstance(raw, dict) else None
+    args = call.get('args')
+    return call.get('name'), args if isinstance(args, dict) else None
+
+
+def site_jobs(state):
+    """Site copies edited in this conversation and what the executor last said about them.
+
+    Evidence is executor receipts only: a write/patch marks the job dirty; only a
+    later status view with unchecked_writes False and a passed typecheck clears it.
+    Model prose never counts. Returns {job_id: 'dirty' | 'typecheck_failed' | 'clean'}.
+    """
+    jobs = {}
+    for message in state.get('messages') or []:
+        if not isinstance(message, dict):
+            continue
+        if message.get('role') == 'assistant':
+            for call in message.get('tool_calls') or []:
+                name, args = _call_args(call)
+                if not args or not isinstance(args.get('job_id'), str):
+                    continue
+                if _named(name, SITE_PATCH_SUFFIX) or (
+                        _named(name, SITE_FILE_SUFFIX) and args.get('operation') == 'write'):
+                    jobs[args['job_id']] = 'dirty'
+        elif message.get('role') == 'tool':
+            receipt = _decode(message.get('content'))
+            if not isinstance(receipt, dict) or not isinstance(receipt.get('job_id'), str):
+                continue
+            job = receipt['job_id']
+            if receipt.get('schema') == SITE_FILE_SCHEMA and receipt.get('state') in ('written', 'patched'):
+                jobs[job] = 'dirty'
+            elif receipt.get('schema') == SITE_JOB_SCHEMA:
+                if receipt.get('state') == 'cancelled':
+                    jobs.pop(job, None)
+                    continue
+                if job not in jobs:
+                    continue
+                typecheck = (receipt.get('checks') or {}).get('typecheck') or {}
+                if receipt.get('unchecked_writes') is False and typecheck.get('passed') is True:
+                    jobs[job] = 'clean'
+                elif receipt.get('unchecked_writes') is True and 'typecheck' in (receipt.get('checks') or {}):
+                    jobs[job] = 'typecheck_failed' if typecheck.get('passed') is not True else 'dirty'
+                else:
+                    jobs[job] = 'dirty'
+    return jobs
+
+
+def _site_gate(state, result, tools, disabled):
+    """Edited site copy without a current passed typecheck cannot be reported as done."""
+    meta = result.response_metadata
+    if (result.tool_calls or result.invalid_tool_calls or disabled or owner_control(state) or
+            meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
+            meta.get('stop_reason', meta.get('finish_reason')) in
+                ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter')):
+        return None
+    pending = {job: status for job, status in site_jobs(state).items() if status != 'clean'}
+    if not pending:
+        return None
+    if any(status == 'typecheck_failed' for status in pending.values()):
+        return result.model_copy(update={
+            'content': 'Выполнение не подтверждено: typecheck изменённой копии сайта не пройден. '
+                       'Нужны исправление и повторная проверка через msty_site_status; '
+                       'текст модели результатом не является.',
+            'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
+            'response_metadata': {**meta, 'msty_blocked': True, 'msty_completion_gate': 'site_typecheck_failed'}})
+    names = [tool.get('function', {}).get('name') for tool in tools
+             if tool.get('type') == 'function' and _named(tool.get('function', {}).get('name'), SITE_STATUS_SUFFIX)]
+    choice = state.get('tool_choice')
+    selected = choice.get('function', {}).get('name') if isinstance(choice, dict) else None
+    if (len(names) != 1 or selected is not None and names != [selected] or
+            (state.get('execution') or {}).get('actions_issued', 0) >= MAX_ACTIONS):
+        return result.model_copy(update={
+            'content': 'Изменения в копии сайта не проверены (typecheck не запускался или не завершён); '
+                       'завершение не подтверждено.',
+            'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
+            'response_metadata': {**meta, 'msty_blocked': True, 'msty_completion_gate': 'site_typecheck_required'}})
+    job = next(iter(pending))
+    return result.model_copy(update={
+        'content': 'Проверяю typecheck изменённой копии сайта перед итогом.',
+        'tool_calls': [{'id': 'sitecheck_' + uuid.uuid4().hex, 'name': names[0],
+                        'args': {'job_id': job, 'wait_seconds': 30}, 'type': 'tool_call'}],
+        'invalid_tool_calls': [], 'additional_kwargs': {},
+        'response_metadata': {**meta, 'msty_completion_gate': 'site_typecheck_required'}})
+
+
 def gate_final(state, result, tools, disabled):
     contract = state.get('task_contract') or {}
     meta = result.response_metadata
@@ -311,6 +412,9 @@ def gate_final(state, result, tools, disabled):
             'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
             'response_metadata': {**meta, 'msty_blocked': True,
                                   'msty_completion_gate': 'failed_verification_preserved'}})
+    site = _site_gate(state, result, tools, disabled)
+    if site is not None:
+        return site
     if (contract.get('status') != 'planned' or result.tool_calls or result.invalid_tool_calls or disabled or
             owner_control(state) or meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
             meta.get('stop_reason', meta.get('finish_reason')) in
