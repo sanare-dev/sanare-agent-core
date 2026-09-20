@@ -28,6 +28,19 @@ def call(arguments, *, name='inspect', identifier='call-1'):
     return {'id': identifier, 'name': name, 'args': arguments}
 
 
+def stamped_sonnet(response):
+    """Exact new publication contract; independent of the implementation helper."""
+    expected = response.model_dump()
+    expected['response_metadata'] = {
+        **response.response_metadata,
+        'model_name': 'claude-sonnet-4-6',
+        'msty_model_name': 'claude-sonnet-4-6',
+        'msty_model_profile': 'sonnet',
+        'msty_model_provider': 'anthropic',
+    }
+    return expected
+
+
 def install_model(monkeypatch, calls, *, invalid_calls=None):
     seen = {'generations': 0}
     response = AIMessage(
@@ -86,7 +99,7 @@ def test_arguments_are_validated_against_full_schema(monkeypatch, schema, argume
     assert 'SYNTHETIC_UNVERIFIED_CLAIM' not in str(result)
     assert 'SYNTHETIC_RAW_CALL' not in str(result)
     assert result['usage_metadata'] == response.usage_metadata
-    assert result['response_metadata'] == response.response_metadata
+    assert result['response_metadata'] == stamped_sonnet(response)['response_metadata']
     assert seen['generations'] == 1  # No hidden LLM repair / retry.
     assert state == before
 
@@ -105,7 +118,7 @@ def test_arguments_are_validated_against_full_schema(monkeypatch, schema, argume
 def test_valid_arguments_and_local_refs_are_unchanged(monkeypatch, schema, arguments):
     seen, response = install_model(monkeypatch, [call(arguments)])
     result = asyncio.run(msty.respond({'messages': [], 'tools': [tool(schema)]}))
-    assert result['result'] == response.model_dump()
+    assert result['result'] == stamped_sonnet(response)
     assert seen['generations'] == 1
 
 
@@ -149,7 +162,7 @@ def test_missing_parameters_keeps_existing_unconstrained_schema_contract(monkeyp
     _, response = install_model(monkeypatch, [call({'path': 'README.md'})])
     result = asyncio.run(msty.respond({'messages': [], 'tools': [
         {'type': 'function', 'function': {'name': 'inspect'}}]}))
-    assert result['result'] == response.model_dump()
+    assert result['result'] == stamped_sonnet(response)
 
 
 @pytest.mark.parametrize('stage', ['get_writer', 'write'])
@@ -241,8 +254,8 @@ def test_actual_graph_publishes_valid_text_and_tool_result_once_unchanged(monkey
     events = asyncio.run(collect())
     custom = [data for mode, data in events if mode == 'custom']
     final = [data for mode, data in events if mode == 'values'][-1]
-    assert custom == [{'type': 'validated_result', 'message': response.model_dump()}]
-    assert final['result'] == response.model_dump()
+    assert custom == [{'type': 'validated_result', 'message': stamped_sonnet(response)}]
+    assert final['result'] == stamped_sonnet(response)
     assert final['context_budget_check'] is None
     assert seen['generations'] == 1
 
@@ -306,5 +319,5 @@ def test_explicit_none_rejects_even_schema_valid_calls_before_publication(monkey
     assert final['result']['additional_kwargs'] == {}
     assert 'отключено' in final['result']['content']
     assert final['result']['usage_metadata'] == response.usage_metadata
-    assert final['result']['response_metadata'] == response.response_metadata
+    assert final['result']['response_metadata'] == stamped_sonnet(response)['response_metadata']
     assert seen['generations'] == 1

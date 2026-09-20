@@ -1,5 +1,59 @@
 # Deep Agents Template
 
+## Economical Msty Brain — 20 September 2026
+
+The `msty` graph now defaults to server profile `luna` (`gpt-5.6-luna`,
+reasoning `none`). There is no compulsory prompt rewriter, council or hidden
+second model. One graph invocation still performs one billed generation.
+`MSTY_MODEL_PROFILE=sonnet` is an explicit operator rollback, not an automatic
+expensive fallback. The old `MSTY_MODEL` variable is not a free-form selector.
+
+An optional **text analyst**, `deepseek-flash` with thinking disabled, is invoked
+only through the actual local `msty_brain_consult` MCP tool. This makes a separate
+bounded request to the same budgeted `team.brain` endpoint with
+`brain_task_role=analyst`. The role cannot receive tools, arbitrary model IDs or
+endpoints: input is plain text up to 96 KB, output up to 2048 tokens. The MCP
+facade additionally limits the explicit brief/evidence to 16000 characters and
+rejects common secret patterns (not a complete DLP guarantee). The consultant
+does not read paths, execute changes, browse or recursively delegate.
+
+The primary Luna reads sources and performs authorized work through Msty's
+existing MCP tools. It may ask for analysis/review when justified, then checks
+the opinion against actual sources and observes the result of its own actions.
+At most two issued consultations are counted in the native task checkpoint;
+the ordinary 24-action limit still applies. Role changes inside a pending
+callback are rejected. This is not a new background worker system and does not
+reactivate retired teams, Paperclip jobs or `brain_supervisor`.
+
+```text
+Msty → existing gateway/stop/budget → LangGraph → Luna
+  ↑          local MCP results / native resume       ↓
+  └─ files, browser, memory, optional DeepSeek analysis
+```
+
+Validated results carry canonical model identity and measured usage; the local
+ledger prices each request using a server-owned immutable profile snapshot.
+Missing usage or identity is unknown, not zero. Token estimates exclude hosting
+fees and are not provider invoices. No shared budget limit is changed here.
+
+Context admission uses `msty-model-count-v1` (legacy flag accepted for rollout).
+For Luna it uses the official tiktoken model mapping plus a documented safety
+allowance: an admission estimate, not an exact provider count or billable usage.
+DeepSeek uses a conservative text charge; the short analyst normally needs no
+large-input preflight. Sonnet retains its official token counter. Large media
+requiring a preflight fails closed until a verified multimodal counter exists;
+no source text, rules or unknown blocks are silently discarded. The 180000
+admission limit and 2 MB transport limit remain; memory is not unlimited.
+
+The official MIT `langchain-openai==1.1.11` adapter and existing LangGraph native
+interrupt/resume are reused. Sources: [LangChain adapter](https://github.com/langchain-ai/langchain/tree/master/libs/partners/openai),
+[Luna API](https://developers.openai.com/api/docs/models/gpt-5.6-luna),
+[DeepSeek thinking configuration](https://api-docs.deepseek.com/guides/thinking_mode/).
+Deployment and live acceptance are recorded separately in the LLM project's
+unified change journal. Offline passing tests alone do not prove deployment,
+business completion or broad model quality. Earlier dated sections below describe
+the inherited Sonnet implementation where their model/counting details differ.
+
 ## Msty Brain restoration — 19 September 2026
 
 The `msty` graph is the main Msty route (`team.brain`), distinct from the local

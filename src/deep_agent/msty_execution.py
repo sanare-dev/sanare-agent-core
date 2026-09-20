@@ -52,7 +52,7 @@ def execution_after(state, update):
     pending = None
     if reason in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'):
         status = 'incomplete'
-    elif (update.get('context_budget_check') or {}).get('status') == 'rejected':
+    elif meta.get('msty_blocked') is True or (update.get('context_budget_check') or {}).get('status') == 'rejected':
         status = 'blocked'
     elif calls:
         if len(calls) > MAX_ACTIONS - issued:
@@ -99,13 +99,15 @@ def validate_resume(state, resume):
         raise ExecutionProtocolError('Продолжение относится к другому шагу Msty.')
     incoming = resume.get('input')
     permitted = {'messages', 'tools', 'tool_choice', 'max_tokens', 'result',
-                 'context_budget', 'context_budget_check', 'execution_protocol'}
+                 'context_budget', 'context_budget_check', 'execution_protocol', 'brain_task_role'}
     if not isinstance(incoming, dict) or set(incoming) - permitted:
         raise ExecutionProtocolError('Некорректные поля продолжения Msty.')
     if incoming.get('execution_protocol') != PROTOCOL or incoming.get('result') != {}:
         raise ExecutionProtocolError('Состояние ответа нельзя подменить при продолжении.')
     if incoming.get('context_budget_check') is not None:
         raise ExecutionProtocolError('Нельзя повторно использовать проверку старого контекста.')
+    if incoming.get('brain_task_role', 'lead') != state.get('brain_task_role', 'lead'):
+        raise ExecutionProtocolError('Роль Brain нельзя менять внутри текущего шага.')
     if canonical_digest(incoming.get('tools') or []) != canonical_digest(state.get('tools') or []):
         raise ExecutionProtocolError('Набор инструментов изменён внутри ожидающего шага.')
     maximum = incoming.get('max_tokens')
