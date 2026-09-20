@@ -16,7 +16,10 @@ PROTOCOL = 'msty-local-tools-v1'
 # Owner-approved task ceiling. Native and external counters remain cumulative;
 # the local gateway atomically accounts for shared parent/worker consumption.
 MAX_ACTIONS = 200
-PRICING_VERSION = '2026-09-20-brain-model-profiles-v1'
+PRICING_VERSION = '2026-09-21-brain-model-profiles-v2'
+# Profiles a budget binding may pin: the lead (luna) plus the server-allowlisted
+# analyst consult set. The bridge pins exactly one profile per task binding.
+BINDING_PROFILES = frozenset(('luna', 'deepseek', 'astra', 'sol', 'opus', 'fable'))
 
 
 class ExecutionProtocolError(ValueError):
@@ -61,7 +64,7 @@ def validate_binding(state, profile, output_limit):
         return
     expected = {'version': 1, 'pricing_version': PRICING_VERSION,
                 'profile': profile, 'input_limit': 180000, 'output_limit': output_limit}
-    if (state.get('execution_task_id') is None or profile not in ('luna', 'deepseek') or
+    if (state.get('execution_task_id') is None or profile not in BINDING_PROFILES or
             not isinstance(binding, dict) or binding != expected or
             any(type(binding.get(k)) is not int for k in ('version', 'input_limit', 'output_limit'))):
         raise ExecutionProtocolError('Модель и лимиты не совпадают с бюджетом задачи; генерация не запущена.')

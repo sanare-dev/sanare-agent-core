@@ -208,6 +208,24 @@ def test_task_id_cannot_change_on_checkpoint():
         execution.validate_binding(state, 'luna', 100)
 
 
+@pytest.mark.parametrize('profile', ['deepseek', 'astra', 'sol', 'opus', 'fable'])
+def test_consult_profile_binding_validates(profile):
+    state = initial()
+    state['task_budget_binding'] = {'version': 1, 'pricing_version': execution.PRICING_VERSION,
+        'profile': profile, 'input_limit': 180000, 'output_limit': 2048}
+    execution.validate_binding(state, profile, 2048)
+
+
+def test_binding_rejects_unlisted_or_mismatched_profile():
+    state = initial()
+    with pytest.raises(execution.ExecutionProtocolError):
+        execution.validate_binding(state, 'gpt-4o-mini', 100)
+    state['task_budget_binding'] = {'version': 1, 'pricing_version': execution.PRICING_VERSION,
+        'profile': 'opus', 'input_limit': 180000, 'output_limit': 100}
+    with pytest.raises(execution.ExecutionProtocolError):
+        execution.validate_binding(state, 'fable', 100)
+
+
 def test_summary_cannot_hide_user_message_even_with_matching_hash():
     state = initial()
     segment = {'start': 0, 'end': 2, 'source_sha256': execution.canonical_digest(state['messages']),
