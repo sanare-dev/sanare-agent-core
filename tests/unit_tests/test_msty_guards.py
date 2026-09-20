@@ -245,3 +245,66 @@ def test_actual_graph_publishes_valid_text_and_tool_result_once_unchanged(monkey
     assert final['result'] == response.model_dump()
     assert final['context_budget_check'] is None
     assert seen['generations'] == 1
+
+
+@pytest.mark.parametrize('choice', ['none', {'type': 'none'}])
+def test_cap_final_keeps_history_schemas_and_uses_real_sdk_none_choice(monkeypatch, choice):
+    sdk_bind = msty.ChatAnthropic.bind_tools
+    seen = {}
+
+    class Model:
+        thinking = None
+        bind_tools = sdk_bind
+
+        def __init__(self, **kwargs):
+            pass
+
+        def bind(self, **kwargs):
+            seen['provider_options'] = kwargs
+            return self
+
+        async def ainvoke(self, messages):
+            seen['system'], seen['messages'] = msty._format_messages(messages)
+            return AIMessage(content='Confirmed partial work; action limit reached.')
+
+    monkeypatch.setattr(msty, 'ChatAnthropic', Model)
+    calls = [{'id': f'completed-{i}', 'type': 'function',
+              'function': {'name': 'inspect', 'arguments': '{}'}} for i in range(24)]
+    history = [{'role': 'user', 'content': 'inspect'},
+               {'role': 'assistant', 'content': '', 'tool_calls': calls}]
+    history += [{'role': 'tool', 'tool_call_id': c['id'], 'content': 'confirmed result'} for c in calls]
+    state = {'messages': history, 'tools': [tool({'type': 'object'})], 'tool_choice': choice}
+    before = deepcopy(state)
+    result = asyncio.run(msty.respond(state))
+    assert state == before
+    assert seen['provider_options']['tool_choice'] == {'type': 'none'}
+    assert seen['provider_options']['tools'] == [{'name': 'inspect', 'input_schema': {'type': 'object'}}]
+    assert sum(block.get('type') == 'tool_use' for m in seen['messages']
+               for block in m['content'] if isinstance(block, dict)) == 24
+    assert sum(block.get('type') == 'tool_result' for m in seen['messages']
+               for block in m['content'] if isinstance(block, dict)) == 24
+    assert result['result']['content'] == 'Confirmed partial work; action limit reached.'
+    assert result['result']['tool_calls'] == []
+
+
+@pytest.mark.parametrize('choice', ['none', {'type': 'none'}])
+def test_explicit_none_rejects_even_schema_valid_calls_before_publication(monkeypatch, choice):
+    seen, response = install_model(monkeypatch, [call({})])
+
+    async def collect():
+        return [event async for event in msty.graph.astream({
+            'messages': [{'role': 'user', 'content': 'summarize; no further actions'}],
+            'tools': [tool({'type': 'object'})], 'tool_choice': choice,
+        }, stream_mode=['custom', 'values'])]
+
+    events = asyncio.run(collect())
+    custom = [data for mode, data in events if mode == 'custom']
+    final = [data for mode, data in events if mode == 'values'][-1]
+    assert custom == [{'type': 'validated_result', 'message': final['result']}]
+    assert final['result']['tool_calls'] == []
+    assert final['result']['invalid_tool_calls'] == []
+    assert final['result']['additional_kwargs'] == {}
+    assert 'отключено' in final['result']['content']
+    assert final['result']['usage_metadata'] == response.usage_metadata
+    assert final['result']['response_metadata'] == response.response_metadata
+    assert seen['generations'] == 1

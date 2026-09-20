@@ -210,21 +210,29 @@ async def respond(state: State):
                 'или разделить задачу.', tokens)
         budget_check = {'version': 1, 'status': 'accepted', 'input_tokens': tokens,
                         'limit': INPUT_TOKEN_LIMIT}
+    choice = state.get("tool_choice") or "auto"
+    tools_disabled = choice == 'none' or (isinstance(choice, dict) and choice.get('type') == 'none')
     if tools:
-        choice = state.get("tool_choice") or "auto"
-        if choice == "required":
+        if tools_disabled:
+            # Keep the schemas required by historical tool_use/tool_result
+            # blocks. This SDK interprets the string "none" as a tool name.
+            choice = {'type': 'none'}
+        elif choice == "required":
             choice = "any"
         elif isinstance(choice, dict) and choice.get("type") == "function":
             choice = choice["function"]["name"]
         model = model.bind_tools(tools, tool_choice=choice)
     result = await model.ainvoke(full_messages)
     allowed = tool_names(tools)
-    if not valid_tool_calls(result, tools):
+    if (tools_disabled and result.tool_calls) or not valid_tool_calls(result, tools):
         # Fail closed before the client can execute an invented operation. Keep
         # measured usage: rejecting output does not undo the provider expense.
-        explanation = ('В этом чате инструменты не подключены; действие не выполнено.'
-                       if not allowed else
-                       'Модель запросила неподключённый или некорректный инструмент; вызов не выполнен.')
+        if tools_disabled:
+            explanation = 'Исполнение инструментов отключено для этого шага; вызов не выполнен.'
+        else:
+            explanation = ('В этом чате инструменты не подключены; действие не выполнено.'
+                           if not allowed else
+                           'Модель запросила неподключённый или некорректный инструмент; вызов не выполнен.')
         result = result.model_copy(update={'content': explanation, 'tool_calls': [],
                                           'invalid_tool_calls': [], 'additional_kwargs': {}})
     # Explicit None clears any check left in a persisted LangGraph thread;

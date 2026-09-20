@@ -44,6 +44,13 @@ call. Valid batches are returned unchanged for Msty to execute. Schema validity
 is not authorization, action success or proof of textual truth: the local tool
 executor still enforces access and checks actual results.
 
+For a text-only final after the action cap, retain the current tool schemas and
+history but send `tool_choice: {"type":"none"}`. Historical Anthropic
+`tool_use`/`tool_result` blocks still require tool definitions. The graph also
+normalizes OpenAI's string `"none"` to that dictionary (the installed LangChain
+adapter otherwise treats it as a tool name), and rejects any new structured
+call under explicit `none` before publication, even with schema-valid arguments.
+
 Offline regression (no provider requests):
 `uv run pytest tests/unit_tests/test_msty.py tests/unit_tests/test_msty_guards.py`.
 The stream test exercises the actual `msty.graph.astream`, including a synthetic
