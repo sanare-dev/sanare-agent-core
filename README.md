@@ -29,13 +29,63 @@ not blind retry. Once the requested outcome is verified, the task ends.
 
 This is a behavioral instruction, **not a deterministic completion controller**.
 No regex-based regeneration, extra model pass, forced tool choice, permission
-expansion or hidden background loop is added. The graph still returns one model
+expansion or hidden background loop is added. Each invocation returns one model
 step for Msty's native tool loop. A text-only response remains a protocol-valid
 answer, not proof of task completion. Tests in `test_msty_continuity.py` check
 policy delivery and preserved user stop/history/tool choice, not model accuracy.
 Real behavioral canaries and the old conversation's saved prompt need separate
 verification. Old saved prompts are changed only through Msty GUI, not by editing
 its obfuscated config or live database.
+
+## Native checkpointed tool lifecycle — 20 September 2026
+
+Requests using `execution_protocol=msty-local-tools-v1` use the installed
+LangGraph 1.1.2 `interrupt` / `Command(resume=...)`, with Agent Server persistence.
+After a schema-valid tool batch, a separate `wait_external` node records the
+task, step, batch, guarded-result SHA256 and cumulative issued-action count.
+That node performs no model call or external operation before interrupting.
+The gateway publishes only a matching guarded result plus typed interrupt;
+Msty continues to execute its own local MCP tools. A result callback resumes
+the exact checkpoint/interrupt with the saved client-to-model call-ID mapping.
+It does not resubmit the original request as a new graph run from START.
+
+Resume validates task/batch, tools, output cap, original user turn and every
+expected call/result. The checkpoint retains its original instructions and
+history; only this batch's tool observations are appended. Root/RAG settings
+changed while waiting are not silently substituted; they apply on a new user
+turn. Canonical `b1_` client IDs are preserved in subsequent history. Provider
+`length`/refusal responses cannot create executable pending calls. The 24-action
+cap is cumulative in checkpoint state, not recomputed from shortened history.
+
+Statuses `waiting_tools`, `answered`, `incomplete` and `blocked` describe the
+execution protocol, **not verified completion of the user's business task**.
+Tool-result text is still a client observation, not a signed action receipt.
+Local SessionStore claims prevent duplicate publication/resume; uncertain
+remote outcomes stay blocked for readback rather than being blindly retried.
+Legacy requests with protocol `None` retain the old one-step behavior for
+backwards-compatible rollout, not as fallback after a failed native resume.
+The compatible gateway enforces the existing fresh global-stop projection
+before dispatch and before publication; budgets, models and limits are unchanged.
+
+Identity: the existing gateway uses explicit scoped chat IDs when supplied;
+without one, initial requests remain isolated and callbacks reconnect through
+their saved call IDs. This does not establish persistent identity across new
+user turns that arrive without a chat ID. No unlimited context, autonomous
+background task runner or weight training is implied.
+
+Offline tests use real LangGraph checkpoints with fake inference. Recreating a
+graph with the same in-memory saver tests resume semantics, not OS-crash recovery.
+Live Agent Server/Msty verification and measured costs belong in the delivery
+receipt. The [synthetic evaluator](tools/MSTY_EVAL.md) is an additional release
+regression and optional LangSmith dataset, not a claim of general model quality.
+
+Ready-made implementation selected (MIT, no additional dependencies):
+[LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence),
+[interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts),
+[source/license](https://github.com/langchain-ai/langgraph/blob/main/LICENSE).
+Full DeepAgents migration and stock summarization middleware were not adopted:
+they add unrelated execution semantics and do not by themselves provide safe
+Msty history identity or failure-preserving compaction.
 
 ## Validated publication contract — 20 September 2026
 

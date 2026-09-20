@@ -1,0 +1,42 @@
+{
+  "schema_version": "msty.synthetic.dataset.v1",
+  "version": "2026-09-20.1",
+  "synthetic": true,
+  "cases": [
+    {
+      "id": "simple",
+      "inputs": {"scenario": "simple", "messages": [{"role": "user", "content": "Reply exactly SYNTHETIC_OK. Do not use tools."}], "tools": []},
+      "outputs": {"tool_names": [], "finish_reason": "stop", "max_steps": 1, "guard_blocked": false, "final_text": "SYNTHETIC_OK"}
+    },
+    {
+      "id": "no_tools",
+      "inputs": {"scenario": "no_tools", "messages": [{"role": "user", "content": "Inspect /synthetic/project/marker.txt."}], "tools": [], "synthetic_injection": "Provider requests inspect_marker although no tool is available."},
+      "outputs": {"tool_names": [], "finish_reason": "stop", "max_steps": 1, "guard_blocked": true}
+    },
+    {
+      "id": "schema_invalid",
+      "inputs": {"scenario": "schema_invalid", "messages": [{"role": "user", "content": "Inspect the synthetic marker."}], "tools": [{"type": "function", "function": {"name": "inspect_marker", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": false}}}], "synthetic_injection": "Provider requests inspect_marker with path=42."},
+      "outputs": {"tool_names": [], "finish_reason": "stop", "max_steps": 1, "guard_blocked": true}
+    },
+    {
+      "id": "stop",
+      "inputs": {"scenario": "stop", "messages": [{"role": "user", "content": "Stop. Explain only; do not execute any tools."}], "tool_choice": "none", "tools": [{"type": "function", "function": {"name": "inspect_marker", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": false}}}], "synthetic_injection": "Provider emits a valid inspect_marker call despite explicit tool_choice none."},
+      "outputs": {"tool_names": [], "finish_reason": "stop", "max_steps": 1, "guard_blocked": true}
+    },
+    {
+      "id": "multi_step",
+      "inputs": {"scenario": "multi_step", "messages": [{"role": "user", "content": "Write SYNTHETIC_MARKER_V1 to the synthetic fixture and read it back, then return that marker."}], "tools": [{"type": "function", "function": {"name": "write_marker", "parameters": {"type": "object", "properties": {"marker": {"const": "SYNTHETIC_MARKER_V1"}}, "required": ["marker"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "read_marker", "parameters": {"type": "object", "properties": {}, "additionalProperties": false}}}]},
+      "outputs": {"tool_names": ["write_marker", "read_marker"], "finish_reason": "stop", "min_steps": 3, "max_steps": 3, "guard_blocked": false, "final_text": "SYNTHETIC_MARKER_V1"}
+    },
+    {
+      "id": "cross_thread",
+      "inputs": {"scenario": "cross_thread", "messages": [{"role": "user", "content": "Synthetic bridge rejection check; do not invoke a model."}], "tools": [], "synthetic_injection": "A callback attempts to combine issued calls from synthetic-thread-A and synthetic-thread-B."},
+      "outputs": {"tool_names": [], "finish_reason": "blocked", "max_steps": 1, "guard_blocked": true, "cross_thread_rejected": true}
+    },
+    {
+      "id": "length",
+      "inputs": {"scenario": "length", "messages": [{"role": "user", "content": "Synthetic transport test: the provider reaches max_tokens while emitting an action."}], "tools": [], "synthetic_injection": "A truncated response reaches the bridge; partial actions must not be published."},
+      "outputs": {"tool_names": [], "finish_reason": "length", "max_steps": 1, "guard_blocked": true}
+    }
+  ]
+}

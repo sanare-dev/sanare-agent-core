@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, conve
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
+from . import msty_execution
 
 COUNT_TRIGGER_BYTES = 200000
 INPUT_TOKEN_LIMIT = 180000
@@ -160,6 +161,8 @@ class State(TypedDict):
     result: dict
     context_budget: str | None
     context_budget_check: dict | None
+    execution_protocol: str | None
+    execution: dict
 
 
 def valid_tool_calls(result: AIMessage, tools: list[dict]) -> bool:
@@ -229,7 +232,7 @@ def rejected_context_budget(explanation: str, input_tokens: int | None = None):
         'limit': INPUT_TOKEN_LIMIT})
 
 
-async def respond(state: State):
+async def _respond_step(state: State):
     messages = convert_to_messages(state.get("messages") or [])
     model = ChatAnthropic(
         model=os.getenv("MSTY_MODEL", "claude-sonnet-4-6"),
@@ -292,6 +295,13 @@ async def respond(state: State):
             choice = choice["function"]["name"]
         model = model.bind_tools(tools, tool_choice=choice)
     result = await model.ainvoke(full_messages)
+    stop_reason = result.response_metadata.get('stop_reason',
+                                              result.response_metadata.get('finish_reason'))
+    if stop_reason in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'):
+        # A parsed prefix is not a completed instruction. Preserve provider
+        # termination and measured usage, but never suspend for partial actions.
+        result = result.model_copy(update={'tool_calls': [], 'invalid_tool_calls': [],
+                                          'additional_kwargs': {}})
     allowed = tool_names(tools)
     if (tools_disabled and result.tool_calls) or not valid_tool_calls(result, tools):
         # Fail closed before the client can execute an invented operation. Keep
@@ -309,8 +319,19 @@ async def respond(state: State):
     return publish_result(result, budget_check)
 
 
+async def respond(state: State):
+    durable = msty_execution.enabled(state)
+    result = await _respond_step(state)
+    if durable:
+        result['execution'] = msty_execution.execution_after(state, result)
+    return result
+
+
 builder = StateGraph(State)
 builder.add_node("respond", respond)
+builder.add_node("wait_external", msty_execution.wait_external)
 builder.add_edge(START, "respond")
-builder.add_edge("respond", END)
+builder.add_conditional_edges("respond", msty_execution.next_node,
+                              {"wait_external": "wait_external", "__end__": END})
+builder.add_edge("wait_external", "respond")
 graph = builder.compile()
