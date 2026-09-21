@@ -29,6 +29,20 @@ def test_external_component_policy_present_with_and_without_tools():
         assert 'область действия' in policy
 
 
+def test_access_answers_policy_present_with_and_without_tools():
+    no_tools = msty.policy_for_tools([])
+    with_tools = msty.policy_for_tools([
+        {'type': 'function', 'function': {'name': 'msty_project_read',
+                                        'parameters': {'type': 'object'}}},
+    ])
+    for policy in (no_tools, with_tools):
+        assert 'MSTY_ACCESS_ANSWERS_V1' in policy
+        assert 'своими credentials' in policy
+        assert 'не чтением\nхранилища' in policy
+        assert 'оправдание' in policy
+        assert 'пересохранить тулсет' in policy
+
+
 def test_no_tools_policy_is_explicit_and_does_not_advertise_supervisor():
     policy = msty.policy_for_tools([])
     assert 'MSTY_TOOLS_UNAVAILABLE' in policy
