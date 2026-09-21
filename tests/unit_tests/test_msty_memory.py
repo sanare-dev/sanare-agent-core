@@ -73,6 +73,21 @@ def test_packaged_projection_is_bounded_and_content_addressed():
     assert 'list_organizations, list_projects или list_tables' in content
     assert 'sanarelab.health: /Users/vb/Documents/ChatGPT/Sites/sanare/sanarelab-health' in content
     assert 'НЕ имена GitHub-репозиториев' in content
+    assert 'sanarelab.science' in content
+    assert 'sanarelab.com/blogs/guides' in content
+    assert '2the.life/blog' in content
+    assert 'thefenbendazole.com' in content
+    assert 'содержит только проекты ChatGPT Sites' in content
+
+
+def test_blog_catalog_route_is_direct_and_does_not_scan_chatgpt_sites():
+    context = msty_memory.system_context()
+    policy = msty.POLICY
+    assert 'MSTY_SOURCE_SELECTION_V1' in policy
+    assert 'отвечай прямо по этому паспорту без tools' in context
+    assert 'Не вызывай list_directory' in policy
+    assert 'msty_projects_list' in policy
+    assert 'sites.json — только реестр ChatGPT Sites' in policy
 
 
 def test_native_runtime_seeds_once_and_reuses_one_cross_thread_projection():

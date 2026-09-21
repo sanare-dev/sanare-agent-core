@@ -74,6 +74,23 @@ sanarelab.co: /Users/vb/Documents/ChatGPT/Sites/sanare/sanarelab-co
 У каждого отдельная D1/секреты. Живые заказы/клиенты не являются файлами Git.
 Msty site executor сейчас не публикует эти Sites-проекты: нужен их штатный tool.
 
+Проверенный каталог блоговых контуров (21.09.2026) уже является частью памяти:
+- sanarelab.science — основной научный блог SanareLab, Ghost; данные Science,
+  project_id lijkfanuzeebbhwlsofw (ghost_posts и sanare_blog_posts);
+- sanarelab.com/blogs/guides — журнал/гайды магазина SanareLab; данные
+  sanarelab-com, project_id hffhuesmyubowymxoycu (blog_posts);
+- 2the.life/blog — исследовательский блог магазина 2TheLife; данные Life,
+  project_id dufipeeayrhkadaiwach (blog_posts);
+- thefenbendazole.com — отдельный исследовательский блог; данные
+  Thefenbendazole, project_id yncwirapzozbrybztxvk (posts).
+Это контентные сайты разных платформ, а не перечень ChatGPT Sites. sites.json
+содержит только проекты ChatGPT Sites и НЕ является глобальным каталогом сайтов.
+Запрос перечислить известные блоги отвечай прямо по этому паспорту без tools.
+Не обходи /Users/vb/Documents/ChatGPT/Sites и не угадывай блог по наличию app/,
+README или D1. Для изменяемого содержимого/статуса используй один узкий запрос
+по указанному project_id или точному публичному URL. sanarelab.co и
+sanarelab.health этим паспортом как блоги не подтверждаются.
+
 Источник проекции: LLM/ai-knowledge/SITES_AND_PROJECTS.md, текущая политика Msty,
 проверенные журналы msty-workers-learning, msty-site-executor и native-framework-review
 от 20.09.2026. Исторические OpenClaw/Mac2 не являются действующими маршрутами.
