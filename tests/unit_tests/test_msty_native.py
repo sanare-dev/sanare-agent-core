@@ -151,13 +151,49 @@ def test_identical_external_calls_keep_exact_ids_when_mapping_reordered(monkeypa
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('mode', ['mixed', 'limit', 'duplicate_todos'])
+def test_mixed_native_external_batch_runs_sequentially_without_new_user_command(monkeypatch):
+    seen = scripted(monkeypatch, [answer('', [
+        call('native_read_file', {'file_path': '/memory/PROJECT.md'}, 'native'),
+        call('external_read', {'name': 'fixture'}, 'external')]),
+        answer('', [call('external_read', {'name': 'fixture'}, 'external-reissued')]),
+        answer()])
+
+    async def run():
+        saver, store = InMemorySaver(), InMemoryStore()
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        config = {'configurable': {'thread_id': 'mixed-sequential'}}
+        first, events = await invoke(graph, initial(), config)
+        assert len(seen) == len(events) == 1
+        assert first.values['execution']['status'] == 'waiting_native'
+        assert first.values['execution']['native_actions'] == 1
+        assert first.values['execution']['actions_issued'] == 0
+        assert [item['name'] for item in events[0]['tool_calls']] == ['native_read_file']
+        assert events[0]['response_metadata']['msty_deferred_external_calls'] == 1
+
+        native = first.tasks[0].interrupts[0]
+        second, events = await invoke(graph, Command(resume={native.id: {
+            **native.value, 'type': 'msty_native_resume'}}), config)
+        assert len(seen) == 2 and len(events) == 1
+        assert second.values['execution']['status'] == 'waiting_tools'
+        assert second.values['execution']['native_actions'] == 1
+        assert second.values['execution']['actions_issued'] == 1
+        assert [item['name'] for item in events[0]['tool_calls']] == ['external_read']
+
+        external = second.tasks[0].interrupts[0]
+        final, events = await invoke(graph, Command(resume={
+            external.id: external_resume(second.values)}), config)
+        assert len(seen) == 3 and len(events) == 1
+        assert final.values['execution']['status'] == 'answered'
+        assert final.values['result']['content'] == 'Done.'
+        assert not final.next
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('mode', ['limit', 'duplicate_todos'])
 def test_unsafe_batches_block_before_publication_or_execution(monkeypatch, mode):
     data = initial()
-    if mode == 'mixed':
-        calls = [call('native_read_file', {'file_path': '/memory/PROJECT.md'}, 'native'),
-                 call('external_read', {'name': 'fixture'}, 'external')]
-    elif mode == 'limit':
+    if mode == 'limit':
         data['execution'] = {'actions_issued': 1, 'native_actions': 199}
         calls = [call('external_read', {'name': 'fixture'})]
     else:

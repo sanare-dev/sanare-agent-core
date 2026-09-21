@@ -282,13 +282,25 @@ class NativeMstyMiddleware(AgentMiddleware):
             native_calls = [call for call in calls if call['name'] in NATIVE_TOOLS]
             external_calls = [call for call in calls if call['name'] not in NATIVE_TOOLS]
             prior_external = (state.get('execution') or {}).get('actions_issued', 0)
-            if (native_calls and external_calls or
-                    prior_external + prior_native + len(calls) > msty_execution.MAX_ACTIONS or
+            if (prior_external + prior_native + len(calls) > msty_execution.MAX_ACTIONS or
                     sum(call['name'] == 'native_write_todos' for call in native_calls) > 1):
                 return result.model_copy(update={'content':
-                    'Действия не выполнены: смешанная batch или общий лимит действий не допускает этот шаг.',
+                    'Действия не выполнены: общий лимит действий или повторное обновление списка задач не допускает этот шаг.',
                     'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
                     'response_metadata': {**result.response_metadata, 'msty_blocked': True}})
+            if native_calls and external_calls and not result.invalid_tool_calls:
+                # Deep Agents' native ToolNode and Msty's client-side MCP executor
+                # have different checkpoint/resume protocols, so they cannot be
+                # published as one batch. Execute the native portion first. The
+                # original user turn and task remain checkpointed; after the native
+                # result the model gets another step and can issue the deferred MCP
+                # actions without asking the owner to repeat the instruction.
+                return result.model_copy(update={
+                    'content': '', 'tool_calls': native_calls, 'invalid_tool_calls': [],
+                    'additional_kwargs': {},
+                    'response_metadata': {**result.response_metadata,
+                        'msty_deferred_external_calls': len(external_calls)},
+                })
             return result
 
         update = await msty._respond_step(protocol_state, native_system_prompt=system,

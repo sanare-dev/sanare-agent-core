@@ -386,6 +386,14 @@ Msty continues to execute its own local MCP tools. A result callback resumes
 the exact checkpoint/interrupt with the saved client-to-model call-ID mapping.
 It does not resubmit the original request as a new graph run from START.
 
+When one model generation proposes both native LangGraph actions and local MCP
+actions, the graph does not reject the user's task. It checkpoints and executes
+the native portion first, then gives the model the resulting state in the same
+user turn so that it can publish the deferred MCP portion. This preserves the
+two distinct resume protocols while allowing plan/read-memory followed by real
+local execution without another owner message. The cumulative action cap and
+duplicate-TODO guard still apply to both phases.
+
 Resume validates task/batch, tools, output cap, original user turn and every
 expected call/result. The checkpoint retains its original instructions and
 history; only this batch's tool observations are appended. Root/RAG settings
