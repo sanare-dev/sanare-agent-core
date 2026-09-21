@@ -16,7 +16,7 @@ PROTOCOL = 'msty-local-tools-v1'
 # Owner-approved task ceiling. Native and external counters remain cumulative;
 # the local gateway atomically accounts for shared parent/worker consumption.
 MAX_ACTIONS = 200
-PRICING_VERSION = '2026-09-21-brain-model-profiles-v2'
+PRICING_VERSION = '2026-09-21-brain-model-profiles-v3'
 # Profiles a budget binding may pin: the lead (luna) plus the server-allowlisted
 # analyst consult set. The bridge pins exactly one profile per task binding.
 BINDING_PROFILES = frozenset(('luna', 'deepseek', 'astra', 'sol', 'opus', 'fable'))
