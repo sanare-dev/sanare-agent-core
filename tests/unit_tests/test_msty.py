@@ -55,6 +55,16 @@ def test_continuous_improvement_promotes_only_repeated_verified_work():
     assert 'не создавай нового агента' in policy
 
 
+def test_context_reuse_avoids_catalog_rediscovery():
+    policy = msty.policy_for_tools([])
+    assert 'MSTY_CONTEXT_REUSE_V1' in policy
+    assert 'list organizations' in policy
+    assert 'list projects' in policy
+    assert 'list tables' in policy
+    assert 'одним наиболее узким инструментом' in policy
+    assert 'Перед записью или публикацией всегда проверяй' in policy
+
+
 def test_no_tools_policy_is_explicit_and_does_not_advertise_supervisor():
     policy = msty.policy_for_tools([])
     assert 'MSTY_TOOLS_UNAVAILABLE' in policy

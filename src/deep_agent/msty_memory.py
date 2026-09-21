@@ -52,6 +52,18 @@ msty_project_resolve нужен для запроса актуального dep
 Платёжный модуль /payments/launch — отдельный sanarehq/sanare-payment-accounts;
 его нельзя публиковать исполнителем основного сайта.
 
+tax.sanaredev.com — рабочее пространство «Налоги и комплаенс»
+(llm/msty-projects/taxes-compliance), репозиторий sanarehq/sanare-tax, канон main.
+Dedicated Supabase: sanare-tax, project_id ifezhwgslcedxtwszpaf; основной набор:
+inbox_events, amazon_settlement_lines_received,
+amazon_financial_transactions_received, amazon_vcs_rows_received, tax_obligations.
+Cross-domain control plane: sanaredev, project_id jthcrehexaatuollcuzg.
+Это стабильный паспорт маршрутизации, поэтому ради определения сайта, репозитория,
+проекта Supabase или известных таблиц не вызывай resolver, memory search,
+list_organizations, list_projects или list_tables. Текущие строки, схема, статусы,
+commit и deployment не входят в паспорт: для них выполняй один узкий live-запрос
+к уже известному project_id, а перед записью повторно проверяй точную цель.
+
 ChatGPT Sites — другой контур. Точные локальные каталоги исходников:
 sanarelab.health: /Users/vb/Documents/ChatGPT/Sites/sanare/sanarelab-health
 sanarelab.co: /Users/vb/Documents/ChatGPT/Sites/sanare/sanarelab-co

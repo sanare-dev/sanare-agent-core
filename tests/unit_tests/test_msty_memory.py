@@ -68,6 +68,9 @@ def test_packaged_projection_is_bounded_and_content_addressed():
     assert msty_memory.KEY.endswith(msty_memory.SHA256)
     assert '/Users/vb/Documents/ChatGPT/LLM' in content
     assert 'app.sanaredev.com' in content
+    assert 'tax.sanaredev.com' in content
+    assert 'ifezhwgslcedxtwszpaf' in content
+    assert 'list_organizations, list_projects или list_tables' in content
     assert 'sanarelab.health: /Users/vb/Documents/ChatGPT/Sites/sanare/sanarelab-health' in content
     assert 'НЕ имена GitHub-репозиториев' in content
 
