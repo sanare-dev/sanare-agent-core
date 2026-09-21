@@ -136,7 +136,8 @@ def validate_resume(state, resume):
     incoming = resume.get('input')
     permitted = {'messages', 'tools', 'tool_choice', 'max_tokens', 'result',
                  'context_budget', 'context_budget_check', 'execution_protocol', 'brain_task_role',
-                 'execution_task_id', 'task_budget_binding', 'compaction_protocol', 'text_stream_protocol'}
+                 'execution_task_id', 'task_budget_binding', 'compaction_protocol', 'text_stream_protocol',
+                 'consult_profile'}
     if not isinstance(incoming, dict) or set(incoming) - permitted:
         raise ExecutionProtocolError('Некорректные поля продолжения Msty.')
     if incoming.get('execution_protocol') != PROTOCOL or incoming.get('result') != {}:
@@ -150,7 +151,8 @@ def validate_resume(state, resume):
         raise ExecutionProtocolError(str(error)) from None
     if incoming.get('brain_task_role', 'lead') != state.get('brain_task_role', 'lead'):
         raise ExecutionProtocolError('Роль Brain нельзя менять внутри текущего шага.')
-    for immutable in ('execution_task_id', 'task_budget_binding', 'compaction_protocol'):
+    for immutable in ('execution_task_id', 'task_budget_binding', 'compaction_protocol',
+                      'consult_profile'):
         if incoming.get(immutable) != state.get(immutable):
             raise ExecutionProtocolError('Протокол и бюджет задачи нельзя менять при продолжении.')
     if canonical_digest(incoming.get('tools') or []) != canonical_digest(state.get('tools') or []):
