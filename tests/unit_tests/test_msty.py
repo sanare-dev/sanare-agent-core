@@ -13,6 +13,14 @@ def isolated_cache_default(monkeypatch):
     monkeypatch.delenv('MSTY_STATIC_CACHE', raising=False)
 
 
+def test_tool_names_supports_openai_mcp_and_mixed_batches():
+    openai = {'type': 'function', 'function': {'name': 'openai_tool'}}
+    mcp = {'name': 'mcp_tool', 'inputSchema': {'type': 'object'}}
+    assert msty.tool_names([openai]) == {'openai_tool'}
+    assert msty.tool_names([mcp]) == {'mcp_tool'}
+    assert msty.tool_names([openai, mcp]) == {'openai_tool', 'mcp_tool'}
+
+
 def test_external_component_policy_present_with_and_without_tools():
     no_tools = msty.policy_for_tools([])
     with_tools = msty.policy_for_tools([

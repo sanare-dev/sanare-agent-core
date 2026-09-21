@@ -185,13 +185,29 @@ def test_native_ticket_mismatch_cannot_trigger_next_model(monkeypatch):
         config = {'configurable': {'thread_id': 'bad-ticket'}}
         state, _ = await invoke(graph, initial(), config)
         pending = state.tasks[0].interrupts[0]
-        bad = {**pending.value, 'type': 'msty_native_resume', 'native_actions': 0}
-        with pytest.raises(msty_execution.ExecutionProtocolError):
-            await invoke(graph, Command(resume={pending.id: bad}), config)
+        bad = {**pending.value, 'type': 'msty_native_resume', 'native_actions': 0,
+               'unexpected': True}
+        state, events = await invoke(graph, Command(resume={pending.id: bad}), config)
         assert len(seen) == 1
+        assert len(events) == 1 and events[0]['content']
+        assert state.values['execution']['status'] == 'blocked'
         snapshot = await graph.aget_state(config)
         assert not snapshot.values.get('files')
         assert not any(message.type == 'tool' for message in snapshot.values['messages'])
+    asyncio.run(run())
+
+
+def test_unparsable_tool_schema_returns_blocked_result(monkeypatch):
+    seen = scripted(monkeypatch, [])
+    data = initial()
+    data['tools'] = [{'description': 'missing name and schema'}]
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        state, events = await invoke(graph, data, {'configurable': {'thread_id': 'bad-schema'}})
+        assert seen == []
+        assert len(events) == 1 and events[0]['content']
+        assert state.values['execution']['status'] == 'blocked'
     asyncio.run(run())
 
 
@@ -202,9 +218,10 @@ def test_external_schema_cannot_shadow_native_tools(monkeypatch):
 
     async def run():
         graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
-        with pytest.raises(msty_execution.ExecutionProtocolError):
-            await graph.ainvoke(data, {'configurable': {'thread_id': 'shadow'}})
+        result = await graph.ainvoke(data, {'configurable': {'thread_id': 'shadow'}})
         assert seen == []
+        assert result['execution']['status'] == 'blocked'
+        assert result['result']['content']
     asyncio.run(run())
 
 

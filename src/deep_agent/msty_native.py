@@ -243,6 +243,12 @@ def _protocol_state(state):
     return {**state, 'messages': deepcopy(state['native_protocol_messages'])}
 
 
+def _blocked_update(state, error):
+    update = msty.rejected_context_budget(str(error))
+    return {**update, 'execution': {**(state.get('execution') or {}), 'status': 'blocked',
+                                    'pending': None}, 'jump_to': 'end'}
+
+
 def native_continue_request(state):
     execution = state['execution']
     pending = execution['pending']
@@ -254,15 +260,35 @@ def native_continue_request(state):
 class NativeMstyMiddleware(AgentMiddleware):
     state_schema = State
 
+    @hook_config(can_jump_to=['end'])
     async def abefore_agent(self, state, runtime):
-        if not msty_execution.enabled(state):
-            raise msty_execution.ExecutionProtocolError('Native Msty требует checkpoint-протокол.')
-        tools = state.get('tools') or []
-        names = msty.tool_names(tools)
-        if len(names) != len(tools) or names & RESERVED_TOOLS:
-            raise msty_execution.ExecutionProtocolError('Внешние схемы конфликтуют с native инструментами.')
-        _native_actions(state)
-        return {'native_needs_admission': False, 'native_external_observations': {}}
+        try:
+            if not msty_execution.enabled(state):
+                raise msty_execution.ExecutionProtocolError('Native Msty требует checkpoint-протокол.')
+            tools = state.get('tools') or []
+            names = msty.tool_names(tools)
+            parsed_names = []
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                function = tool.get('function')
+                if tool.get('type') == 'function' and isinstance(function, dict):
+                    name = function.get('name')
+                    if isinstance(name, str) and name:
+                        parsed_names.append(name)
+                elif tool.get('type') != 'function' and isinstance(tool.get('name'), str) and tool.get('name') and (
+                        'inputSchema' in tool or 'input_schema' in tool):
+                    parsed_names.append(tool['name'])
+            if names & RESERVED_TOOLS:
+                raise msty_execution.ExecutionProtocolError('Внешняя схема использует зарезервированное имя.')
+            if len(parsed_names) != len(names):
+                raise msty_execution.ExecutionProtocolError('Внешние схемы содержат повторяющиеся имена.')
+            if len(parsed_names) != len(tools):
+                raise msty_execution.ExecutionProtocolError('Имя одной или нескольких внешних схем не распознано.')
+            _native_actions(state)
+            return {'native_needs_admission': False, 'native_external_observations': {}}
+        except msty_execution.ExecutionProtocolError as error:
+            return _blocked_update(state, error)
 
     async def awrap_model_call(self, request, handler):
         state = request.state
@@ -321,6 +347,12 @@ class NativeMstyMiddleware(AgentMiddleware):
 
     @hook_config(can_jump_to=['model', 'end'])
     async def aafter_model(self, state, runtime):
+        try:
+            return await self._aafter_model(state, runtime)
+        except msty_execution.ExecutionProtocolError as error:
+            return _blocked_update(state, error)
+
+    async def _aafter_model(self, state, runtime):
         execution = state['execution']
         if execution['status'] == 'blocked':
             return {'jump_to': 'end'}

@@ -168,6 +168,9 @@ def tool_names(tools: list[dict]) -> set[str]:
             name = function.get('name')
             if isinstance(name, str) and name:
                 names.add(name)
+        elif tool.get('type') != 'function' and isinstance(tool.get('name'), str) and tool.get('name') and (
+                'inputSchema' in tool or 'input_schema' in tool):
+            names.add(tool['name'])
     return names
 
 
