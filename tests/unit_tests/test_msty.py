@@ -43,6 +43,18 @@ def test_access_answers_policy_present_with_and_without_tools():
         assert 'пересохранить тулсет' in policy
 
 
+def test_continuous_improvement_promotes_only_repeated_verified_work():
+    policy = msty.policy_for_tools([
+        {'type': 'function', 'function': {'name': 'msty_self_skills',
+                                        'parameters': {'type': 'object'}}},
+    ])
+    assert 'MSTY_CONTINUOUS_IMPROVEMENT_V1' in policy
+    assert 'подтверждённым двумя применениями' in policy
+    assert 'обнови его через CAS' in policy
+    assert 'один модельный ответ' in policy
+    assert 'не создавай нового агента' in policy
+
+
 def test_no_tools_policy_is_explicit_and_does_not_advertise_supervisor():
     policy = msty.policy_for_tools([])
     assert 'MSTY_TOOLS_UNAVAILABLE' in policy
