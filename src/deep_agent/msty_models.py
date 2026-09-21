@@ -14,7 +14,7 @@ are deliberate non-reasoning profiles, not configurable client overrides.
 
 For Sonnet, count_input uses the provider's exact counter. For text Luna, the
 official tiktoken mapping for the fixed model ID tokenizes the complete wire JSON;
-we add 25%, 4096 fixed, 128/message and 512/tool safety allowances. This is a
+we add 25%, 4096 fixed, 8/message and 16/tool framing allowances. This is a
 conservative admission ESTIMATE, not a mathematical upper-bound proof, exact
 provider count, or billable usage. No unknown-model tokenizer fallback is used.
 DeepSeek has no verified installed tokenizer: four units per UTF-8 wire byte,
@@ -345,7 +345,7 @@ async def count_input(profile: str, model, messages, tools: list[dict]) -> int:
             # content is tokenized locally and never sent to a counting model.
             encoding = tiktoken.encoding_for_model(PROFILES['luna'].model)
             tokens = len(encoding.encode(payload, disallowed_special=()))
-            return (tokens * 5 + 3) // 4 + 4096 + 128 * len(wire) + 512 * len(schemas) + image_envelope
+            return (tokens * 5 + 3) // 4 + 4096 + 8 * len(wire) + 16 * len(schemas) + image_envelope
         try:
             async with asyncio.timeout(COUNT_TIMEOUT_SECONDS):
                 return await asyncio.to_thread(admission)

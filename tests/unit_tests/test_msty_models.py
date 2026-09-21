@@ -5,7 +5,9 @@ import json
 
 import httpx
 import pytest
+import tiktoken
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import convert_to_openai_messages
 from langchain_openai import ChatOpenAI
 
 from deep_agent import msty_models as adapter
@@ -217,10 +219,38 @@ def test_conservative_text_charge_includes_schemas_and_utf8_not_chars_div4(profi
         return asyncio.run(adapter.count_input(profile, object(), ms, ts))
     plain = counter(messages, [])
     assert plain > len(('Щ'*100).encode())
-    assert counter(messages, TOOLS) > plain + (512 if profile == 'luna' else 2048)
+    if profile == 'luna':
+        assert counter(messages, TOOLS) > plain
+    else:
+        assert counter(messages, TOOLS) > plain + 2048
     assert counter([HumanMessage(content='a'*100)], []) < counter([HumanMessage(content='Щ'*100)], [])
     if profile == 'deepseek':
         assert counter([HumanMessage(content='a'*200000)], []) > 180000
+
+
+def test_luna_admission_stays_close_with_many_realistic_tool_schemas():
+    tools = []
+    for index in range(30):
+        tools.append({'type': 'function', 'function': {
+            'name': f'search_resource_{index}',
+            'description': 'Search the indexed resource collection using scoped filters and return matching records.',
+            'parameters': {'type': 'object', 'properties': {
+                'query': {'type': 'string', 'description': 'The natural-language search query to execute.'},
+                'resource_type': {'type': 'string', 'description': 'The resource category to search within.'},
+                'owner': {'type': 'string', 'description': 'An optional owner identifier used to narrow results.'},
+                'limit': {'type': 'integer', 'description': 'Maximum number of records to return.', 'minimum': 1, 'maximum': 100},
+                'include_archived': {'type': 'boolean', 'description': 'Whether archived records should be included.'},
+            }, 'required': ['query', 'resource_type']},
+        }})
+    messages = [SystemMessage(content='Use the available tools to answer the request.'),
+                HumanMessage(content='Find the latest records for this project.')]
+    prepared = adapter.prepare_messages('luna', messages, tools)
+    wire = convert_to_openai_messages(prepared, pass_through_unknown_blocks=False)
+    payload = adapter._canonical({'messages': wire, 'tools': adapter._tools('luna', tools)})
+    raw_tokens = len(tiktoken.encoding_for_model(adapter.PROFILES['luna'].model).encode(
+        payload, disallowed_special=()))
+    estimate = asyncio.run(adapter.count_input('luna', object(), messages, tools))
+    assert raw_tokens < estimate <= raw_tokens * 1.8
 
 
 def test_luna_long_text_not_rejected_merely_for_crossing_byte_trigger():
