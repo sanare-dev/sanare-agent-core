@@ -7,6 +7,7 @@ import socket
 from types import SimpleNamespace
 
 import pytest
+import tiktoken
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
@@ -326,6 +327,41 @@ def test_real_guarded_step_consumes_native_schemas_and_prompt_without_network(mo
     asyncio.run(run())
 
 
+def test_minimal_native_first_payload_stays_below_context_budget(monkeypatch):
+    """Protect the always-loaded prefix; external project tools are counted elsewhere."""
+    seen = {}
+
+    class Provider:
+        def bind_tools(self, tools, **kwargs):
+            seen['tools'] = deepcopy(tools)
+            return self
+
+        async def ainvoke(self, messages):
+            seen['messages'] = deepcopy(messages)
+            return answer('OK')
+
+    monkeypatch.setenv('MSTY_MODEL_PROFILE', 'luna')
+    monkeypatch.setattr(msty.msty_models, 'make_model', lambda *args: Provider())
+    monkeypatch.setattr(msty.msty_models, 'stamp_usage', lambda profile, result: result)
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        data = initial()
+        data['messages'] = [{'role': 'user', 'content': 'OK'}]
+        data['tools'] = []
+        final, events = await invoke(graph, data, {'configurable': {'thread_id': 'context-budget'}})
+        assert len(events) == 1 and final.values['execution']['status'] == 'answered'
+
+    asyncio.run(run())
+    wire = {'messages': [
+        {'role': 'system', 'content': seen['messages'][0].text},
+        {'role': 'user', 'content': 'OK'},
+    ], 'tools': seen['tools']}
+    encoded = json.dumps(wire, ensure_ascii=False, sort_keys=True)
+    tokens = len(tiktoken.encoding_for_model('gpt-5.6-luna').encode(encoded))
+    assert tokens <= 5500
+
+
 def test_real_guarded_native_and_external_read_file_are_distinct(monkeypatch):
     seen, schemas = [], []
     sequence = [answer('', [call('native_read_file', {
@@ -424,7 +460,8 @@ def test_native_template_namespacing_never_changes_approved_memory_body():
     source = 'Use external read_file/write_file/edit_file on Mac, not native scratch.'
     prompt = memory._format_agent_memory({'/memory/PROJECT.md': source})
     assert source in prompt
-    assert 'native_edit_file' in prompt
+    assert 'APPROVED PROJECT MEMORY' in prompt
+    assert 'native_edit_file' not in prompt
 
 
 def test_secret_pii_redacts_complete_history_input_without_hiding_business_data(monkeypatch):

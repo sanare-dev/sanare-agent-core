@@ -41,6 +41,17 @@ Internal narration is buffered; no internal tool call is sent to Msty for execut
 Native tools have no hidden model calls. Only task-relevant skills/tools are needed;
 an ordinary answer does not require planning, a council or a consultant.
 
+The native always-loaded prefix is intentionally compact. Detailed site repair,
+Brain maintenance and evidence-learning procedures live in progressive skills and
+are read only when applicable; the stable project passport remains in approved
+Memory. Native filesystem/TODO/memory/skills prompts and tool descriptions avoid
+repeating the same scope text. An offline first-turn regression serializes the
+actual system message plus all seven native schemas with `gpt-5.6-luna`'s pinned
+tiktoken mapping and requires at most 5,500 raw payload tokens. The 22 September
+2026 measured fixture fell from 11,119 to 4,901 tokens (55.9%). This bound excludes
+Msty project instructions, user history and external MCP schemas; those are added
+and metered separately. It is a regression budget, not a provider invoice.
+
 Cloud code has no separate dollar cap or `MAX_STEPS` to raise. Recursion is a
 per-invocation graph bound, not the cumulative task-action counter: 200 sequential
 native actions with checkpoint/resume are covered offline at recursion limit 64.

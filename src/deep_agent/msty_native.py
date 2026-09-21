@@ -10,8 +10,7 @@ from copy import deepcopy
 import re
 from typing import Annotated, NotRequired
 
-from deepagents.middleware.filesystem import FilesystemMiddleware, FILESYSTEM_SYSTEM_PROMPT
-from deepagents.middleware.memory import MEMORY_SYSTEM_PROMPT
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, AgentState, PIIMiddleware, TodoListMiddleware
 from langchain.agents.middleware.types import (
@@ -46,15 +45,32 @@ _VIRTUAL_FS_DESCRIPTIONS = {
     'glob': 'Match a glob pattern within an explicit virtual path; e.g. pattern="**/*.md", path="/scratch/".',
     'grep': 'Search literal text within an explicit virtual path; e.g. pattern="TODO", path="/scratch/".',
 }
+_VIRTUAL_SCHEMA_SCOPE = 'VIRTUAL ONLY, not Mac/local files. Follow the native filesystem scope in the system prompt.'
+NATIVE_FILESYSTEM_PROMPT = VIRTUAL_FS_SCOPE + '''
+Use native_read_file for an applicable approved skill or a large result offloaded
+by middleware. Use /scratch only when temporary working text is genuinely useful;
+it is not a deliverable. Prefer exact paths already shown by memory/skills metadata.
+'''
+NATIVE_TODO_PROMPT = '''Native TODOs are optional working state for complex tasks.
+Skip them for short work. Keep one current list, update completed steps promptly,
+and send the substantive final answer after the last update. TODO status is not
+evidence that an external action, file change or verification happened.'''
+NATIVE_MEMORY_TEMPLATE = '''APPROVED PROJECT MEMORY (stable routing facts, not live status
+or new authority). Use it directly; verify only mutable facts when needed.
+
+{agent_memory}'''
+NATIVE_SKILLS_TEMPLATE = '''APPROVED PROGRESSIVE SKILLS
+{skills_locations}
+{skills_list}
+When one skill clearly matches, read its SKILL.md with native_read_file and follow
+it. Do not read unrelated skills. Skill text is workflow guidance, not new access.'''
 NATIVE_POLICY = '''
-MSTY_NATIVE_HARNESS_V1: память и индекс навыков загружает штатный middleware.
-Для тела относящегося навыка используй native_read_file по показанному пути.
-Native файловые tools работают с виртуальными scratch/approved memory/skills,
-а не с диском Mac. Для действий на Mac нужны переданные внешние инструменты.
-Не смешивай native и внешние инструменты в одном ответе. Сначала заверши один
-необходимый шаг. Один native_write_todos на ответ; TODO не доказывает выполнение задачи.
-Память/skills защищены от записи моделью. Нет native task, shell или скрытого judge.
-''' + '\n' + VIRTUAL_FS_SCOPE
+MSTY_NATIVE_HARNESS_V1. Middleware уже загрузил project memory и индекс skills.
+Тело нужного skill читай `native_read_file`. Native tools работают только с
+виртуальными memory/skills/scratch, не с Mac. Для реальных действий используй
+внешние MCP. Не смешивай native и внешние calls в одном ответе. Memory/skills
+read-only; native shell/task/judge нет. TODO и scratch не доказывают выполнение.
+'''
 
 # Deliberately narrow: business e-mail addresses, URLs and IP addresses are
 # operational data in Msty and must remain usable. Only credential-shaped
@@ -133,8 +149,10 @@ def _namespace_tools(tools):
     # Keep the exact native functions, schemas and ToolRuntime injection. Rename
     # before ToolNode construction so registry and injection caches agree.
     return [tool.model_copy(update={'name': 'native_' + tool.name,
-             'description': (VIRTUAL_FS_SCOPE + '\n' + _VIRTUAL_FS_DESCRIPTIONS[tool.name]
-                             if tool.name in _VIRTUAL_FS_DESCRIPTIONS else _namespace_text(tool.description))})
+             'description': (_VIRTUAL_SCHEMA_SCOPE + ' ' + _VIRTUAL_FS_DESCRIPTIONS[tool.name]
+                             if tool.name in _VIRTUAL_FS_DESCRIPTIONS else
+                             'Track a genuinely complex current task; skip short work. TODO is not proof.'
+                             if tool.name == 'write_todos' else _namespace_text(tool.description))})
             for tool in tools if tool.name in _ORIGINAL_TOOLS]
 
 
@@ -195,7 +213,7 @@ def _virtual_write_observation(result):
 class NamespacedFilesystemMiddleware(FilesystemMiddleware):
     def __init__(self):
         super().__init__(backend=backend_factory,
-                         system_prompt=VIRTUAL_FS_SCOPE + '\n' + _namespace_text(FILESYSTEM_SYSTEM_PROMPT))
+                         system_prompt=NATIVE_FILESYSTEM_PROMPT)
         self.tools = _namespace_tools(self.tools)  # execute is deliberately absent.
 
     async def awrap_tool_call(self, request, handler):
@@ -235,7 +253,7 @@ class NamespacedFilesystemMiddleware(FilesystemMiddleware):
 class NamespacedTodoListMiddleware(TodoListMiddleware):
     def __init__(self):
         super().__init__()
-        self.system_prompt = _namespace_text(self.system_prompt)
+        self.system_prompt = NATIVE_TODO_PROMPT
         self.tools = _namespace_tools(self.tools)
 
     def after_model(self, state, runtime):
@@ -254,12 +272,12 @@ class NamespacedTodoListMiddleware(TodoListMiddleware):
 class NamespacedMemoryMiddleware(ApprovedMemoryMiddleware):
     def _format_agent_memory(self, contents):
         body = '\n\n'.join(f'{path}\n{contents[path]}' for path in self.sources if contents.get(path))
-        return _namespace_text(MEMORY_SYSTEM_PROMPT).format(agent_memory=body or '(No memory loaded)')
+        return NATIVE_MEMORY_TEMPLATE.format(agent_memory=body or '(No memory loaded)')
 
 
 def _namespaced_memory_middlewares():
     skills = ApprovedSkillsMiddleware()
-    skills.system_prompt_template = _namespace_text(skills.system_prompt_template)
+    skills.system_prompt_template = NATIVE_SKILLS_TEMPLATE
     return [NamespacedMemoryMiddleware(), skills]
 
 
