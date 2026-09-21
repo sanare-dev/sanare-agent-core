@@ -17,6 +17,8 @@ PROTOCOL = 'msty-local-tools-v1'
 # the local gateway atomically accounts for shared parent/worker consumption.
 MAX_ACTIONS = 200
 PRICING_VERSION = '2026-09-21-brain-model-profiles-v3'
+# Bridge and server deploy independently, so the previous manifest must stay acceptable for one release.
+SUPPORTED_PRICING_VERSIONS = frozenset((PRICING_VERSION, '2026-09-21-brain-model-profiles-v2'))
 # Profiles a budget binding may pin: the lead (luna) plus the server-allowlisted
 # analyst consult set. The bridge pins exactly one profile per task binding.
 BINDING_PROFILES = frozenset(('luna', 'deepseek', 'astra', 'sol', 'opus', 'fable'))
@@ -62,12 +64,15 @@ def validate_binding(state, profile, output_limit):
     binding = state.get('task_budget_binding')
     if state.get('execution_task_id') is None and binding is None:
         return
-    expected = {'version': 1, 'pricing_version': PRICING_VERSION,
+    expected = {'version': 1,
                 'profile': profile, 'input_limit': 180000, 'output_limit': output_limit}
     if (state.get('execution_task_id') is None or profile not in BINDING_PROFILES or
-            not isinstance(binding, dict) or binding != expected or
+            not isinstance(binding, dict) or
+            {key: value for key, value in binding.items() if key != 'pricing_version'} != expected or
             any(type(binding.get(k)) is not int for k in ('version', 'input_limit', 'output_limit'))):
         raise ExecutionProtocolError('Модель и лимиты не совпадают с бюджетом задачи; генерация не запущена.')
+    if binding.get('pricing_version') not in SUPPORTED_PRICING_VERSIONS:
+        raise ExecutionProtocolError('Версия тарифного манифеста моста не поддерживается сервером; генерация не запущена.')
 
 
 def execution_after(state, update):

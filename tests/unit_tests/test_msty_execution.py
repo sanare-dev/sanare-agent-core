@@ -48,6 +48,47 @@ def model_sequence(monkeypatch, sequence):
     return seen
 
 
+def binding(pricing_version=execution.PRICING_VERSION, **overrides):
+    result = {'version': 1, 'pricing_version': pricing_version, 'profile': 'luna',
+              'input_limit': 180000, 'output_limit': 8192}
+    result.update(overrides)
+    return result
+
+
+def binding_state(value):
+    return {'execution_task_id': '12345678-1234-5678-1234-567812345678',
+            'task_budget_binding': value}
+
+
+def test_current_pricing_manifest_version_is_accepted():
+    execution.validate_binding(binding_state(binding()), 'luna', 8192)
+
+
+def test_previous_pricing_manifest_version_is_accepted():
+    execution.validate_binding(binding_state(binding('2026-09-21-brain-model-profiles-v2')), 'luna', 8192)
+
+
+def test_unknown_pricing_manifest_version_is_rejected_distinctly():
+    with pytest.raises(execution.ExecutionProtocolError, match='Версия тарифного манифеста'):
+        execution.validate_binding(binding_state(binding('unknown-version')), 'luna', 8192)
+
+
+@pytest.mark.parametrize('field, value', [
+    ('profile', 'deepseek'),
+    ('output_limit', 4096),
+    ('input_limit', 100000),
+])
+def test_binding_profile_or_limits_are_rejected_with_original_message(field, value):
+    with pytest.raises(execution.ExecutionProtocolError, match='Модель и лимиты'):
+        execution.validate_binding(binding_state(binding(**{field: value})), 'luna', 8192)
+
+
+@pytest.mark.parametrize('field', ['version', 'input_limit', 'output_limit'])
+def test_non_integer_binding_fields_are_rejected(field):
+    with pytest.raises(execution.ExecutionProtocolError, match='Модель и лимиты'):
+        execution.validate_binding(binding_state(binding(**{field: '1'})), 'luna', 8192)
+
+
 def resume_value(state, client_suffix='1'):
     incoming = {key: deepcopy(state[key]) for key in (
         'messages', 'tools', 'max_tokens', 'tool_choice', 'context_budget', 'execution_protocol')}
