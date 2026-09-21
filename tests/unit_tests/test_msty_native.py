@@ -352,6 +352,10 @@ def test_real_guarded_step_consumes_native_schemas_and_prompt_without_network(mo
         assert result.values['execution']['native_actions'] == 1
         assert 'MSTY_NATIVE_HARNESS_V1' in seen[0][0].text
         assert 'evidence-learning' in seen[0][0].text
+        assert 'MSTY_TOOLS_AVAILABLE' in seen[0][0].text
+        assert 'external_read' in seen[0][0].text
+        assert 'native_read_file' in seen[0][0].text
+        assert 'MSTY_TOOLS_UNAVAILABLE' not in seen[0][0].text
         assert not any(message.type == 'tool' for message in result.values['messages'])
         ticket = result.tasks[0].interrupts[0]
         final, events = await invoke(graph, Command(resume={ticket.id: {

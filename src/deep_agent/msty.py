@@ -41,10 +41,10 @@ def tool_names(tools: list[dict]) -> set[str]:
     return names
 
 
-def policy_for_tools(tools: list[dict]) -> str:
+def tool_availability_context(tools: list[dict]) -> str:
     names = tool_names(tools)
     if not names:
-        return POLICY + """
+        return """
 MSTY_TOOLS_UNAVAILABLE: в этом запросе инструменты не подключены.
 У тебя нет выполнения команд, чтения файлов, браузера или запуска других агентов.
 Для обычного вопроса ответь по имеющемуся контексту. Если задача требует этих
@@ -53,13 +53,17 @@ MSTY_TOOLS_UNAVAILABLE: в этом запросе инструменты не �
 XML/JSON-вызовы или результаты чтения в тексте. Не придумывай содержимое файлов.
 Исторические результаты можно обсуждать как историю, но не как свежую проверку.
 """
-    return POLICY + """
+    return """
 MSTY_TOOLS_AVAILABLE: только следующие имена имеют схемы в текущем запросе:
 """ + json.dumps(sorted(names), ensure_ascii=False) + """
 Вызывай инструмент через штатный механизм tool_calls, не печатай имитацию вызова
 или ответа инструмента в XML/JSON. Дождись настоящего tool-сообщения от Msty.
 Наличие схемы не доказывает работоспособность сервиса: учитывай результат вызова.
 """
+
+
+def policy_for_tools(tools: list[dict]) -> str:
+    return POLICY + tool_availability_context(tools)
 
 
 def _has_cache_control(value) -> bool:

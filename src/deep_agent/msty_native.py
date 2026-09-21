@@ -274,7 +274,8 @@ class NativeMstyMiddleware(AgentMiddleware):
         protocol_state = {**state, 'messages': messages, 'tools': [*native, *external],
                           'text_stream_protocol': None}
         system = (msty.ANALYST_POLICY if analyst else
-                  request.system_message.text if request.system_message is not None else '')
+                  (request.system_message.text if request.system_message is not None else '') +
+                  '\n\n' + msty.tool_availability_context(protocol_state['tools']))
         prior_native = _native_actions(state)
 
         def filter_result(result):

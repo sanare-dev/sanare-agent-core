@@ -41,6 +41,12 @@ Internal narration is buffered; no internal tool call is sent to Msty for execut
 Native tools have no hidden model calls. Only task-relevant skills/tools are needed;
 an ordinary answer does not require planning, a council or a consultant.
 
+Each native model step also receives an explicit server-generated availability
+block derived from the exact native and client MCP schemas bound for that step.
+This is redundant with provider tool binding by design: policy decisions about
+missing access must use the same current schema set, rather than a stale prompt or
+historical tool name. The block contains names only, never credentials or results.
+
 Cloud code has no separate dollar cap or `MAX_STEPS` to raise. Recursion is a
 per-invocation graph bound, not the cumulative task-action counter: 200 sequential
 native actions with checkpoint/resume are covered offline at recursion limit 64.
