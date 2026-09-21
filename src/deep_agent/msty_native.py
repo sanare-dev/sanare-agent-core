@@ -13,12 +13,12 @@ from typing import Annotated, NotRequired
 from deepagents.middleware.filesystem import FilesystemMiddleware, FILESYSTEM_SYSTEM_PROMPT
 from deepagents.middleware.memory import MEMORY_SYSTEM_PROMPT
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware, AgentState, TodoListMiddleware
+from langchain.agents.middleware import AgentMiddleware, AgentState, PIIMiddleware, TodoListMiddleware
 from langchain.agents.middleware.types import (
     ExtendedModelResponse, ModelResponse, PrivateStateAttr, hook_config,
 )
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, ToolMessage, convert_to_openai_messages
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, convert_to_openai_messages
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.types import Command, interrupt
 
@@ -56,11 +56,77 @@ Native файловые tools работают с виртуальными scrat
 Память/skills защищены от записи моделью. Нет native task, shell или скрытого judge.
 ''' + '\n' + VIRTUAL_FS_SCOPE
 
+# Deliberately narrow: business e-mail addresses, URLs and IP addresses are
+# operational data in Msty and must remain usable. Only credential-shaped
+# values are removed before model admission and every published result surface.
+SECRET_TOKEN_PATTERN = (
+    r'(?xs)(?:'
+    r'\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}'
+    r'|gh[pousr]_[A-Za-z0-9]{20,}'
+    r'|github_pat_[A-Za-z0-9_]{20,}'
+    r'|lsv2_[A-Za-z0-9_]{20,}'
+    r'|xai-[A-Za-z0-9]{20,}'
+    r'|AIza[0-9A-Za-z_-]{30,}'
+    r'|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b'
+    r'|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]{1,16384}?'
+    r'-----END [A-Z0-9 ]*PRIVATE KEY-----'
+    r')'
+)
+
 
 def _namespace_text(text):
     """Only for native generated templates/descriptions, never source/user text."""
     pattern = r'(?<![A-Za-z0-9_])(' + '|'.join(sorted(_ORIGINAL_TOOLS)) + r')(?![A-Za-z0-9_])'
     return re.sub(pattern, lambda match: 'native_' + match[0], text)
+
+
+class SecretPIIMiddleware(PIIMiddleware):
+    """Native PII hook narrowed to secrets and complete-history Msty requests.
+
+    Upstream PIIMiddleware checks the last HumanMessage because ordinary agents
+    receive one new turn at a time. Msty may provide a complete conversation,
+    so every HumanMessage and ToolMessage is scrubbed on admission. The public
+    `redact_result` helper covers Msty's custom `validated_result` stream, which
+    is intentionally outside LangChain's standard messages/tools/values modes.
+    """
+
+    def __init__(self):
+        super().__init__('api_key', detector=SECRET_TOKEN_PATTERN, strategy='redact',
+                         apply_to_input=True, apply_to_output=True,
+                         apply_to_tool_results=True)
+
+    def _redact_value(self, value):
+        if isinstance(value, str):
+            return self._process_content(value)[0]
+        if isinstance(value, list):
+            return [self._redact_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._redact_value(item) for item in value)
+        if isinstance(value, dict):
+            return {key: self._redact_value(item) for key, item in value.items()}
+        return value
+
+    def before_model(self, state, runtime):
+        messages = list(state.get('messages') or [])
+        changed = False
+        for index, message in enumerate(messages):
+            if not isinstance(message, (HumanMessage, ToolMessage)) or not message.content:
+                continue
+            content, redacted = self._process_content(message.content)
+            if redacted:
+                messages[index] = message.model_copy(update={'content': content})
+                changed = True
+        return {'messages': messages} if changed else None
+
+    def redact_result(self, result):
+        """Redact both text and structured calls before custom publication."""
+        return result.model_copy(update={
+            'content': self._redact_value(result.content),
+            'tool_calls': self._redact_value(result.tool_calls),
+            'invalid_tool_calls': self._redact_value(result.invalid_tool_calls),
+            'additional_kwargs': self._redact_value(result.additional_kwargs),
+            'response_metadata': self._redact_value(result.response_metadata),
+        })
 
 
 def _namespace_tools(tools):
@@ -254,6 +320,9 @@ def native_continue_request(state):
 class NativeMstyMiddleware(AgentMiddleware):
     state_schema = State
 
+    def __init__(self, secret_guard=None):
+        self.secret_guard = secret_guard or SecretPIIMiddleware()
+
     async def abefore_agent(self, state, runtime):
         if not msty_execution.enabled(state):
             raise msty_execution.ExecutionProtocolError('Native Msty требует checkpoint-протокол.')
@@ -278,6 +347,10 @@ class NativeMstyMiddleware(AgentMiddleware):
         prior_native = _native_actions(state)
 
         def filter_result(result):
+            # This must happen before msty._respond_step publishes its custom
+            # validated_result event; standard PIIMiddleware stream transforms
+            # only know LangChain's messages/tools/values channels.
+            result = self.secret_guard.redact_result(result)
             calls = result.tool_calls
             native_calls = [call for call in calls if call['name'] in NATIVE_TOOLS]
             external_calls = [call for call in calls if call['name'] not in NATIVE_TOOLS]
@@ -384,10 +457,11 @@ class NativeMstyMiddleware(AgentMiddleware):
 
 
 def build_graph(*, checkpointer=None, store=None):
+    secret_guard = SecretPIIMiddleware()
     return create_agent(model=_GuardedModelFacade(),
         system_prompt=msty.POLICY + '\n' + NATIVE_POLICY,
-        middleware=[NamespacedTodoListMiddleware(), NamespacedFilesystemMiddleware(),
-                    *_namespaced_memory_middlewares(), NativeMstyMiddleware()],
+        middleware=[secret_guard, NamespacedTodoListMiddleware(), NamespacedFilesystemMiddleware(),
+                    *_namespaced_memory_middlewares(), NativeMstyMiddleware(secret_guard)],
         state_schema=State, checkpointer=checkpointer, store=store, name='msty_native')
 
 

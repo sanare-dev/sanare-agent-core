@@ -427,6 +427,68 @@ def test_native_template_namespacing_never_changes_approved_memory_body():
     assert 'native_edit_file' in prompt
 
 
+def test_secret_pii_redacts_complete_history_input_without_hiding_business_data(monkeypatch):
+    secret = 'sk-proj-' + 'A' * 32
+    seen = scripted(monkeypatch, [answer('Done.')])
+    data = initial()
+    data['messages'] = [
+        {'role': 'user', 'content': f'Old credential {secret}; owner@example.com; https://example.com; 127.0.0.1'},
+        {'role': 'assistant', 'content': 'Continue.'},
+        {'role': 'user', 'content': 'Use the earlier project context.'},
+    ]
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        state, _ = await invoke(graph, data, {'configurable': {'thread_id': 'pii-input'}})
+        admitted = '\n'.join(str(message.get('content')) for message in seen[0]['state']['messages'])
+        assert secret not in admitted
+        assert '[REDACTED_API_KEY]' in admitted
+        assert 'owner@example.com' in admitted
+        assert 'https://example.com' in admitted
+        assert '127.0.0.1' in admitted
+        assert secret not in str(state.values['messages'])
+    asyncio.run(run())
+
+
+def test_secret_pii_redacts_custom_result_and_structured_arguments_before_publication(monkeypatch):
+    secret = 'lsv2_' + 'B' * 36
+    seen = scripted(monkeypatch, [answer(f'Never publish {secret}', [
+        call('external_read', {'name': f'credential={secret}'}, 'secret-call')])])
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        state, events = await invoke(graph, initial(), {'configurable': {'thread_id': 'pii-output'}})
+        assert len(seen) == len(events) == 1
+        assert secret not in json.dumps(events[0])
+        assert secret not in json.dumps(state.values['result'])
+        assert events[0]['content'] == 'Never publish [REDACTED_API_KEY]'
+        assert events[0]['tool_calls'][0]['args']['name'] == 'credential=[REDACTED_API_KEY]'
+        assert state.values['execution']['status'] == 'waiting_tools'
+    asyncio.run(run())
+
+
+def test_secret_pii_redacts_external_tool_observation_before_next_model(monkeypatch):
+    secret = 'ghp_' + 'C' * 36
+    seen = scripted(monkeypatch, [
+        answer('', [call('external_read', {'name': 'fixture'}, 'external-secret')]), answer('Done.')])
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'pii-tool-result'}}
+        first, _ = await invoke(graph, initial(), config)
+        pending = first.tasks[0].interrupts[0]
+        resume = external_resume(first.values)
+        resume['input']['messages'][-1]['content'] = f'observed {secret} owner@example.com'
+        final, _ = await invoke(graph, Command(resume={pending.id: resume}), config)
+        admitted = [message for message in seen[1]['state']['messages'] if message['role'] == 'tool'][-1]['content']
+        assert secret not in admitted
+        assert '[REDACTED_API_KEY]' in admitted
+        assert 'owner@example.com' in admitted
+        assert secret not in str(final.values['messages'])
+        assert final.values['execution']['status'] == 'answered'
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('name,args', [
     ('native_write_file', {'file_path': '/Users/vb/Documents/ChatGPT/LLM/work/fixture.txt', 'content': 'x'}),
     ('native_write_file', {'file_path': '/Volumes/NAS/fixture.txt', 'content': 'x'}),

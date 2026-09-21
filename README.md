@@ -435,6 +435,14 @@ events**: those are unvalidated provider chunks and can precede rejection.
 Text is intentionally buffered until the guarded final message is available.
 Deploy the graph and compatible bridge together before accepting this contract.
 
+The native `create_agent` stack installs a narrow `PIIMiddleware` rule for
+credential-shaped values. It scrubs complete-history user/tool input, model
+text and structured call arguments. A small adapter applies the same resolved
+rule before the non-standard `validated_result` event is published. Business
+e-mail addresses, URLs and IP addresses are deliberately not covered by this
+rule because they are normal task data. Secrets remain server-side integration
+inputs and must not be supplied to or returned by the model.
+
 Every structured call is checked against its current function's complete JSON
 Schema using pinned `jsonschema` / `referencing`, including nested constraints,
 required fields and local references. A declared supported draft is honored;
