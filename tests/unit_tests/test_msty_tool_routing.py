@@ -222,3 +222,28 @@ def test_a_bare_word_without_a_job_id_gets_no_executor_bundle():
     for text in ("расскажи про worker", "что такое codex", "как устроен brain"):
         names, _, _ = route(text)
         assert not (names & job_only), text
+
+
+BROAD = "опубликуй job site-" + "c" * 32 + " и проверь базу и файлы и браузер и блог"
+
+
+def _selected(order):
+    selected, _, _ = routing.select_tools(
+        [{"role": "user", "content": BROAD}], [schema(name) for name in order])
+    return frozenset(tool["function"]["name"] for tool in selected)
+
+
+def test_truncation_does_not_depend_on_the_order_msty_sends_schemas():
+    """The cap used to keep whatever came first, so the client decided the route."""
+    orders = (NAMES, NAMES[::-1], sorted(NAMES), sorted(NAMES, key=len))
+    results = {_selected(order) for order in orders}
+    assert len(results) == 1, "набор зависит от порядка подачи схем"
+    assert len(next(iter(results))) == routing.MAX_SELECTED_TOOLS
+
+
+def test_truncation_keeps_the_bounded_executor_and_drops_writes_first():
+    names = _selected(NAMES[::-1])
+    assert routing._SITE <= names, "ограниченный исполнитель сайта должен выживать целиком"
+    assert "msty_project_resolve" in names
+    assert not (names & routing._BROWSER_WRITE)
+    assert not (names & routing._FILES_WRITE)

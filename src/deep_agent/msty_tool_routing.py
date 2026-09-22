@@ -171,6 +171,29 @@ _KNOWN = set().union(
     _BROWSER_READ, _BROWSER_WRITE, _FILES_READ, _FILES_WRITE, _WEB,
     _BRAIN_READ, _BRAIN_WRITE, _CODEX, _KNOWN_ONLY,
 )
+# Which tools survive the MAX_SELECTED_TOOLS cap must not depend on the order
+# Msty happens to send its schemas in: the same request would otherwise get a
+# working toolset or a crippled one at random. Rank by what the step needs
+# first — resolvers that unlock everything else, then the bounded executors,
+# then reads, then writes — and break ties by name so the client never decides.
+_TRUNCATION_TIERS: tuple[frozenset[str], ...] = (
+    frozenset(_CORE_READ),
+    frozenset(_SITE | _SELFIMPROVE | _WORKER | _BRAIN_JOB | _CODEX | _PRESSABLE),
+    frozenset(_TASK | _SUPABASE_READ | _BRAIN_READ),
+    frozenset(_FILES_READ | _BROWSER_READ | _WEB),
+    frozenset(_SUPABASE_WRITE | _BRAIN_WRITE | _FILES_WRITE | _BROWSER_WRITE),
+)
+
+
+def _truncation_rank(name: str, lowered: str) -> tuple[int, str]:
+    if name.lower() in lowered:
+        return (0, name)
+    for index, tier in enumerate(_TRUNCATION_TIERS, start=1):
+        if name in tier or any(name.endswith("_" + member) for member in tier):
+            return (index, name)
+    return (len(_TRUNCATION_TIERS) + 1, name)
+
+
 _TOKEN_STOP = {
     "this", "that", "with", "from", "have", "your", "tool", "tools", "project",
     "используй", "нужно", "надо", "этот", "этого", "чтобы", "который", "через",
@@ -434,7 +457,9 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     ordered = [name for name in available if name in chosen]
     if len(ordered) > MAX_SELECTED_TOOLS:
         keep = [name for name in ordered if name in protected]
-        candidates = [name for name in ordered if name not in protected]
+        lowered_turn = text.lower()
+        candidates = sorted((name for name in ordered if name not in protected),
+                            key=lambda name: _truncation_rank(name, lowered_turn))
         keep.extend(candidates[:max(0, MAX_SELECTED_TOOLS - len(keep))])
         chosen = set(keep)
         ordered = [name for name in available if name in chosen]
