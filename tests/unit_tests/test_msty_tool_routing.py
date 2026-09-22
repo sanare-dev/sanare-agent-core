@@ -188,3 +188,37 @@ def test_a_site_word_without_a_registered_target_stays_generic():
     """Only a named registered target unlocks the bounded executor."""
     names, value, _ = route("сделай лендинг на каком-нибудь сайте")
     assert "msty_site_release" not in names
+
+
+def test_every_executor_job_id_reaches_its_own_continuation_tools():
+    """Policy tells the model to resume long work by job_id; routing must allow it.
+
+    A job reference carries no action verb and usually no domain word, so these
+    turns classified as small talk and arrived with no way to reach the job.
+    """
+    cases = [
+        ("опубликуй job site-" + "c" * 32, "msty_site_release"),
+        ("проверь job self-" + "3" * 32, "msty_selfimprove_status"),
+        ("что со статусом codex-" + "9" * 32, "msty_codex_status"),
+        ("отмени worker-" + "1" * 32, "msty_worker_cancel"),
+        ("проверь brain-" + "4" * 32, "msty_brain_job"),
+    ]
+    for text, expected in cases:
+        names, value, _ = route(text)
+        assert value["intent"] != "direct", text
+        assert expected in names, text
+        # Asking about a running job must never offer to start another one.
+        assert not (names & {"msty_codex_start", "msty_worker_start"}), text
+
+
+def test_a_bare_word_without_a_job_id_gets_no_executor_bundle():
+    """Only an actual id unlocks a job bundle; the word alone must not.
+
+    msty_selfimprove_status is deliberately excluded: it belongs to _BRAIN_READ
+    as well, so the brain domain may legitimately deliver it without any job.
+    """
+    job_only = (routing._WORKER | routing._BRAIN_JOB
+                | (routing._SELFIMPROVE - routing._BRAIN_READ))
+    for text in ("расскажи про worker", "что такое codex", "как устроен brain"):
+        names, _, _ = route(text)
+        assert not (names & job_only), text

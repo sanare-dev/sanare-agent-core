@@ -132,6 +132,26 @@ _BRAIN_WRITE = {
     "msty_worker_cancel", "msty_brain_job", "msty_brain_verify", "msty_brain_consult",
 }
 _CODEX = {"msty_codex_start", "msty_codex_status", "msty_codex_cancel"}
+_SELFIMPROVE = {
+    "msty_selfimprove_status", "msty_selfimprove_file", "msty_selfimprove_patch",
+    "msty_selfimprove_check", "msty_selfimprove_release",
+}
+_WORKER = {"msty_worker_status", "msty_worker_cancel"}
+_BRAIN_JOB = {"msty_brain_job", "msty_brain_verify"}
+
+# Every executor hands back an id of the form "<prefix>-<32 hex>" and the policy
+# tells the model to resume long work by that id. Such a turn usually carries no
+# action verb and no domain word ("статус job codex-9f2a...", "отмени
+# worker-11aa..."), so it used to classify as small talk and reach the model
+# with no way to reach the running job at all. Naming a job is itself the
+# request: give that executor's continuation tools, never its start tool.
+_JOB_BUNDLES: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
+    (re.compile(r"(?i)\bsite-[0-9a-f]{8,32}\b"), frozenset(_SITE)),
+    (re.compile(r"(?i)\bself-[0-9a-f]{8,32}\b"), frozenset(_SELFIMPROVE)),
+    (re.compile(r"(?i)\bcodex-[0-9a-f]{8,32}\b"), frozenset({"msty_codex_status", "msty_codex_cancel"})),
+    (re.compile(r"(?i)\bworker-[0-9a-f]{8,32}\b"), frozenset(_WORKER)),
+    (re.compile(r"(?i)\bbrain-[0-9a-f]{8,32}\b"), frozenset(_BRAIN_JOB)),
+)
 _KNOWN_ONLY = {
     # Installed connector operations that are intentionally not in a default
     # route. They remain selectable by exact name but never leak in through a
@@ -288,6 +308,14 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         # installed connectors without changing this router.
         lowered = text.lower()
         chosen.update(name for name in available if name.lower() in lowered)
+
+        # A named running job is an instruction on its own, whatever the verb.
+        job_tools = {name for pattern, bundle in _JOB_BUNDLES if pattern.search(text)
+                     for name in bundle}
+        if job_tools:
+            chosen.update(job_tools)
+            if intent == "direct":
+                intent = "read"
 
         if intent != "direct":
             # The generic task contract verifies explicit local artifact files.
