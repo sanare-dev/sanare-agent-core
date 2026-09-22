@@ -77,7 +77,9 @@ def test_lazy_mcp_discovery_splits_composite_queries_and_continues():
     assert 'MSTY_TOOL_DISCOVERY_V1' in policy
     assert 'Пустой ответ на составной запрос не доказывает' in policy
     assert 'Не повторяй пустой' in policy
-    assert 'вызови describe_tool, затем execute_tool' in policy
+    assert 'вызови describe_tool, затем' in policy
+    assert 'сразу используй execute_tool' in policy
+    assert 'объединяй в один batch' in policy
     assert 'Не проси включить Toolset' in policy
 
 

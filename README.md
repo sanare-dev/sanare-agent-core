@@ -387,6 +387,10 @@ access failure: the model must split it into distinct queries, never repeat the
 same empty search, and must not ask the owner to reconnect a Toolset while the
 three meta-tools are present and responding. This is behavioral routing; actual
 authorization and completion still come from the MCP result and final readback.
+When an active project skill already pins an operation name and its required
+arguments, the model skips redundant discovery/description and batches independent
+read-only calls. This keeps the lazy catalog without paying one model generation
+for every known schema.
 
 ## Task continuity policy — 20 September 2026
 
