@@ -9,7 +9,7 @@ def test_graph_compiles() -> None:
 
 def test_subagents_configured() -> None:
     names = {item["name"] for item in SUBAGENTS}
-    assert names == {"researcher", "critic"}
+    assert names == {"system-controller", "researcher", "critic"}
 
 
 def test_system_prompt_is_nonempty() -> None:

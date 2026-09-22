@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import ipaddress
+import json
 import os
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 from langchain_core.runnables import RunnableConfig
@@ -15,6 +21,7 @@ from langgraph_sdk.runtime import ServerRuntime
 from deep_agent.sandbox import get_or_create_sandbox
 
 DEFAULT_MODEL = os.getenv("DEEP_AGENT_MODEL", "anthropic:claude-sonnet-4-6")
+HTTP_EXCERPT_BYTES = 4096
 
 SYSTEM_PROMPT = """
 You are Sanare Brain, the decision and reasoning layer used from Msty Studio.
@@ -51,7 +58,72 @@ def utc_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+@tool
+def http_check(url: str) -> str:
+    """Check one public HTTP(S) endpoint and return its real status, latency and excerpt.
+
+    Read-only GET. Sends no credentials, follows no redirects to other schemes, and
+    truncates the body. Use it for availability and content checks of public surfaces
+    (sites, public read-only APIs). It cannot reach private networks and must never be
+    used for authenticated endpoints.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return json.dumps({"url": url, "error": "only public http(s) urls are allowed"})
+    host = parsed.hostname.lower()
+    if host in ("localhost",) or host.endswith(".local"):
+        return json.dumps({"url": url, "error": "private host is out of scope"})
+    with contextlib.suppress(ValueError):
+        if ipaddress.ip_address(host).is_private:
+            return json.dumps({"url": url, "error": "private host is out of scope"})
+
+    try:  # non-ASCII hosts must reach the wire as punycode, not as a crash
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return json.dumps({"url": url, "error": "host is not a valid domain name"})
+    netloc = ascii_host + (":" + str(parsed.port) if parsed.port else "")
+    target = urllib.parse.urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query, ""))
+
+    request = urllib.request.Request(target, method="GET", headers={"User-Agent": "sanare-controller/1"})
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = response.read(HTTP_EXCERPT_BYTES).decode("utf-8", "replace")
+            status = response.status
+    except urllib.error.HTTPError as exc:
+        body, status = exc.read(HTTP_EXCERPT_BYTES).decode("utf-8", "replace"), exc.code
+    except Exception as exc:  # network-level failure is a real, reportable result
+        return json.dumps({"url": url, "error": type(exc).__name__ + ": " + str(exc)[:160],
+                           "latency_ms": round((time.monotonic() - started) * 1000)})
+    return json.dumps({"url": url, "status": status,
+                       "latency_ms": round((time.monotonic() - started) * 1000),
+                       "excerpt": " ".join(body.split())[:400]}, ensure_ascii=False)
+
+
+CONTROLLER_PROMPT = (
+    "Ты — Контролёр системы. Проверяй доступность переданных публичных адресов "
+    "инструментом http_check и докладывай только фактами. Отличай сетевую "
+    "недоступность от ответа сервиса с ошибкой. У тебя только чтение: ничего не "
+    "перезапускай, не меняй и не предлагай выполнить это за владельца.\n"
+    "Любой код ответа, задержка или текст ошибки допустимы в отчёте ТОЛЬКО как "
+    "результат фактического вызова http_check. Не выдумывай ни успешную проверку, "
+    "ни неуспешную; не сумев проверить адрес, так и напиши с реальной причиной.\n"
+    "Нехватка данных по одному адресу не повод закончить: проверь все остальные.\n"
+    "Отчёт: строка на адрес (код, задержка), затем краткий список того, что требует "
+    "внимания, и что осталось непроверенным."
+)
+
 SUBAGENTS = [
+    {
+        "name": "system-controller",
+        "description": (
+            "Use for availability checks of public endpoints: which sites answer, which are "
+            "slow, which return errors. Scheduled health reports go here."
+        ),
+        "system_prompt": CONTROLLER_PROMPT,
+        "tools": [http_check, utc_now],
+    },
     {
         "name": "researcher",
         "description": "Use only when a non-trivial request requires evidence collection or source-grounded fact finding.",
@@ -76,7 +148,7 @@ SUBAGENTS = [
 def _build_agent(backend=None):
     return create_deep_agent(
         model=DEFAULT_MODEL,
-        tools=[utc_now],
+        tools=[utc_now, http_check],
         backend=backend,
         system_prompt=SYSTEM_PROMPT,
         subagents=SUBAGENTS,
