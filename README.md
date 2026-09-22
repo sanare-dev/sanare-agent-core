@@ -96,6 +96,31 @@ Sources: [memory](https://docs.langchain.com/oss/python/deepagents/memory),
 [skills](https://docs.langchain.com/oss/python/deepagents/skills),
 [middleware](https://docs.langchain.com/oss/python/langchain/middleware/built-in).
 
+### Automatic per-turn project, prompt and Toolset routing
+
+Msty may attach the complete owner-approved Toolset to every chat so the owner does
+not have to choose connectors. `NativeMstyMiddleware` now uses LangChain's native
+`wrap_model_call` lifecycle to create a deterministic projection for each model
+step. It classifies the latest owner turn into direct/read/mutate and one or more
+project domains, exposes at most 28 relevant external schemas, and appends one short
+route-specific system fragment. A new subject in the same chat is reclassified;
+short continuation commands retain the current route. The unfiltered client list
+remains in checkpoint state for exact external callback validation and never grants
+anything the client did not supply.
+
+This is deliberately not `LLMToolSelectorMiddleware`: the stock selector performs
+another model call before the lead model. The deterministic middleware therefore
+adds no routing model latency or token charge. Exact requested tool names, explicit
+tool choice and schemas referenced by historical tool calls are retained. Direct
+questions receive no external schemas unless explicitly named; action routes add
+only the relevant site, Pressable, Supabase, browser, filesystem, web or Brain
+bundle. Unknown future connectors can be selected by a bounded lexical match.
+Selection state is recorded in `execution.tool_route` for LangSmith traces without
+credentials or prompt contents.
+
+Sources: [prebuilt middleware and LLM tool selector](https://docs.langchain.com/oss/python/langchain/middleware/built-in),
+[dynamic prompt middleware](https://docs.langchain.com/oss/python/langchain/short-term-memory#prompt).
+
 ## Historical startup projection — superseded for new lead tasks
 
 Correction: the old path below verified a Store copy but supplied the packaged

@@ -227,6 +227,32 @@ def test_analyst_has_no_native_tools_or_project_prompt(monkeypatch):
     asyncio.run(run())
 
 
+def test_native_middleware_projects_tools_and_prompt_per_user_turn(monkeypatch):
+    seen = scripted(monkeypatch, [answer('Current site status checked.')])
+    data = initial()
+    data['messages'] = [{'role': 'user', 'content': 'Проверь статус app.sanaredev.com.'}]
+    data['tools'] = []
+    for name in ('msty_site_status', 'execute_sql', 'discover_tools'):
+        tool = deepcopy(TOOLS[0])
+        tool['function'].update(name=name, description='Synthetic ' + name)
+        data['tools'].append(tool)
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        final, _ = await invoke(graph, data, {'configurable': {'thread_id': 'dynamic-route'}})
+        visible = msty.tool_names(seen[0]['state']['tools'])
+        assert 'msty_site_status' in visible
+        assert 'execute_sql' not in visible and 'discover_tools' not in visible
+        assert 'MSTY_DYNAMIC_ROUTE_V1' in seen[0]['system']
+        assert 'domains=sites' in seen[0]['system']
+        route = final.values['execution']['tool_route']
+        assert route['intent'] == 'read' and route['domains'] == ['sites']
+        assert route['selected_count'] == 1 and route['available_count'] == 3
+        assert final.values['native_tool_route']['selected_names'] == ['msty_site_status']
+
+    asyncio.run(run())
+
+
 def test_validated_external_resume_preserves_none_tool_choice_and_lower_cap(monkeypatch):
     seen = scripted(monkeypatch, [answer('', [call('external_read', {'name': 'fixture'})]), answer()])
 
@@ -381,7 +407,8 @@ def test_real_guarded_native_and_external_read_file_are_distinct(monkeypatch):
     monkeypatch.setattr(msty.msty_models, 'make_model', lambda *args: Provider())
     monkeypatch.setattr(msty.msty_models, 'stamp_usage', lambda profile, result: result)
     data = initial()
-    data['messages'][0]['content'] = 'Use external read_file for /external-fixture.txt.'
+    data['messages'][0]['content'] = (
+        'Use external read_file for /external-fixture.txt; keep write_file and edit_file distinct too.')
     data['tools'] = []
     for name in ('read_file', 'write_file', 'edit_file'):
         external = deepcopy(TOOLS[0])

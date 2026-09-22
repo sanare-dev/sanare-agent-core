@@ -21,7 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, conver
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.types import Command, interrupt
 
-from . import msty, msty_compaction, msty_execution, msty_task
+from . import msty, msty_compaction, msty_execution, msty_task, msty_tool_routing
 from .msty_native_memory import backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware
 
 _ORIGINAL_TOOLS = frozenset({'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep', 'write_todos'})
@@ -306,6 +306,7 @@ class State(AgentState, total=False):
     native_protocol_messages: Annotated[NotRequired[list[dict]], PrivateStateAttr]
     native_external_observations: Annotated[NotRequired[dict], PrivateStateAttr]
     native_tool_names: Annotated[NotRequired[list[str]], PrivateStateAttr]
+    native_tool_route: Annotated[NotRequired[dict], PrivateStateAttr]
 
 
 class _GuardedModelFacade(BaseChatModel):
@@ -358,12 +359,16 @@ class NativeMstyMiddleware(AgentMiddleware):
         analyst = state.get('brain_task_role') == 'analyst'
         native = ([] if analyst else [_native_tool_schema(tool) for tool in request.tools
                   if getattr(tool, 'name', None) in NATIVE_TOOLS])
-        external = deepcopy(state.get('tools') or [])
+        external, tool_route, route_prompt = msty_tool_routing.select_tools(
+            request.messages, state.get('tools') or [],
+            prior_route=state.get('native_tool_route'), tool_choice=state.get('tool_choice'))
         messages = convert_to_openai_messages(request.messages)
         protocol_state = {**state, 'messages': messages, 'tools': [*native, *external],
                           'text_stream_protocol': None}
         system = (msty.ANALYST_POLICY if analyst else
                   request.system_message.text if request.system_message is not None else '')
+        if not analyst:
+            system += '\n\n' + route_prompt
         prior_native = _native_actions(state)
 
         def filter_result(result):
@@ -391,6 +396,9 @@ class NativeMstyMiddleware(AgentMiddleware):
         execution = (msty_compaction.execution_after(protocol_state) if compacted else
                      msty_execution.execution_after(protocol_state, update))
         execution['harness_version'] = 'msty-native-v1'
+        execution['tool_route'] = {key: deepcopy(tool_route[key]) for key in
+            ('version', 'fingerprint', 'intent', 'domains', 'source',
+             'selected_count', 'available_count')}
         calls = result.get('tool_calls') or []
         native_calls = [call for call in calls if call['name'] in NATIVE_TOOLS]
         execution['native_actions'] = prior_native
@@ -406,6 +414,7 @@ class NativeMstyMiddleware(AgentMiddleware):
         update.update(execution=execution, task_contract=contract,
             native_protocol_messages=messages, native_external_observations={},
             native_tool_names=[tool['function']['name'] for tool in native],
+            native_tool_route=tool_route,
             native_needs_admission=execution['status'] == 'waiting_native')
         if not compacted:
             update.update(compaction_skip_once=False, compaction_stage=None)
