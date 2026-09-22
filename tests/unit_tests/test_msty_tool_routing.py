@@ -133,3 +133,35 @@ def test_tool_choice_none_keeps_history_but_adds_nothing_new():
     ]
     selected, _, _ = routing.select_tools(messages, TOOLS, tool_choice="none")
     assert [tool["function"]["name"] for tool in selected] == ["execute_sql"]
+
+
+def test_domain_request_with_an_unknown_verb_still_gets_read_tools():
+    """A turn naming a business domain is never treated as small talk.
+
+    "выгрузи"/"посчитай"/"что у нас с" are not in the action lexicons, so these
+    used to fall through to intent=direct and reach the model with no schemas at
+    all — the model was told to act and given nothing to act with.
+    """
+    for text in ("выгрузи список таблиц",
+                 "что у нас с базой supabase",
+                 "налоги за квартал посчитай"):
+        names, value, _ = route(text)
+        assert value["intent"] == "read", text
+        assert value["domains"], text
+        assert names, f"{text}: маршрут без инструментов"
+        # Promotion reaches read only; mutation stays behind an explicit verb.
+        assert not (names & routing._SUPABASE_WRITE), text
+
+
+def test_explain_only_stays_direct_even_for_a_known_domain():
+    """The explain-only guard is checked before the domain promotion."""
+    for text in ("объясни, как работает supabase",
+                 "расскажи, что такое msty toolset"):
+        names, value, _ = route(text)
+        assert value["intent"] == "direct" and names == set(), text
+
+
+def test_small_talk_without_a_domain_is_not_promoted():
+    for text in ("привет", "спасибо", "да"):
+        names, value, _ = route(text)
+        assert value["intent"] == "direct" and names == set(), text

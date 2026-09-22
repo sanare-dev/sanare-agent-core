@@ -210,13 +210,20 @@ def _explicit_choice(tool_choice: Any) -> str | None:
     return function.get("name") if isinstance(function, dict) else None
 
 
-def _intent(text: str) -> str:
+def _intent(text: str, domains: tuple[str, ...] | list[str] = ()) -> str:
     if _INCIDENT.search(text) or _MUTATION.search(text):
         return "mutate"
     if _READ_ACTION.search(text):
         return "read"
     if _EXPLAIN_ONLY.search(text):
         return "direct"
+    # A turn that names a business domain is not small talk, even when its verb
+    # is not one this router knows ("выгрузи таблицы", "налоги посчитай", "что у
+    # нас с базой"). Falling through to "direct" left the whole tool selection
+    # behind `intent != "direct"`, so the model was asked to act with no schemas
+    # at all. Read is the safe promotion: write tools stay gated on "mutate".
+    if domains:
+        return "read"
     return "direct"
 
 
@@ -268,8 +275,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         chosen = {item for item in prior_route.get("selected_names", []) if item in available}
         source = "continued"
     else:
-        intent = _intent(text)
         domains = _domains(text)
+        intent = _intent(text, domains)
         chosen: set[str] = set()
         source = "classified"
 
