@@ -17,10 +17,18 @@ from typing import Any
 ROUTE_VERSION = 2
 MAX_SELECTED_TOOLS = 28
 
-_CONTINUATION = re.compile(
-    r"(?is)^\s*(?:да+|ok|ок(?:ей)?|продолжай(?:те)?|делай(?:те)?|доделывай(?:те)?|"
-    r"исправляй(?:те)?|впер[её]д|дальше)\s*[.!?]*\s*$"
+# fullmatch against a fixed list meant that any extra word broke it: "Делай, не
+# спрашивай", "И фикси", "бери и делай" and "перенастраивай" all failed to be
+# recognised, fell through to intent=direct and reached the model with no tools
+# at all — told to carry on and handed nothing to carry on with. Detect instead
+# by shape: a short turn built around a continuation verb that names no new
+# domain is a continuation, however it is phrased.
+_CONTINUATION_VERB = re.compile(
+    r"(?is)\b(?:да+|ok|ок(?:ей)?|продолж\w*|сдела\w*|делай(?:те)?|доделыв\w*|доделай|"
+    r"исправ\w*|почин\w*|чини|фикс\w*|правь|перенастра\w*|довед\w*|доводи|заверш\w*|"
+    r"впер[её]д|дальше)\b"
 )
+MAX_CONTINUATION_CHARS = 64
 _INCIDENT = re.compile(
     r"(?is)(?:не\s+работ|сломал|сломано|ошибк|сбой|пропал|не\s+приход|не\s+синхрон|"
     r"не\s+отправ|не\s+откры|failed|failure|error|broken|outage|incident|missing)"
@@ -315,7 +323,9 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     available = {_tool_name(tool): tool for tool in tools if _tool_name(tool)}
     text = latest_user_text(messages)
     fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    continuation = bool(_CONTINUATION.fullmatch(text))
+    continuation = (len(text) <= MAX_CONTINUATION_CHARS
+                    and bool(_CONTINUATION_VERB.search(text))
+                    and not _domains(text))
     if continuation and isinstance(prior_route, dict) and prior_route.get("version") == ROUTE_VERSION:
         intent = prior_route.get("intent", "mutate")
         domains = [item for item in prior_route.get("domains", []) if isinstance(item, str)]
@@ -326,6 +336,15 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         intent = _intent(text, domains)
         chosen: set[str] = set()
         source = "classified"
+
+        # "Делай" with no route to continue — the thread was compacted, or this
+        # is a fresh turn after a restart. Answering "не понял" is useless and
+        # sitting mute with no schemas is worse, so hand over the resolver and
+        # memory search: enough to find out what was being done and resume.
+        if continuation:
+            intent = "read"
+            chosen.update(_CORE_READ & available.keys())
+            source = "continuation-recovered"
 
         # Exact tool names in the user turn always win; this also supports newly
         # installed connectors without changing this router.

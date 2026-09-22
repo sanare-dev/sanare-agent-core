@@ -162,7 +162,8 @@ def test_explain_only_stays_direct_even_for_a_known_domain():
 
 
 def test_small_talk_without_a_domain_is_not_promoted():
-    for text in ("привет", "спасибо", "да"):
+    """"да" is not here: it is a continuation verb, covered by the tests below."""
+    for text in ("привет", "спасибо", "как дела"):
         names, value, _ = route(text)
         assert value["intent"] == "direct" and names == set(), text
 
@@ -247,3 +248,37 @@ def test_truncation_keeps_the_bounded_executor_and_drops_writes_first():
     assert "msty_project_resolve" in names
     assert not (names & routing._BROWSER_WRITE)
     assert not (names & routing._FILES_WRITE)
+
+
+PRIOR = {"version": routing.ROUTE_VERSION, "intent": "mutate", "domains": ["sites"],
+         "selected_names": ["msty_site_release", "msty_site_status", "msty_site_check"]}
+
+
+def test_a_continuation_is_recognised_however_it_is_phrased():
+    """fullmatch on a fixed list broke on any extra word, and those turns got
+    no tools at all — the owner said carry on and nothing could."""
+    for text in ("Делай", "Делай, не спрашивай", "И фикси", "бери и делай",
+                 "перенастраивай", "доведи до конца", "сделал"):
+        names, value, _ = route(text, prior_route=PRIOR)
+        assert value["source"] == "continued", text
+        assert names == set(PRIOR["selected_names"]), text
+
+
+def test_a_continuation_that_names_a_domain_is_a_fresh_request():
+    """A new target must re-route, not inherit the previous one."""
+    for text in ("почини WooCommerce на sanarelab.club",
+                 "сделай лендинг на app.sanaredev.com"):
+        names, value, _ = route(text, prior_route=PRIOR)
+        assert value["source"] == "classified", text
+        assert names != set(PRIOR["selected_names"]), text
+
+
+def test_a_continuation_without_a_prior_route_can_still_orient():
+    """After a compaction or restart there is nothing to continue; answering
+    with no schemas at all is the worst of the options."""
+    for text in ("Делай", "Фикси", "продолжай"):
+        names, value, _ = route(text)
+        assert value["source"] == "continuation-recovered", text
+        assert names == routing._CORE_READ, text
+        # Recovery orients, it never acts on its own.
+        assert value["intent"] == "read", text
