@@ -276,6 +276,9 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                 'Для простого ответа, обсуждения или просьбы только составить план запуск проверок не нужен. '
                 'Критерии, предложенные тобой, не доказывают полноту требований владельца. '
                 'Результат msty_task_verify подтверждает лишь указанные наблюдения, не всю бизнес-задачу.')
+        intervention = msty_task.progress_intervention(state)
+        if intervention is not None:
+            policy += '\n\n' + intervention
         full_messages = [SystemMessage(content=policy), *messages]
         full_messages = (cache_system_prefix(full_messages, tools) if profile == 'sonnet'
                          else msty_models.prepare_messages(profile, full_messages, tools))

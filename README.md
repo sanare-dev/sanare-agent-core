@@ -70,6 +70,17 @@ against the saved profile. Missing/invalid external classification does not bloc
 the same local rule chooses DeepSeek for complex action and Luna otherwise. It never
 retries the user task through a second lead model.
 
+### Progress-aware execution
+
+Tool retries are evidence-driven rather than counted as progress. Two identical
+call/result observations in the current owner turn add a mandatory re-planning
+intervention to the next model step: the lead must change the operation, arguments
+or source, fix the cause, or identify a precise external blocker. A site mutation
+exists only after a successful executor receipt; an attempted or failed patch can
+no longer create a phantom dirty job. A ready site job without a started typecheck
+switches from status polling to the explicit typecheck operation, while three
+identical in-flight status observations stop the poll loop.
+
 Cloud code has no separate dollar cap or `MAX_STEPS` to raise. Recursion is a
 per-invocation graph bound, not the cumulative task-action counter: 200 sequential
 native actions with checkpoint/resume are covered offline at recursion limit 64.

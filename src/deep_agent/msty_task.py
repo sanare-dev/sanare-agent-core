@@ -19,6 +19,7 @@ VERIFY_SUFFIX = 'msty_task_verify'
 SITE_FILE_SUFFIX = 'msty_site_file'
 SITE_PATCH_SUFFIX = 'msty_site_patch'
 SITE_STATUS_SUFFIX = 'msty_site_status'
+SITE_CHECK_SUFFIX = 'msty_site_check'
 SITE_JOB_SCHEMA = 'msty.site.job.v1'
 SITE_FILE_SCHEMA = 'msty.site.file.v1'
 PLAN_KEYS = {'schema', 'state', 'plan_id', 'plan_sha256', 'project_slug',
@@ -371,6 +372,89 @@ def _call_args(call):
     return call.get('name'), args if isinstance(args, dict) else None
 
 
+def _current_messages(state):
+    """Messages after the latest owner instruction only."""
+    messages = state.get('messages') or []
+    start = 0
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get('role') == 'user':
+            start = index + 1
+    return messages[start:]
+
+
+def repeated_observation(state):
+    """Return a repeated call/result pair that has stopped making progress.
+
+    Two byte-identical observations for the same tool and canonical arguments are
+    sufficient evidence that a third identical call is not a new strategy.  The
+    result text stays hashed: it is untrusted data and must not be promoted into
+    the system instruction.
+    """
+    calls = {}
+    observations = {}
+    for message in _current_messages(state):
+        if not isinstance(message, dict):
+            continue
+        if message.get('role') == 'assistant':
+            for call in message.get('tool_calls') or []:
+                name, args = _call_args(call)
+                identifier = call.get('id') if isinstance(call, dict) else None
+                if isinstance(identifier, str) and isinstance(name, str) and args is not None:
+                    calls[identifier] = (name, canonical_digest(args))
+        elif message.get('role') == 'tool':
+            identifier = message.get('tool_call_id')
+            call = calls.get(identifier)
+            if call is None:
+                continue
+            key = (*call, canonical_digest({'content': message.get('content', ''),
+                                             'name': message.get('name')}))
+            observations[key] = observations.get(key, 0) + 1
+            if observations[key] >= 2:
+                return {'tool_name': call[0], 'arguments_sha256': call[1],
+                        'observation_sha256': key[2], 'count': observations[key]}
+    return None
+
+
+def progress_intervention(state):
+    """A bounded system intervention that asks the model to choose a new branch."""
+    repeated = repeated_observation(state)
+    if repeated is None:
+        return None
+    return (
+        'MSTY_STAGNATION_INTERVENTION_V1. Инструмент '
+        f'{repeated["tool_name"]} с теми же аргументами уже дважды вернул одинаковое '
+        'наблюдение. Третий идентичный вызов запрещён: он не является прогрессом. '
+        'Снова сопоставь исходный требуемый результат с фактами и выбери материально '
+        'другую ветку: другой инструмент/источник, изменённые аргументы, исправление '
+        'причины либо точный внешний блокер. Не повторяй диагностику и не выдавай '
+        'промежуточное наблюдение за выполненную задачу.'
+    )
+
+
+def _site_progress(state, job_id):
+    """Latest executor view and consecutive identical views for one site job."""
+    latest = None
+    latest_digest = None
+    repeated = 0
+    for message in _current_messages(state):
+        if not isinstance(message, dict) or message.get('role') != 'tool':
+            continue
+        receipt = _decode(message.get('content'))
+        if (not isinstance(receipt, dict) or receipt.get('schema') != SITE_JOB_SCHEMA or
+                receipt.get('job_id') != job_id):
+            continue
+        material = {key: receipt.get(key) for key in
+                    ('state', 'active_check', 'unchecked_writes', 'checks', 'error',
+                     'cancel_requested', 'commit_sha', 'pr', 'release')}
+        digest = canonical_digest(material)
+        if digest == latest_digest:
+            repeated += 1
+        else:
+            latest_digest, repeated = digest, 1
+        latest = receipt
+    return latest, repeated
+
+
 def site_jobs(state):
     """Site copies edited in this conversation and what the executor last said about them.
 
@@ -382,15 +466,7 @@ def site_jobs(state):
     for message in state.get('messages') or []:
         if not isinstance(message, dict):
             continue
-        if message.get('role') == 'assistant':
-            for call in message.get('tool_calls') or []:
-                name, args = _call_args(call)
-                if not args or not isinstance(args.get('job_id'), str):
-                    continue
-                if _named(name, SITE_PATCH_SUFFIX) or (
-                        _named(name, SITE_FILE_SUFFIX) and args.get('operation') == 'write'):
-                    jobs[args['job_id']] = 'dirty'
-        elif message.get('role') == 'tool':
+        if message.get('role') == 'tool':
             receipt = _decode(message.get('content'))
             if not isinstance(receipt, dict) or not isinstance(receipt.get('job_id'), str):
                 continue
@@ -443,6 +519,34 @@ def _site_gate(state, result, tools, disabled):
             'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
             'response_metadata': {**meta, 'msty_blocked': True, 'msty_completion_gate': 'site_typecheck_required'}})
     job = next(iter(pending))
+    latest, repeated = _site_progress(state, job)
+    if latest is not None:
+        state_name = latest.get('state')
+        # A ready executor that did not start/record typecheck will not change by
+        # being read again. Switch from polling to the explicit check operation.
+        if state_name == 'ready' and not (latest.get('checks') or {}).get('typecheck'):
+            check_names = [tool.get('function', {}).get('name') for tool in tools
+                           if tool.get('type') == 'function' and
+                           _named(tool.get('function', {}).get('name'), SITE_CHECK_SUFFIX)]
+            if len(check_names) == 1 and (selected is None or selected == check_names[0]):
+                return result.model_copy(update={
+                    'content': 'Статус не запустил проверку; запускаю typecheck отдельной операцией.',
+                    'tool_calls': [{'id': 'sitecheck_' + uuid.uuid4().hex, 'name': check_names[0],
+                                    'args': {'job_id': job, 'preset': 'typecheck', 'test_paths': []},
+                                    'type': 'tool_call'}],
+                    'invalid_tool_calls': [], 'additional_kwargs': {},
+                    'response_metadata': {**meta, 'msty_completion_gate':
+                                          'site_explicit_typecheck_required'}})
+        # Each status call already waits up to 30 seconds. Three identical
+        # in-flight observations are a stalled executor, not permission to spin.
+        if state_name in ('preparing', 'checking', 'releasing') and repeated >= 3:
+            return result.model_copy(update={
+                'content': 'Выполнение не подтверждено: исполнитель сайта трижды вернул '
+                           'одно и то же состояние без прогресса. Повторный опрос остановлен; '
+                           'нужна проверка или восстановление самого исполнительного job.',
+                'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
+                'response_metadata': {**meta, 'msty_blocked': True,
+                                      'msty_completion_gate': 'site_executor_stalled'}})
     return result.model_copy(update={
         'content': 'Проверяю typecheck изменённой копии сайта перед итогом.',
         'tool_calls': [{'id': 'sitecheck_' + uuid.uuid4().hex, 'name': names[0],

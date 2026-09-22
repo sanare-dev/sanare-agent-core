@@ -404,6 +404,7 @@ def test_real_native_failed_verify_todo_cannot_erase_failure_or_publish_success(
 SITE_FILE = 'sanare_admin_msty_site_file'
 SITE_PATCH = 'sanare_admin_msty_site_patch'
 SITE_STATUS = 'sanare_admin_msty_site_status'
+SITE_CHECK = 'sanare_admin_msty_site_check'
 SITE_TOOLS = [
     {'type': 'function', 'function': {'name': SITE_FILE, 'parameters': {'type': 'object', 'properties': {
         'job_id': {'type': 'string'}, 'path': {'type': 'string'}, 'operation': {'type': 'string'},
@@ -415,6 +416,10 @@ SITE_TOOLS = [
         'required': ['job_id', 'path', 'expected_sha256', 'old', 'new']}}},
     {'type': 'function', 'function': {'name': SITE_STATUS, 'parameters': {'type': 'object', 'properties': {
         'job_id': {'type': 'string'}, 'wait_seconds': {'type': 'integer'}}, 'required': ['job_id']}}},
+    {'type': 'function', 'function': {'name': SITE_CHECK, 'parameters': {'type': 'object', 'properties': {
+        'job_id': {'type': 'string'}, 'preset': {'type': 'string'},
+        'test_paths': {'type': 'array', 'items': {'type': 'string'}}},
+        'required': ['job_id', 'preset']}}},
 ]
 JOB = 'site-' + 'a' * 32
 
@@ -465,6 +470,10 @@ def test_full_write_via_file_tool_is_also_dirty_and_read_is_not():
     assert task.gate_final(state, result, SITE_TOOLS, False).content == 'Посмотрел файл.'
     state['messages'] += [site_call(SITE_FILE, {'job_id': JOB, 'path': 'src/a.tsx', 'operation': 'write',
                                                 'content': 'y', 'expected_sha256': 'e' * 64}, 'b1_write')]
+    assert task.site_jobs(state) == {}
+    state['messages'] += [site_receipt({'schema': 'msty.site.file.v1', 'job_id': JOB,
+        'path': 'src/a.tsx', 'sha256': 'f' * 64, 'state': 'written',
+        'checks_invalidated': True}, 'b1_write')]
     assert task.site_jobs(state) == {JOB: 'dirty'}
     assert task.gate_final(state, result, SITE_TOOLS, False).tool_calls[0]['name'] == SITE_STATUS
 
@@ -483,8 +492,61 @@ def test_only_executor_view_with_passed_typecheck_and_no_unchecked_writes_releas
     assert released.content == 'Готово.' and not released.tool_calls
     # Any later write dirties the copy again; the earlier clean view is stale evidence.
     state['messages'] += [site_call(SITE_PATCH, {'job_id': JOB, 'path': 'src/b.tsx', 'expected_sha256': 'e' * 64,
-                                                 'old': 'x', 'new': 'y'}, 'b1_again')]
+                                                 'old': 'x', 'new': 'y'}, 'b1_again'),
+        site_receipt({'schema': 'msty.site.file.v1', 'job_id': JOB, 'path': 'src/b.tsx',
+                      'sha256': 'd' * 64, 'state': 'patched', 'replacements': 1,
+                      'checks_invalidated': True}, 'b1_again')]
     assert task.site_jobs(state) == {JOB: 'dirty'}
+
+
+def test_failed_or_missing_write_receipt_never_creates_phantom_dirty_job():
+    state = initial(tools=SITE_TOOLS)
+    state['messages'] = [{'role': 'user', 'content': 'Поправь.'},
+        site_call(SITE_PATCH, {'job_id': JOB, 'path': 'src/a.tsx',
+            'expected_sha256': 'e' * 64, 'old': 'missing', 'new': 'y'}, 'b1_failed'),
+        site_receipt({'error': 'old_text_not_found'}, 'b1_failed')]
+    assert task.site_jobs(state) == {}
+    result = AIMessage(content='Правка не применена.', usage_metadata=USAGE)
+    assert task.gate_final(state, result, SITE_TOOLS, False) is result
+
+
+def test_ready_status_without_started_typecheck_switches_to_explicit_check():
+    ready_without_check = site_view(unchecked_writes=None)
+    state = edited([site_call(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30}, 'b1_st'),
+                    site_receipt(ready_without_check, 'b1_st')])
+    guarded = task.gate_final(state, AIMessage(content='Готово.', usage_metadata=USAGE),
+                              SITE_TOOLS, False)
+    assert guarded.response_metadata['msty_completion_gate'] == 'site_explicit_typecheck_required'
+    assert [(call['name'], call['args']) for call in guarded.tool_calls] == [
+        (SITE_CHECK, {'job_id': JOB, 'preset': 'typecheck', 'test_paths': []})]
+
+
+def test_three_identical_inflight_statuses_stop_poll_loop():
+    checking = site_view(state='checking', active_check='typecheck')
+    extra = []
+    for index in range(3):
+        call_id = f'b1_status_{index}'
+        extra += [site_call(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30}, call_id),
+                  site_receipt(checking, call_id)]
+    state = edited(extra)
+    guarded = task.gate_final(state, AIMessage(content='Готово.', usage_metadata=USAGE),
+                              SITE_TOOLS, False)
+    assert not guarded.tool_calls
+    assert guarded.response_metadata['msty_completion_gate'] == 'site_executor_stalled'
+    assert guarded.response_metadata['msty_blocked'] is True
+
+
+def test_two_identical_observations_inject_replanning_intervention():
+    state = initial()
+    state['messages'] = [{'role': 'user', 'content': 'Найди причину и исправь.'}]
+    for index in range(2):
+        call_id = f'b1_repeat_{index}'
+        state['messages'] += [site_call(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30}, call_id),
+                              site_receipt(site_view(state='ready', unchecked_writes=None), call_id)]
+    repeated = task.repeated_observation(state)
+    assert repeated['tool_name'] == SITE_STATUS and repeated['count'] == 2
+    intervention = task.progress_intervention(state)
+    assert SITE_STATUS in intervention and 'Третий идентичный вызов запрещён' in intervention
 
 
 def test_clean_site_executor_receipt_supersedes_stale_failed_generic_file_plan():
