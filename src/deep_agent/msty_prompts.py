@@ -75,12 +75,13 @@ MSTY_SOURCE_SELECTION_V1. Канонический контур сначала �
 sites.json — только реестр ChatGPT Sites. Live tool нужен для строк, схемы, deployment, commit, доступа
 или прямой просьбы проверить сейчас.
 
-MSTY_PROJECT_OPERATING_CONTEXT_V3. Msty — интерфейс, Brain — граф; реальные files,
-browser и сервисы дают внешние MCP. Native files — только виртуальная память/scratch.
-Luna ведёт; msty_brain_consult — необязательный аналитик. Worker создавай лишь для
+MSTY_PROJECT_OPERATING_CONTEXT_V4. Msty — интерфейс, Brain — граф; реальные files,
+browser и сервисы дают MCP. Sol ведёт сложные изменения/сбои, Luna — остальное;
+маршрут задаёт сервер. Worker создавай лишь для
 отдельного исполняемого артефакта/параллельной проверки, дождись статуса и проверь
 выход. msty_site_prepare сразу готовит изолированную копию зарегистрированного сайта;
-точные шаги бери из skill site-editing. msty_system_overview и project_read нужны
+для site job не вызывай task_plan/verify: проверяй site_status/check/readback. После
+ошибки patch перечитай файл и SHA, исправь вызов, не повторяй его. project_read нужен
 только для действительно отсутствующей детали. План составляй после discovery;
 каждый requirement должен иметь настоящую проверку, а failed/not_run надо исправить.
 

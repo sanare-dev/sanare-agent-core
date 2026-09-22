@@ -487,6 +487,20 @@ def test_only_executor_view_with_passed_typecheck_and_no_unchecked_writes_releas
     assert task.site_jobs(state) == {JOB: 'dirty'}
 
 
+def test_clean_site_executor_receipt_supersedes_stale_failed_generic_file_plan():
+    clean = site_view(checks={'typecheck': {'passed': True, 'manifest_sha256': 'c' * 64}},
+                      unchecked_writes=False)
+    state = edited([site_call(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30}, 'b1_st'),
+                    site_receipt(clean, 'b1_st')])
+    state['task_contract'] = failed_contract()
+    released = task.gate_final(state, AIMessage(content='Сайт исправлен и проверен.', usage_metadata=USAGE),
+                               SITE_TOOLS, False)
+    assert released.content == 'Сайт исправлен и проверен.'
+    assert not released.tool_calls
+    assert released.response_metadata['msty_completion_gate'] == 'site_executor_verified'
+    assert released.response_metadata.get('msty_blocked') is not True
+
+
 def test_failed_typecheck_blocks_success_prose_instead_of_looping_status():
     failed = site_view(checks={'typecheck': {'passed': False, 'result': {'exit_code': 2}}}, unchecked_writes=True)
     state = edited([site_call(SITE_STATUS, {'job_id': JOB, 'wait_seconds': 30}, 'b1_st'), site_receipt(failed, 'b1_st')])

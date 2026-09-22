@@ -84,8 +84,9 @@ PROFILES = MappingProxyType({
     'luna': Profile('openai', 'gpt-5.6-luna', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'deepseek': Profile('deepseek', 'deepseek-flash', 'https://api.deepseek.com/v1', 'DEEPSEEK_API_KEY'),
     'sonnet': Profile('anthropic', 'claude-sonnet-4-6', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
-    # Consult-only profiles (2026-09-21): reached through the LLM Gateway BYOK
-    # wire with provider-prefixed ids; never the lead profile. See CONSULT_PROFILES.
+    # Gateway profiles use provider-prefixed BYOK ids. Sol may also be selected
+    # by the server as the lead for complex mutation/recovery tasks; the other
+    # entries in this block remain consultation-only.
     'astra': Profile('openai', 'gpt-6-astra', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'sol': Profile('openai', 'gpt-5.6-sol', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'opus': Profile('anthropic', 'claude-opus-4-8', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
@@ -95,6 +96,7 @@ PROFILES = MappingProxyType({
 # model never supplies this directly: the bridge validates the parent-issued
 # request field before it reaches the graph.
 CONSULT_PROFILES = frozenset(('deepseek', 'astra', 'sol', 'opus', 'fable'))
+LEAD_PROFILES = frozenset(('luna', 'deepseek', 'sol'))
 COUNT_METHODS = MappingProxyType({
     'luna': 'tiktoken-admission-v1', 'deepseek': 'conservative-text-v1',
     'sonnet': 'anthropic-exact-v1',
@@ -141,8 +143,12 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
         except Exception:
             raise ModelAdapterError('Клиент выбранного провайдера не создан.') from None
     options = dict(use_responses_api=False, stream_usage=False)
-    if profile in ('luna', 'sol'):
+    if profile == 'luna':
         options.update(reasoning_effort='none', store=False)
+    elif profile == 'sol':
+        # Sol is used only on the server-selected complex lane. Medium reasoning
+        # trades some latency for materially better multi-step tool decisions.
+        options.update(reasoning_effort='medium', store=False)
     elif profile == 'astra':
         # gpt-6-astra has no 'none' tier; 'low' is its minimal reasoning effort.
         options.update(reasoning_effort='low', store=False)

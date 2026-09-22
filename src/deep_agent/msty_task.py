@@ -454,7 +454,21 @@ def _site_gate(state, result, tools, disabled):
 def gate_final(state, result, tools, disabled):
     contract = state.get('task_contract') or {}
     meta = result.response_metadata
+    outcome = _outcome_start_gate(state, result, tools, disabled)
+    if outcome is not None:
+        return outcome
+    site = _site_gate(state, result, tools, disabled)
+    if site is not None:
+        return site
     if contract.get('status') == 'blocked' and not result.tool_calls:
+        jobs = site_jobs(state)
+        if jobs and all(status == 'clean' for status in jobs.values()):
+            # A generic file-plan failure must not overrule the registered site
+            # executor's newer, domain-specific typecheck receipt. This recovers
+            # old checkpoints while new routes no longer expose the incompatible
+            # task planner to site jobs at all.
+            return result.model_copy(update={'response_metadata': {
+                **meta, 'msty_completion_gate': 'site_executor_verified'}})
         # A stop/control phrase suppresses automatic actions; it can never
         # convert a failed artifact check into successful delivery. Preserve
         # charged usage, but do not publish unsupported completion prose.
@@ -465,12 +479,6 @@ def gate_final(state, result, tools, disabled):
             'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
             'response_metadata': {**meta, 'msty_blocked': True,
                                   'msty_completion_gate': 'failed_verification_preserved'}})
-    outcome = _outcome_start_gate(state, result, tools, disabled)
-    if outcome is not None:
-        return outcome
-    site = _site_gate(state, result, tools, disabled)
-    if site is not None:
-        return site
     if (contract.get('status') != 'planned' or result.tool_calls or result.invalid_tool_calls or disabled or
             owner_control(state) or meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
             meta.get('stop_reason', meta.get('finish_reason')) in

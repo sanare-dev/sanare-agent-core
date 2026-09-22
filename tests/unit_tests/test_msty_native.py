@@ -830,6 +830,7 @@ def test_server_routed_lead_profile_is_narrow_and_overrides_legacy_env(monkeypat
     state = {'brain_task_role': 'lead', 'messages': [{'role': 'user', 'content': 'lookup'}]}
     assert msty.selected_profile({**state, 'lead_profile': 'deepseek'}) == 'deepseek'
     assert msty.selected_profile({**state, 'lead_profile': 'luna'}) == 'luna'
+    assert msty.selected_profile({**state, 'lead_profile': 'sol'}) == 'sol'
     for bad in ('opus', 'sonnet', 'unknown', '', 42):
         with pytest.raises(msty_models.ModelAdapterError):
             msty.selected_profile({**state, 'lead_profile': bad})

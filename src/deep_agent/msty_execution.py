@@ -17,8 +17,8 @@ PROTOCOL = 'msty-local-tools-v1'
 # the local gateway atomically accounts for shared parent/worker consumption.
 MAX_ACTIONS = 200
 PRICING_VERSION = '2026-09-21-brain-model-profiles-v3'
-# Profiles a budget binding may pin: the lead (luna) plus the server-allowlisted
-# analyst consult set. The bridge pins exactly one profile per task binding.
+# Profiles a budget binding may pin: admitted lead profiles (Luna/DeepSeek/Sol)
+# plus the server-allowlisted analyst set. The bridge pins one profile per task.
 BINDING_PROFILES = frozenset(('luna', 'deepseek', 'astra', 'sol', 'opus', 'fable'))
 
 

@@ -55,7 +55,8 @@ def test_plain_question_has_no_external_tool_overhead():
 def test_site_mutation_gets_only_bounded_site_bundle():
     names, value, _ = route("Исправь страницу app.sanaredev.com и проверь её в браузере.")
     assert {"msty_site_prepare", "msty_site_patch", "msty_site_check",
-            "browser_navigate", "browser_snapshot", "msty_task_verify"} <= names
+            "browser_navigate", "browser_snapshot"} <= names
+    assert not ({"msty_task_plan", "msty_task_verify", "msty_project_verify_result"} & names)
     assert "execute_sql" not in names and "discover_tools" not in names
     assert "edit_file" not in names and "browser_fill_form" not in names
     assert value["intent"] == "mutate"
@@ -65,7 +66,8 @@ def test_site_mutation_gets_only_bounded_site_bundle():
 
 def test_pressable_incident_uses_lazy_meta_tools_not_every_connector():
     names, value, _ = route("На sanarelab.club сломан WooCommerce cron, почини и проверь.")
-    assert {"discover_tools", "describe_tool", "execute_tool", "msty_task_verify"} <= names
+    assert {"discover_tools", "describe_tool", "execute_tool"} <= names
+    assert not ({"msty_task_plan", "msty_task_verify", "msty_project_verify_result"} & names)
     assert "apply_migration" not in names and "msty_site_patch" not in names
     assert value["domains"][0] == "pressable"
     assert len(names) <= 8
@@ -79,9 +81,16 @@ def test_supabase_read_and_write_are_separated():
     assert read_route["intent"] == "read"
 
     write, write_route, _ = route("Создай миграцию Supabase и добавь таблицу налогов.")
-    assert {"apply_migration", "execute_sql", "msty_task_plan", "msty_task_verify"} <= write
+    assert {"apply_migration", "execute_sql"} <= write
+    assert not ({"msty_task_plan", "msty_task_verify", "msty_project_verify_result"} & write)
     assert write_route["intent"] == "mutate"
     assert len(write) <= routing.MAX_SELECTED_TOOLS
+
+
+def test_generic_artifact_plan_is_exposed_only_for_local_file_mutation():
+    names, value, _ = route("Исправь код Python в файле репозитория и проверь результат.")
+    assert {"msty_task_plan", "msty_task_verify", "read_file", "edit_file"} <= names
+    assert value["intent"] == "mutate"
 
 
 def test_short_continuation_reuses_previous_route_without_reclassification():

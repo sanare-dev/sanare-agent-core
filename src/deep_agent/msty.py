@@ -149,7 +149,7 @@ def selected_profile(state: State) -> str:
         return consult
     routed = state.get('lead_profile')
     if routed is not None:
-        if routed not in ('luna', 'deepseek'):
+        if routed not in msty_models.LEAD_PROFILES:
             raise msty_models.ModelAdapterError('Недопустимый маршрут основной модели Brain.')
         return routed
     # Compatibility for checkpoints created before server-side Jev routing.

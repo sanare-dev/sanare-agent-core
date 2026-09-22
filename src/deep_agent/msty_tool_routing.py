@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 
-ROUTE_VERSION = 1
+ROUTE_VERSION = 2
 MAX_SELECTED_TOOLS = 28
 
 _CONTINUATION = re.compile(
@@ -232,7 +232,10 @@ def _route_prompt(route: dict) -> str:
     if "supabase" in route["domains"]:
         hints.append("Supabase: используй известный project_id и один узкий live-запрос.")
     if "sites" in route["domains"]:
-        hints.append("Сайт: выбери зарегистрированный executor из памяти, затем readback.")
+        hints.append(
+            "Сайт: используй только штатный site executor и его status/check/readback; "
+            "общий msty_task_plan для site job не применим."
+        )
     if "brain" in route["domains"]:
         hints.append("Brain: меняй себя только через штатный self-improve контур и проверки.")
     return prompt + (" " + " ".join(hints) if hints else "")
@@ -262,7 +265,14 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         chosen.update(name for name in available if name.lower() in lowered)
 
         if intent != "direct":
-            if intent == "mutate":
+            # The generic task contract verifies explicit local artifact files.
+            # Service-specific executors (site, Pressable, Supabase and Brain
+            # self-improvement) have their own receipts and verification. Giving
+            # them msty_task_plan caused the model to submit directory names such
+            # as ``app``/``src/app`` to a file-only verifier and then terminate on
+            # the resulting blocked contract.
+            specialized = bool(set(domains) & {"sites", "pressable", "supabase", "brain"})
+            if intent == "mutate" and "files" in domains and not specialized:
                 chosen.update(_TASK)
             if not domains:
                 chosen.update({"msty_admin_route_request", "msty_admin_memory_search"})

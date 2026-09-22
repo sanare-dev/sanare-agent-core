@@ -147,7 +147,7 @@ def test_consult_profiles_wire(profile, selector, monkeypatch):
         # gpt-6-astra has no 'none' tier; 'low' is its minimal reasoning effort.
         assert wire['reasoning_effort'] == 'low' and wire['store'] is False
     elif profile == 'sol':
-        assert wire['reasoning_effort'] == 'none' and wire['store'] is False
+        assert wire['reasoning_effort'] == 'medium' and wire['store'] is False
     assert models.stamp_usage(profile, reply).usage_metadata['total_tokens'] == 4
 
 
