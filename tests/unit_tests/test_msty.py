@@ -65,6 +65,14 @@ def test_context_reuse_avoids_catalog_rediscovery():
     assert 'Перед записью или публикацией всегда проверяй' in policy
 
 
+def test_outcome_execution_treats_incident_as_work_not_diagnosis():
+    policy = msty.policy_for_tools([])
+    assert 'MSTY_OUTCOME_EXECUTION_V1' in policy
+    assert 'считай поручением устранить причину' in policy
+    assert 'Диагноз и список будущих проверок — промежуточные данные, не финал' in policy
+    assert 'исправь, выполни readback' in policy
+
+
 def test_lazy_mcp_discovery_splits_composite_queries_and_continues():
     policy = msty.policy_for_tools([
         {'type': 'function', 'function': {'name': 'discover_tools',

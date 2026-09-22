@@ -402,6 +402,16 @@ Explicit stop, explanation/plan-only requests, unavailable tools, access and
 budget/action limits still take priority. Unknown write outcomes require readback,
 not blind retry. Once the requested outcome is verified, the task ends.
 
+`MSTY_OUTCOME_EXECUTION_V1` treats a newly reported malfunction or missing result
+as an outcome task unless the owner explicitly asks only for explanation, audit
+or a plan. Diagnosis is intermediate. If the first model step tries to end with
+prose before any action, the graph deterministically replaces that prose with one
+read-only `msty_admin_memory_search` call when its real schema is attached. The
+guard runs only once per user turn, never chooses a mutation and never overrides
+stop, explicit tool choice or action limits. After the observation, normal model
+routing must use the narrow live service tool, repair when authorized and read
+back the result before a final answer.
+
 This continuity policy alone is a behavioral instruction, **not a deterministic completion controller**.
 The newer bounded artifact-check gate is described above, separately from this
 historical prompt-only change. No regex-based regeneration, permission expansion

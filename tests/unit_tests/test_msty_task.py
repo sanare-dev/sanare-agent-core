@@ -27,6 +27,9 @@ TOOLS = [
         'type': 'object', 'properties': {'plan_id': {'type': 'string'}},
         'required': ['plan_id'], 'additionalProperties': False}}},
 ]
+MEMORY = {'type': 'function', 'function': {'name': 'msty_admin_memory_search',
+    'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}},
+                   'required': ['query'], 'additionalProperties': False}}}
 
 
 def plan_receipt():
@@ -124,6 +127,40 @@ def test_explicit_current_user_control_vetoes_forced_external_action(command):
     assert not guarded.tool_calls
     assert guarded.content == 'Plan only.'
     assert task.final_status(state, 'answered') == 'answered'
+
+
+def test_incident_diagnosis_is_replaced_by_first_real_memory_action():
+    message = ('sanarelab.club: не работает cron-синхронизация, новые заказы не видно; '
+               'WooCommerce API возвращает ошибку.')
+    state = initial(messages=[{'role': 'user', 'content': message}], tools=[MEMORY])
+    result = AIMessage(content='Нужно проверить cron и логи.', usage_metadata=USAGE)
+    guarded = task.gate_final(state, result, [MEMORY], False)
+    assert guarded.tool_calls[0]['name'] == 'msty_admin_memory_search'
+    assert guarded.tool_calls[0]['args']['query'] == message
+    assert guarded.response_metadata['msty_completion_gate'] == 'incident_first_action_required'
+
+
+def test_incident_first_action_never_repeats_after_a_real_tool_call():
+    state = initial(messages=[
+        {'role': 'user', 'content': 'Синхронизация не работает, исправь ошибку.'},
+        {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'm1', 'type': 'function',
+            'function': {'name': 'msty_admin_memory_search', 'arguments': '{"query":"sync"}'}}]},
+        {'role': 'tool', 'tool_call_id': 'm1', 'content': '{"state":"found"}'},
+    ], tools=[MEMORY])
+    result = AIMessage(content='Проверено.', usage_metadata=USAGE)
+    guarded = task.gate_final(state, result, [MEMORY], False)
+    assert not guarded.tool_calls
+    assert guarded.content == 'Проверено.'
+
+
+def test_incident_gate_respects_owner_explanation_only_and_explicit_tool_choice():
+    state = initial(messages=[{'role': 'user', 'content': 'Только объясни, почему синхронизация не работает.'}],
+                    tools=[MEMORY])
+    result = AIMessage(content='Объяснение.', usage_metadata=USAGE)
+    assert not task.gate_final(state, result, [MEMORY], False).tool_calls
+    state = initial(messages=[{'role': 'user', 'content': 'Синхронизация не работает.'}],
+                    tools=[MEMORY], tool_choice={'type': 'function', 'function': {'name': PLAN}})
+    assert not task.gate_final(state, result, [MEMORY], False).tool_calls
 
 
 def test_tool_prose_cannot_veto_current_user_and_unissued_receipt_cannot_create_plan():

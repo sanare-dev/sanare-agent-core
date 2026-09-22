@@ -41,6 +41,10 @@ CONTROL = re.compile(r'(?:\b(?:stop|wait|pause)\b|only\s+(?:a\s+)?(?:plan|explai
                      r'\b(?:стоп|остановись|подожди|погоди)\b|'
                      r'только\s+(?:план|объясни|объяснение|расскажи)|'
                      r'не\s+(?:выполняй|проверяй|запускай|делай)|без\s+действий)', re.I)
+INCIDENT = re.compile(
+    r'(?:\b(?:error|failed|failure|broken|incident|missing|stuck|timeout)\b|'
+    r'\bне\s+(?:работает|запускается|синхронизируется|обновляется|появляется|видно|приходит|забирает)\b|'
+    r'\b(?:ошибк\w*|сбой\w*|инцидент\w*|проблем\w*|пропал\w*|завис\w*)\b)', re.I)
 
 
 def _named(name, suffix):
@@ -302,6 +306,54 @@ def owner_control(state):
     return True
 
 
+def _latest_user_index_and_text(state):
+    messages = state.get('messages') or []
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.get('role') == 'user':
+            content = message.get('content')
+            return index, content if isinstance(content, str) else None
+    return None, None
+
+
+def _incident_needs_first_action(state):
+    """A reported failure is an implicit outcome task, not a diagnosis request."""
+    index, content = _latest_user_index_and_text(state)
+    if index is None or content is None or CONTROL.search(content) or not INCIDENT.search(content):
+        return False, None
+    for message in (state.get('messages') or [])[index + 1:]:
+        if message.get('role') == 'tool' or (
+                message.get('role') == 'assistant' and message.get('tool_calls')):
+            return False, None
+    return True, content
+
+
+def _outcome_start_gate(state, result, tools, disabled):
+    """Replace unsupported first-step incident diagnosis with one real read."""
+    meta = result.response_metadata
+    needed, content = _incident_needs_first_action(state)
+    if (not needed or result.tool_calls or result.invalid_tool_calls or disabled or
+            meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
+            meta.get('stop_reason', meta.get('finish_reason')) in
+                ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter') or
+            (state.get('execution') or {}).get('actions_issued', 0) >= MAX_ACTIONS):
+        return None
+    names = [tool.get('function', {}).get('name') for tool in tools
+             if tool.get('type') == 'function' and
+             _named(tool.get('function', {}).get('name'), 'msty_admin_memory_search')]
+    choice = state.get('tool_choice')
+    selected = choice.get('function', {}).get('name') if isinstance(choice, dict) else None
+    if len(names) != 1 or selected is not None and names != [selected]:
+        return None
+    query = ' '.join(content.split())[:1200]
+    return result.model_copy(update={
+        'content': 'Сначала проверяю сохранённый контекст этого инцидента, затем продолжаю до результата.',
+        'tool_calls': [{'id': 'outcome_' + uuid.uuid4().hex, 'name': names[0],
+                        'args': {'query': query}, 'type': 'tool_call'}],
+        'invalid_tool_calls': [], 'additional_kwargs': {},
+        'response_metadata': {**meta, 'msty_completion_gate': 'incident_first_action_required'}})
+
+
 def _call_args(call):
     if not isinstance(call, dict):
         return None, None
@@ -412,6 +464,9 @@ def gate_final(state, result, tools, disabled):
             'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
             'response_metadata': {**meta, 'msty_blocked': True,
                                   'msty_completion_gate': 'failed_verification_preserved'}})
+    outcome = _outcome_start_gate(state, result, tools, disabled)
+    if outcome is not None:
+        return outcome
     site = _site_gate(state, result, tools, disabled)
     if site is not None:
         return site
