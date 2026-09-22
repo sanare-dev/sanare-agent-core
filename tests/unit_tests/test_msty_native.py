@@ -817,10 +817,11 @@ def test_analyst_consult_profile_allowlist():
              'messages': [{'role': 'user', 'content': 'synthetic brief'}]}
     assert msty.selected_profile(state) == 'deepseek'
     assert msty.selected_profile({**state, 'consult_profile': None}) == 'deepseek'
-    for profile in ('astra', 'sol', 'opus', 'fable'):
+    for profile in ('astra', 'opus', 'fable'):
         assert msty.selected_profile({**state, 'consult_profile': profile}) == profile
-    # Lead-only and unknown profiles are never a valid consultation target.
-    for bad in ('luna', 'sonnet', 'unknown', '', 42):
+    # Lead-only, premium autonomous and unknown profiles are never a valid
+    # consultation target.
+    for bad in ('luna', 'sol', 'sonnet', 'unknown', '', 42):
         with pytest.raises(msty_models.ModelAdapterError):
             msty.selected_profile({**state, 'consult_profile': bad})
 
@@ -830,7 +831,6 @@ def test_server_routed_lead_profile_is_narrow_and_overrides_legacy_env(monkeypat
     state = {'brain_task_role': 'lead', 'messages': [{'role': 'user', 'content': 'lookup'}]}
     assert msty.selected_profile({**state, 'lead_profile': 'deepseek'}) == 'deepseek'
     assert msty.selected_profile({**state, 'lead_profile': 'luna'}) == 'luna'
-    assert msty.selected_profile({**state, 'lead_profile': 'sol'}) == 'sol'
-    for bad in ('opus', 'sonnet', 'unknown', '', 42):
+    for bad in ('sol', 'opus', 'sonnet', 'unknown', '', 42):
         with pytest.raises(msty_models.ModelAdapterError):
             msty.selected_profile({**state, 'lead_profile': bad})

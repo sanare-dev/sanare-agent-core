@@ -55,18 +55,19 @@ and metered separately. It is a regression budget, not a provider invoice.
 ### One-shot lead-profile routing
 
 For a newly correlated top-level task, the local gateway first applies a zero-token
-deterministic rule: mutations, incidents and whole-architecture recovery use Sol
-with medium reasoning; ordinary questions stay on Luna. The optional private
-TypeSafe Jev sidecar may still choose Luna/DeepSeek for the non-complex lane. The
-cloud graph receives only the resulting immutable `lead_profile` (`deepseek`,
-`luna` or `sol`). Resumes reuse the stored binding; old checkpoints preserve their
+deterministic rule: mutations, incidents and whole-architecture recovery use
+DeepSeek Flash; ordinary questions stay on Luna. Sol is excluded from autonomous
+Brain lead and consultation allowlists. The optional private TypeSafe Jev sidecar
+may still choose Luna/DeepSeek for the non-complex lane. The cloud graph receives
+only the resulting immutable `lead_profile` (`deepseek` or `luna`). Resumes reuse
+the stored binding; old checkpoints preserve their
 historical route. The cloud graph never receives the TypeSafe credential.
 
 This classification is cost selection, not an authority decision: tool grants,
 task budget, emergency stop, artifact verification and release gates remain
 independent. The local gateway validates the actual returned model identity
 against the saved profile. Missing/invalid external classification does not block:
-the same local rule chooses Sol for complex action and Luna otherwise. It never
+the same local rule chooses DeepSeek for complex action and Luna otherwise. It never
 retries the user task through a second lead model.
 
 Cloud code has no separate dollar cap or `MAX_STEPS` to raise. Recursion is a
@@ -299,7 +300,7 @@ See `test_msty_compaction.py` and `test_msty_task.py` for offline acceptance.
 ### Unified inference transport
 
 Operator setting `MSTY_LLM_GATEWAY_ENABLED=1` routes all admitted cloud profiles through
-LangSmith Gateway. Luna and the complex-action Sol lane use `/openai/v1/chat/completions` with native model IDs;
+LangSmith Gateway. Luna uses `/openai/v1/chat/completions` with its native model ID;
 DeepSeek uses `/v1/chat/completions` and the saved `custom/Msty%20DeepSeek%20Flash`
 configuration. The latter must match server config ID
 `ae7376e7-fea6-43cb-b50c-97db118c8c47` in
@@ -338,7 +339,7 @@ facade additionally limits the explicit brief/evidence to 16000 characters and
 rejects common secret patterns (not a complete DLP guarantee). The consultant
 does not read paths, execute changes, browse or recursively delegate.
 
-The server-selected Luna/Sol lead reads sources and performs authorized work through
+The server-selected Luna/DeepSeek lead reads sources and performs authorized work through
 Msty's existing MCP tools. It may ask for analysis/review when justified, then checks
 the opinion against actual sources and observes the result of its own actions.
 At most two issued consultations are counted in the native task checkpoint;
@@ -347,7 +348,7 @@ callback are rejected. This is not a new background worker system and does not
 reactivate retired teams, Paperclip jobs or `brain_supervisor`.
 
 ```text
-Msty → local action router → gateway/stop/budget → LangGraph → Luna or Sol
+Msty → local action router → gateway/stop/budget → LangGraph → Luna or DeepSeek
   ↑          local MCP results / native resume       ↓
   └─ files, browser, memory, optional DeepSeek analysis
 ```
@@ -358,7 +359,7 @@ Missing usage or identity is unknown, not zero. Token estimates exclude hosting
 fees and are not provider invoices. No shared budget limit is changed here.
 
 Context admission uses `msty-model-count-v1` (legacy flag accepted for rollout).
-For Luna and Sol it uses the official tiktoken model mapping plus a documented safety
+For Luna and explicit direct Sol it uses the official tiktoken model mapping plus a documented safety
 allowance: an admission estimate, not an exact provider count or billable usage.
 DeepSeek uses a conservative text charge; budget-bound requests always run
 admission counting. Sonnet retains its official token counter.

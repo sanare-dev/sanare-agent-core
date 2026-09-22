@@ -84,9 +84,9 @@ PROFILES = MappingProxyType({
     'luna': Profile('openai', 'gpt-5.6-luna', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'deepseek': Profile('deepseek', 'deepseek-flash', 'https://api.deepseek.com/v1', 'DEEPSEEK_API_KEY'),
     'sonnet': Profile('anthropic', 'claude-sonnet-4-6', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
-    # Gateway profiles use provider-prefixed BYOK ids. Sol may also be selected
-    # by the server as the lead for complex mutation/recovery tasks; the other
-    # entries in this block remain consultation-only.
+    # Gateway profiles use provider-prefixed BYOK ids. They are retained for
+    # explicit operator/direct use, but premium profiles are not admitted as
+    # autonomous Brain leads or consultants.
     'astra': Profile('openai', 'gpt-6-astra', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'sol': Profile('openai', 'gpt-5.6-sol', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'opus': Profile('anthropic', 'claude-opus-4-8', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
@@ -95,8 +95,8 @@ PROFILES = MappingProxyType({
 # Server-owned allowlist for the optional analyst consultation profile. The
 # model never supplies this directly: the bridge validates the parent-issued
 # request field before it reaches the graph.
-CONSULT_PROFILES = frozenset(('deepseek', 'astra', 'sol', 'opus', 'fable'))
-LEAD_PROFILES = frozenset(('luna', 'deepseek', 'sol'))
+CONSULT_PROFILES = frozenset(('deepseek', 'astra', 'opus', 'fable'))
+LEAD_PROFILES = frozenset(('luna', 'deepseek'))
 COUNT_METHODS = MappingProxyType({
     'luna': 'tiktoken-admission-v1', 'deepseek': 'conservative-text-v1',
     'sonnet': 'anthropic-exact-v1',
@@ -146,8 +146,8 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
     if profile == 'luna':
         options.update(reasoning_effort='none', store=False)
     elif profile == 'sol':
-        # Sol is used only on the server-selected complex lane. Medium reasoning
-        # trades some latency for materially better multi-step tool decisions.
+        # Kept for an explicit operator/direct profile only. Brain's autonomous
+        # lead and consultation allowlists deliberately exclude it.
         options.update(reasoning_effort='medium', store=False)
     elif profile == 'astra':
         # gpt-6-astra has no 'none' tier; 'low' is its minimal reasoning effort.
