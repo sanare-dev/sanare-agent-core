@@ -13,7 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
-from deep_agent import msty, msty_compaction, msty_execution, msty_models, msty_native
+from deep_agent import msty, msty_compaction, msty_execution, msty_models, msty_native, msty_prompts
 
 TOOLS = [{'type': 'function', 'function': {'name': 'external_read',
     'description': 'Read one synthetic external item.',
@@ -426,7 +426,11 @@ def test_real_guarded_native_and_external_read_file_are_distinct(monkeypatch):
         assert [tool for tool in schemas[0] if tool['function']['name'] in {
             'read_file', 'write_file', 'edit_file'}] == data['tools']
         assert seen[0][-1].content == data['messages'][0]['content']
-        assert msty.POLICY in seen[0][0].text
+        # Policy is routed per turn (see test_policy_routing_* below); the
+        # behavioural spine and the native harness contract always ship.
+        for block in ('Ты — Sanare Brain', *msty_prompts.ALWAYS_BLOCKS,
+                      'MSTY_NATIVE_HARNESS_V1'):
+            assert block in seen[0][0].text
         assert '`native_read_file`' in seen[0][0].text
         ticket = first.tasks[0].interrupts[0]
         second, events = await invoke(graph, Command(resume={ticket.id: {
@@ -834,3 +838,51 @@ def test_server_routed_lead_profile_is_narrow_and_overrides_legacy_env(monkeypat
     for bad in ('sol', 'opus', 'sonnet', 'unknown', '', 42):
         with pytest.raises(msty_models.ModelAdapterError):
             msty.selected_profile({**state, 'lead_profile': bad})
+
+
+def test_policy_routing_keeps_the_spine_and_drops_unusable_contracts():
+    """A step carries only the policy blocks its route can act on."""
+    full = msty.POLICY + '\n' + msty_native.NATIVE_POLICY
+    spine = ('Ты — Sanare Brain', *msty_prompts.ALWAYS_BLOCKS, 'MSTY_NATIVE_HARNESS_V1')
+
+    plain = msty_prompts.select_policy(full, {'intent': 'direct', 'domains': []}, [])
+    for block in spine:
+        assert block in plain
+    # A plain question cannot act, so no execution or domain contract ships.
+    for block in (*msty_prompts.ACTIONABLE_BLOCKS, *msty_prompts.DOMAIN_BLOCKS,
+                  *msty_prompts.TOOL_BLOCKS):
+        assert block not in plain
+    assert len(plain) < len(full) / 2
+
+    site = msty_prompts.select_policy(
+        full, {'intent': 'mutate', 'domains': ['sites', 'files']}, ['msty_site_status'])
+    for block in (*spine, *msty_prompts.ACTIONABLE_BLOCKS,
+                  'MSTY_CONTEXT_REUSE_V1', 'MSTY_SOURCE_SELECTION_V1'):
+        assert block in site
+    # Discovery and self-improvement belong to other routes.
+    assert 'MSTY_TOOL_DISCOVERY_V1' not in site
+    assert 'MSTY_CONTINUOUS_IMPROVEMENT_V1' not in site
+
+    # The discovery contract follows the tool, including a namespaced schema.
+    for names in (['discover_tools'], ['sanare_admin_discover_tools']):
+        routed = msty_prompts.select_policy(full, {'intent': 'mutate', 'domains': ['pressable']}, names)
+        assert 'MSTY_TOOL_DISCOVERY_V1' in routed
+    assert 'MSTY_TOOL_DISCOVERY_V1' not in msty_prompts.select_policy(
+        full, {'intent': 'mutate', 'domains': ['pressable']}, ['execute_tool'])
+
+    brain = msty_prompts.select_policy(full, {'intent': 'mutate', 'domains': ['brain']}, [])
+    assert 'MSTY_CONTINUOUS_IMPROVEMENT_V1' in brain and 'Внешние MCP/skills/knowledge' in brain
+
+
+def test_policy_routing_never_rewrites_unknown_or_unrouted_text():
+    """Only the named optional blocks may be dropped; everything else is kept."""
+    full = msty.POLICY + '\n' + msty_native.NATIVE_POLICY + '\n\nOWNER_APPENDED_SENTINEL.'
+    assert msty_prompts.select_policy(full, None, []) == full
+    assert msty_prompts.select_policy(full, {'intent': 'bogus', 'domains': []}, []) == full
+    assert msty_prompts.select_policy('', {'intent': 'direct', 'domains': []}, []) == ''
+    for route in ({'intent': 'direct', 'domains': []}, {'intent': 'mutate', 'domains': ['brain']}):
+        routed = msty_prompts.select_policy(full, route, [])
+        assert 'OWNER_APPENDED_SENTINEL.' in routed
+        # Every kept block is verbatim from the approved text.
+        for block in routed.split('\n\n'):
+            assert block in full

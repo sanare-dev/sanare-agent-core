@@ -110,3 +110,87 @@ ANALYST_POLICY = """Ты — ограниченный текстовый ана�
 Дай основному Brain краткий полезный вывод; не проси пользователя разрешить обычный
 следующий шаг и не заявляй, что работа с системой выполнена. Не печатай секреты.
 """
+
+
+# --- Per-turn policy routing -------------------------------------------------
+# POLICY above is the complete owner-approved text and stays byte-identical: it
+# is the review surface and the fallback. What changes per turn is how much of
+# it is put on the wire. The same deterministic route that already narrows the
+# Toolset (msty_tool_routing.select_tools) also decides which named policy
+# blocks this step can actually use, so a plain question no longer carries the
+# site, Supabase, discovery and self-improvement contracts it cannot apply.
+#
+# Selection is conservative by construction: blocks are matched by their own
+# leading identifier, anything unrecognised (NATIVE_POLICY, MSTY_TOOLS_*, any
+# project text appended downstream) is always kept, and an empty or unusable
+# route returns the text unchanged.
+
+#: Behavioural spine — never dropped.
+ALWAYS_BLOCKS = (
+    'CORE_EXECUTION_V2',
+    'MSTY_ACCESS_ANSWERS_V1',
+    'MSTY_TASK_CONTINUITY_V1',
+)
+
+#: Execution discipline — only when the turn can actually act.
+ACTIONABLE_BLOCKS = (
+    'MSTY_OUTCOME_EXECUTION_V1',
+    'MSTY_ECONOMICAL_EXECUTION_V1',
+    'MSTY_PROJECT_OPERATING_CONTEXT_V5',
+)
+
+#: Domain contracts — keyed to the domains the router already detected.
+DOMAIN_BLOCKS = {
+    'MSTY_CONTEXT_REUSE_V1': frozenset({
+        'supabase', 'sites', 'pressable', 'commerce', 'tax', 'content', 'files'}),
+    'MSTY_SOURCE_SELECTION_V1': frozenset({'sites', 'content', 'files', 'commerce'}),
+    'MSTY_CONTINUOUS_IMPROVEMENT_V1': frozenset({'brain'}),
+    'Внешние MCP/skills/knowledge': frozenset({'brain'}),
+}
+
+#: Blocks that only make sense when a specific tool is actually on the wire.
+TOOL_BLOCKS = {'MSTY_TOOL_DISCOVERY_V1': 'discover_tools'}
+
+_OPTIONAL_BLOCKS = frozenset(ACTIONABLE_BLOCKS) | DOMAIN_BLOCKS.keys() | TOOL_BLOCKS.keys()
+
+
+def _block_id(block: str) -> str:
+    """Leading identifier of a policy block, or '' when it has none."""
+    head = block.lstrip()
+    for known in _OPTIONAL_BLOCKS | frozenset(ALWAYS_BLOCKS):
+        if head.startswith(known):
+            return known
+    return ''
+
+
+def select_policy(system_text: str, route: dict | None, tool_names=()) -> str:
+    """Drop the policy blocks this routed step cannot use.
+
+    ``system_text`` is the full system prompt (POLICY plus whatever the harness
+    appended). ``route`` is the dict returned by msty_tool_routing.select_tools.
+    Unknown text is never removed, so this can only ever shrink the approved
+    policy, never rewrite it.
+    """
+    if not isinstance(route, dict) or not system_text:
+        return system_text
+    intent = route.get('intent')
+    domains = {item for item in route.get('domains') or () if isinstance(item, str)}
+    if intent not in {'direct', 'read', 'mutate'}:
+        return system_text
+    actionable = intent != 'direct' or bool(domains)
+    names = set(tool_names or ())
+
+    def keep(block: str) -> bool:
+        block_id = _block_id(block)
+        if block_id not in _OPTIONAL_BLOCKS:
+            return True
+        if block_id in ACTIONABLE_BLOCKS:
+            return actionable
+        if block_id in TOOL_BLOCKS:
+            required = TOOL_BLOCKS[block_id]
+            return any(name == required or name.endswith('_' + required) for name in names)
+        return bool(domains & DOMAIN_BLOCKS[block_id])
+
+    blocks = system_text.split('\n\n')
+    kept = [block for block in blocks if keep(block)]
+    return '\n\n'.join(kept) if kept else system_text

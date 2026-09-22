@@ -21,7 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, conver
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.types import Command, interrupt
 
-from . import msty, msty_compaction, msty_execution, msty_task, msty_tool_routing
+from . import msty, msty_compaction, msty_execution, msty_prompts, msty_task, msty_tool_routing
 from .msty_native_memory import backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware
 
 _ORIGINAL_TOOLS = frozenset({'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep', 'write_todos'})
@@ -368,6 +368,10 @@ class NativeMstyMiddleware(AgentMiddleware):
         system = (msty.ANALYST_POLICY if analyst else
                   request.system_message.text if request.system_message is not None else '')
         if not analyst:
+            # Same deterministic route that narrowed the Toolset also narrows the
+            # policy: a step carries only the contracts it can act on.
+            system = msty_prompts.select_policy(
+                system, tool_route, msty.tool_names(protocol_state['tools']))
             system += '\n\n' + route_prompt
         prior_native = _native_actions(state)
 
