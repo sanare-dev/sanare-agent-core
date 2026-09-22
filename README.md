@@ -380,6 +380,14 @@ Stacks. Existing old conversations do not necessarily inherit changed project
 defaults; use a fresh conversation for acceptance. Check actual tool results,
 not just HTTP success or generated prose.
 
+Lazy MCP catalogs expose meta-tools rather than every service operation. The
+server policy requires one narrow `discover_tools` query per operation, followed
+by `describe_tool` and `execute_tool`. A zero-result composite search is not an
+access failure: the model must split it into distinct queries, never repeat the
+same empty search, and must not ask the owner to reconnect a Toolset while the
+three meta-tools are present and responding. This is behavioral routing; actual
+authorization and completion still come from the MCP result and final readback.
+
 ## Task continuity policy — 20 September 2026
 
 `MSTY_TASK_CONTINUITY_V1` is included in the server-owned policy for every model

@@ -65,6 +65,22 @@ def test_context_reuse_avoids_catalog_rediscovery():
     assert 'Перед записью или публикацией всегда проверяй' in policy
 
 
+def test_lazy_mcp_discovery_splits_composite_queries_and_continues():
+    policy = msty.policy_for_tools([
+        {'type': 'function', 'function': {'name': 'discover_tools',
+                                         'parameters': {'type': 'object'}}},
+        {'type': 'function', 'function': {'name': 'describe_tool',
+                                         'parameters': {'type': 'object'}}},
+        {'type': 'function', 'function': {'name': 'execute_tool',
+                                         'parameters': {'type': 'object'}}},
+    ])
+    assert 'MSTY_TOOL_DISCOVERY_V1' in policy
+    assert 'Пустой ответ на составной запрос не доказывает' in policy
+    assert 'Не повторяй пустой' in policy
+    assert 'вызови describe_tool, затем execute_tool' in policy
+    assert 'Не проси включить Toolset' in policy
+
+
 def test_no_tools_policy_is_explicit_and_does_not_advertise_supervisor():
     policy = msty.policy_for_tools([])
     assert 'MSTY_TOOLS_UNAVAILABLE' in policy
