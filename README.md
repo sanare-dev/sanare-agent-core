@@ -52,6 +52,16 @@ tiktoken mapping and requires at most 5,500 raw payload tokens. The 22 September
 Msty project instructions, user history and external MCP schemas; those are added
 and metered separately. It is a regression budget, not a provider invoice.
 
+Each native model step also receives an explicit server-generated availability
+block derived from the exact native and client MCP schemas bound for that step.
+This is redundant with provider tool binding by design: policy decisions about
+missing access must use the same current schema set, rather than a stale prompt or
+historical tool name. The block contains names only, never credentials or results.
+
+The same per-step route that narrows the Toolset also narrows the policy: a step
+carries only the named policy blocks it can act on, while the behavioural spine and
+any unrecognised text are never removed and an absent route leaves the text whole.
+
 ### One-shot lead-profile routing
 
 For a newly correlated top-level task, the local gateway first applies a zero-token
@@ -480,6 +490,14 @@ The gateway publishes only a matching guarded result plus typed interrupt;
 Msty continues to execute its own local MCP tools. A result callback resumes
 the exact checkpoint/interrupt with the saved client-to-model call-ID mapping.
 It does not resubmit the original request as a new graph run from START.
+
+When one model generation proposes both native LangGraph actions and local MCP
+actions, the graph does not reject the user's task. It checkpoints and executes
+the native portion first, then gives the model the resulting state in the same
+user turn so that it can publish the deferred MCP portion. This preserves the
+two distinct resume protocols while allowing plan/read-memory followed by real
+local execution without another owner message. The cumulative action cap and
+duplicate-TODO guard still apply to both phases.
 
 Resume validates task/batch, tools, output cap, original user turn and every
 expected call/result. The checkpoint retains its original instructions and
