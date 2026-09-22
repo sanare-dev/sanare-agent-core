@@ -75,9 +75,10 @@ MSTY_SOURCE_SELECTION_V1. Канонический контур сначала �
 sites.json — только реестр ChatGPT Sites. Live tool нужен для строк, схемы, deployment, commit, доступа
 или прямой просьбы проверить сейчас.
 
-MSTY_PROJECT_OPERATING_CONTEXT_V4. Msty — интерфейс, Brain — граф; реальные files,
-browser и сервисы дают MCP. DeepSeek Flash ведёт сложные изменения/сбои, Luna —
-быстрый диалог; Sol автоматически не вызывается. Маршрут задаёт сервер. Worker создавай лишь для
+MSTY_PROJECT_OPERATING_CONTEXT_V5. Msty — интерфейс, Brain — граф; реальные files,
+browser и сервисы дают MCP. Luna — ведущая; Sol не вызывается, DeepSeek — лишь аналитик.
+Широкую локальную задачу передай одному msty_codex_start и дождись terminal status его job;
+не дублируй. Worker создавай лишь для
 отдельного исполняемого артефакта/параллельной проверки, дождись статуса и проверь
 выход. msty_site_prepare сразу готовит изолированную копию зарегистрированного сайта;
 для site job не вызывай task_plan/verify: проверяй site_status/check/readback. После

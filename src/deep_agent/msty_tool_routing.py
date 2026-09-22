@@ -47,6 +47,13 @@ _BROWSER_INTERACTION = re.compile(
 _REGISTERED_SITE_EXECUTOR = re.compile(
     r"(?is)(?:app\.sanaredev\.com|msty_site_|sanare-dev-v3)"
 )
+_AUTONOMOUS_EXECUTION = re.compile(
+    r"(?is)(?:автоном|полностью|под\s+ключ|до\s+(?:конца|результат)|"
+    r"end[- ]?to[- ]?end|(?:разработ|реализ|внедр|исправ|почин|настро|подключ)\w*"
+    r".{0,180}(?:провер|тест|запуст|собер|опубли)|"
+    r"(?:сложн|масштаб|архитектур|вся\s+систем|всю\s+систем).{0,180}"
+    r"(?:сдела|исправ|провер|реализ|анализ))"
+)
 
 _DOMAIN_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("pressable", re.compile(
@@ -120,6 +127,7 @@ _BRAIN_WRITE = {
     "msty_selfimprove_release", "msty_worker_start", "msty_worker_status",
     "msty_worker_cancel", "msty_brain_job", "msty_brain_verify", "msty_brain_consult",
 }
+_CODEX = {"msty_codex_start", "msty_codex_status", "msty_codex_cancel"}
 _KNOWN_ONLY = {
     # Installed connector operations that are intentionally not in a default
     # route. They remain selectable by exact name but never leak in through a
@@ -137,7 +145,7 @@ _KNOWN_ONLY = {
 _KNOWN = set().union(
     _CORE_READ, _TASK, _SITE, _PRESSABLE, _SUPABASE_READ, _SUPABASE_WRITE,
     _BROWSER_READ, _BROWSER_WRITE, _FILES_READ, _FILES_WRITE, _WEB,
-    _BRAIN_READ, _BRAIN_WRITE, _KNOWN_ONLY,
+    _BRAIN_READ, _BRAIN_WRITE, _CODEX, _KNOWN_ONLY,
 )
 _TOKEN_STOP = {
     "this", "that", "with", "from", "have", "your", "tool", "tools", "project",
@@ -238,6 +246,12 @@ def _route_prompt(route: dict) -> str:
         )
     if "brain" in route["domains"]:
         hints.append("Brain: меняй себя только через штатный self-improve контур и проверки.")
+    if "msty_codex_start" in route.get("selected_names", []):
+        hints.append(
+            "Широкая локальная задача: запусти ровно один msty_codex_start с исходной целью, "
+            "затем жди тот же job через msty_codex_status до terminal state; не дублируй job "
+            "и не заменяй его промежуточным диагнозом."
+        )
     return prompt + (" " + " ".join(hints) if hints else "")
 
 
@@ -315,6 +329,27 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                 chosen.update(_BRAIN_READ)
                 if intent == "mutate":
                     chosen.update(_BRAIN_WRITE)
+
+            # Broad outcome work belongs to the mature Codex harness.  The
+            # Brain launches one persistent job and observes it; it must not
+            # combine that run with the old file-by-file planner or another
+            # hand-written agent loop.  Domain-specific bounded executors keep
+            # priority for the registered site, Pressable, Supabase and Brain's
+            # own protected self-improvement lane.
+            bounded_domain = bool(set(domains) & {"pressable", "supabase", "brain"})
+            registered_site = bool(_REGISTERED_SITE_EXECUTOR.search(text))
+            use_codex = (
+                intent == "mutate"
+                and not bounded_domain
+                and not registered_site
+                and (
+                    bool(_AUTONOMOUS_EXECUTION.search(text))
+                    or ("files" in domains and len(text) >= 160)
+                )
+            )
+            if use_codex:
+                explicit_names = {name for name in chosen if name.lower() in lowered}
+                chosen = explicit_names | _CODEX
 
             # Generic future connectors get a small lexical projection. Known
             # connectors stay policy-routed above, avoiding broad "project" hits.

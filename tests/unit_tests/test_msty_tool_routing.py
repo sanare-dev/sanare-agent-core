@@ -24,7 +24,8 @@ NAMES = [
     "msty_selfimprove_prepare", "msty_selfimprove_file", "msty_selfimprove_patch",
     "msty_selfimprove_check", "msty_selfimprove_release", "msty_worker_start",
     "msty_worker_status", "msty_worker_cancel", "msty_brain_job", "msty_brain_verify",
-    "msty_brain_consult", "future_inventory_lookup",
+    "msty_brain_consult", "msty_codex_start", "msty_codex_status",
+    "msty_codex_cancel", "future_inventory_lookup",
 ]
 
 
@@ -87,10 +88,18 @@ def test_supabase_read_and_write_are_separated():
     assert len(write) <= routing.MAX_SELECTED_TOOLS
 
 
-def test_generic_artifact_plan_is_exposed_only_for_local_file_mutation():
+def test_generic_multi_step_code_work_uses_one_autonomous_codex_job():
     names, value, _ = route("Исправь код Python в файле репозитория и проверь результат.")
-    assert {"msty_task_plan", "msty_task_verify", "read_file", "edit_file"} <= names
+    assert {"msty_codex_start", "msty_codex_status", "msty_codex_cancel"} <= names
+    assert not ({"msty_task_plan", "msty_task_verify", "read_file", "edit_file"} & names)
     assert value["intent"] == "mutate"
+
+
+def test_narrow_file_read_does_not_start_autonomous_executor():
+    names, value, _ = route("Прочитай файл README.md и покажи заголовок.")
+    assert "read_file" in names
+    assert "msty_codex_start" not in names
+    assert value["intent"] == "read"
 
 
 def test_short_continuation_reuses_previous_route_without_reclassification():

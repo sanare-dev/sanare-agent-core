@@ -680,3 +680,19 @@ Integration tests are skipped unless `ANTHROPIC_API_KEY` is set.
 - Deep Agents overview: https://docs.langchain.com/oss/python/deepagents/overview
 - Deep Agents quickstart: https://docs.langchain.com/oss/python/deepagents/quickstart
 - LangSmith CLI: https://docs.langchain.com/langsmith/cli
+
+## Msty autonomous execution boundary
+
+The native Msty graph keeps LangGraph/Deep Agents as the planner and policy
+boundary. Simple questions stay in the lead model; narrow site, Pressable and
+Supabase work stays in their bounded MCP executors. A broad multi-step local
+mutation is projected to exactly three schemas supplied by Msty Admin 1.15.0:
+`msty_codex_start`, `msty_codex_status`, and `msty_codex_cancel`.
+
+Those tools adapt the installed official Codex CLI. They do not implement a
+second agent loop in this repository. One persistent job receives the original
+outcome, reads project rules, plans, uses its own terminal/files/apps/browser,
+re-plans after repeated failure, verifies the result, and returns a bounded
+final report. Active duplicate tasks are deduplicated. Domain-specific tools
+retain priority, and emergency-stop, concurrency, runtime and irreversible
+external-action boundaries remain outside model text.
