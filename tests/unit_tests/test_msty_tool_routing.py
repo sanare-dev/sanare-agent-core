@@ -74,6 +74,25 @@ def test_pressable_incident_uses_lazy_meta_tools_not_every_connector():
     assert len(names) <= 8
 
 
+def test_store_sync_question_reaches_native_status_tool():
+    names, value, _ = route(
+        "Проверь статус синхронизации магазина и доложи: здоров ли store и работает ли cron-синхронизация?")
+    assert "msty_store_sync_status" in names
+    assert "msty_system_overview" in names
+    assert "execute_tool" in names
+    assert "msty_site_patch" not in names
+
+
+def test_pressable_only_cron_without_commerce_gets_no_store_status_tool():
+    names, _, _ = route("На sanarelab.club сломан WooCommerce cron, почини и проверь.")
+    assert "msty_store_sync_status" not in names
+
+
+def test_commerce_without_sync_vocabulary_gets_no_store_status_tool():
+    names, _, _ = route("Составь отчёт по заказам магазина за сентябрь.")
+    assert "msty_store_sync_status" not in names
+
+
 def test_supabase_read_and_write_are_separated():
     read, read_route, _ = route("Покажи текущие таблицы Supabase проекта налогов.")
     assert {"list_tables", "get_project", "execute_sql"} <= read

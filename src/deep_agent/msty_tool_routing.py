@@ -106,6 +106,16 @@ _SITE = {
     "msty_site_check", "msty_site_release", "msty_site_cancel", "msty_vercel_runtime_logs",
 }
 _PRESSABLE = {"discover_tools", "describe_tool", "execute_tool"}
+# Store-sync status is a native Brain read, not a Pressable operation. Without
+# this projection a commerce sync question exposed only execute_tool, the model
+# passed the native name through it, got "Unknown tool" and declared a false
+# outage (defect: live canary 2026-09-22 on team.brain).
+_STORE_SYNC_STATUS = frozenset({
+    "msty_store_sync_status", "msty_system_overview", "msty_admin_health",
+})
+_STORE_SYNC = re.compile(
+    r"(?is)(?:синхронизац|sync[-_ ]?status|store[-_ ]?sync|"
+    r"не\s+приходят?\s+заказы|не\s+обновляются?\s+товары|свежесть\s+данных)")
 _SUPABASE_READ = {
     "search_docs", "list_projects", "get_project", "list_tables", "list_migrations",
     "get_advisors", "query_logs", "get_project_url", "execute_sql",
@@ -385,6 +395,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                         chosen.update(_FILES_WRITE)
             if "pressable" in domains:
                 chosen.update(_PRESSABLE | {"msty_project_resolve"})
+            if "commerce" in domains and _STORE_SYNC.search(text):
+                chosen.update(_STORE_SYNC_STATUS & available.keys())
             if "supabase" in domains:
                 chosen.update(_SUPABASE_READ)
                 if intent == "mutate":
