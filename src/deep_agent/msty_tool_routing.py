@@ -45,7 +45,11 @@ _BROWSER_INTERACTION = re.compile(
     r"(?is)(?:клик|нажм|заполни|введи|выбери|загрузи\s+файл|click|fill|type|select|upload)"
 )
 _REGISTERED_SITE_EXECUTOR = re.compile(
-    r"(?is)(?:app\.sanaredev\.com|msty_site_|sanare-dev-v3)"
+    # The job id the site executor itself hands back ("site-<32 hex>") is how the
+    # owner names a job in the next turn ("опубликуй job site-c7228..."). Without
+    # it such a turn missed the bounded site bundle and got the generic browser
+    # and filesystem tools instead — no msty_site_release, no way to publish.
+    r"(?is)(?:app\.sanaredev\.com|msty_site_|sanare-dev-v3|\bsite-[0-9a-f]{8,}\b)"
 )
 _AUTONOMOUS_EXECUTION = re.compile(
     r"(?is)(?:автоном|полностью|под\s+ключ|до\s+(?:конца|результат)|"

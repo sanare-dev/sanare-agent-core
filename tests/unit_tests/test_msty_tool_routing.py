@@ -165,3 +165,26 @@ def test_small_talk_without_a_domain_is_not_promoted():
     for text in ("привет", "спасибо", "да"):
         names, value, _ = route(text)
         assert value["intent"] == "direct" and names == set(), text
+
+
+def test_site_job_id_reaches_the_bounded_site_executor():
+    """The id the site executor returns is how the owner names the job next turn.
+
+    "опубликуй job site-<id>" used to miss _REGISTERED_SITE_EXECUTOR and fall to
+    the generic branch: browser and filesystem tools, no msty_site_release, so
+    the job could not be published at all.
+    """
+    for text in ("опубликуй job site-c7228bab8ae54e8cbf0c0b5a8f2573c3",
+                 "site-c7228bab8ae54e8cbf0c0b5a8f2573c3 — какой статус",
+                 "проверь job site-3b36138917414f028e7674705d31b3ca"):
+        names, value, _ = route(text)
+        assert "sites" in value["domains"], text
+        assert {"msty_site_release", "msty_site_status", "msty_site_check"} <= names, text
+        # The bounded executor replaces the generic filesystem branch.
+        assert not (names & routing._FILES_WRITE), text
+
+
+def test_a_site_word_without_a_registered_target_stays_generic():
+    """Only a named registered target unlocks the bounded executor."""
+    names, value, _ = route("сделай лендинг на каком-нибудь сайте")
+    assert "msty_site_release" not in names

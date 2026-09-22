@@ -886,3 +886,59 @@ def test_policy_routing_never_rewrites_unknown_or_unrouted_text():
         # Every kept block is verbatim from the approved text.
         for block in routed.split('\n\n'):
             assert block in full
+
+
+ROUTING_TOOLS = [{'type': 'function', 'function': {
+    'name': name, 'description': f'Official {name} operation',
+    'parameters': {'type': 'object', 'properties': {}}}}
+    for name in sorted(msty_native.msty_tool_routing._KNOWN)]
+
+
+def _routed_step(monkeypatch, text):
+    """Run one real graph step and return what the provider actually received."""
+    seen = scripted(monkeypatch, [answer('OK')])
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        data = initial()
+        data['messages'] = [{'role': 'user', 'content': text}]
+        data['tools'] = deepcopy(ROUTING_TOOLS)
+        await invoke(graph, data, {'configurable': {'thread_id': f'routed-{abs(hash(text))}'}})
+
+    asyncio.run(run())
+    assert len(seen) == 1
+    step = seen[0]
+    names = {tool['function']['name'] for tool in step['state']['tools']
+             if tool.get('type') == 'function'}
+    # state['tools'] carries the native virtual-filesystem schemas too; the
+    # route only governs the external Toolset.
+    return step['system'], names - msty_native.NATIVE_TOOLS
+
+
+def test_graph_step_delivers_a_routed_policy_and_a_routed_toolset(monkeypatch):
+    """End-to-end proof of the wiring, not just of select_policy in isolation."""
+    system, names = _routed_step(monkeypatch, 'опубликуй job site-c7228bab8ae54e8cbf0c0b5a8f2573c3')
+
+    # The whole server-side Toolset is never what the model sees.
+    assert 0 < len(names) <= msty_native.msty_tool_routing.MAX_SELECTED_TOOLS < len(ROUTING_TOOLS)
+    assert 'msty_site_release' in names
+    assert not names & msty_native.msty_tool_routing._SUPABASE_WRITE
+
+    for block in ('Ты — Sanare Brain', *msty_prompts.ALWAYS_BLOCKS,
+                  *msty_prompts.ACTIONABLE_BLOCKS, 'MSTY_SOURCE_SELECTION_V1',
+                  'MSTY_NATIVE_HARNESS_V1', 'MSTY_DYNAMIC_ROUTE_V1'):
+        assert block in system, block
+    # Contracts belonging to other routes stay off the wire.
+    for block in ('MSTY_CONTINUOUS_IMPROVEMENT_V1', 'MSTY_TOOL_DISCOVERY_V1'):
+        assert block not in system, block
+
+
+def test_graph_step_for_a_plain_question_carries_neither_tools_nor_extra_policy(monkeypatch):
+    system, names = _routed_step(monkeypatch, 'Объясни кратко, что такое vault.')
+
+    assert names == set()
+    for block in ('Ты — Sanare Brain', *msty_prompts.ALWAYS_BLOCKS, 'MSTY_NATIVE_HARNESS_V1'):
+        assert block in system, block
+    for block in (*msty_prompts.ACTIONABLE_BLOCKS, *msty_prompts.DOMAIN_BLOCKS,
+                  *msty_prompts.TOOL_BLOCKS):
+        assert block not in system, block
