@@ -226,6 +226,16 @@ def test_binding_rejects_unlisted_or_mismatched_profile():
         execution.validate_binding(state, 'fable', 100)
 
 
+def test_routed_lead_profile_must_match_exact_budget_binding():
+    state = initial()
+    state['lead_profile'] = 'deepseek'
+    state['task_budget_binding'] = {'version': 1, 'pricing_version': execution.PRICING_VERSION,
+        'profile': 'deepseek', 'input_limit': 180000, 'output_limit': 100}
+    execution.validate_binding(state, 'deepseek', 100)
+    with pytest.raises(execution.ExecutionProtocolError):
+        execution.validate_binding(state, 'luna', 100)
+
+
 def test_summary_cannot_hide_user_message_even_with_matching_hash():
     state = initial()
     segment = {'start': 0, 'end': 2, 'source_sha256': execution.canonical_digest(state['messages']),

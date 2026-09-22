@@ -77,7 +77,8 @@ read-only; native shell/task/judge нет. TODO и scratch не доказыва
 # values are removed before model admission and every published result surface.
 SECRET_TOKEN_PATTERN = (
     r'(?xs)(?:'
-    r'\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}'
+    r'\b(?:apikey_[A-Za-z0-9_]{24,}'
+    r'|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}'
     r'|gh[pousr]_[A-Za-z0-9]{20,}'
     r'|github_pat_[A-Za-z0-9_]{20,}'
     r'|lsv2_[A-Za-z0-9_]{20,}'
@@ -300,6 +301,7 @@ class State(AgentState, total=False):
     task_contract: dict | None
     text_stream_protocol: str | None
     consult_profile: str | None
+    lead_profile: str | None
     native_needs_admission: Annotated[NotRequired[bool], PrivateStateAttr]
     native_protocol_messages: Annotated[NotRequired[list[dict]], PrivateStateAttr]
     native_external_observations: Annotated[NotRequired[dict], PrivateStateAttr]

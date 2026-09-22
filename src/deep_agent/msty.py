@@ -129,6 +129,7 @@ class State(TypedDict):
     text_stream_protocol: str | None
     project_memory_delivery: dict
     consult_profile: str | None
+    lead_profile: str | None
 
 
 def selected_profile(state: State) -> str:
@@ -146,6 +147,12 @@ def selected_profile(state: State) -> str:
         if consult not in msty_models.CONSULT_PROFILES:
             raise msty_models.ModelAdapterError('Недопустимый профиль консультанта.')
         return consult
+    routed = state.get('lead_profile')
+    if routed is not None:
+        if routed not in ('luna', 'deepseek'):
+            raise msty_models.ModelAdapterError('Недопустимый маршрут основной модели Brain.')
+        return routed
+    # Compatibility for checkpoints created before server-side Jev routing.
     profile = os.getenv('MSTY_MODEL_PROFILE', msty_models.DEFAULT_PROFILE)
     if profile not in msty_models.PROFILES:
         raise msty_models.ModelAdapterError('Недопустимый серверный профиль Brain.')
