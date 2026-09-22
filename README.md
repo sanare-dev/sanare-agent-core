@@ -52,6 +52,22 @@ tiktoken mapping and requires at most 5,500 raw payload tokens. The 22 September
 Msty project instructions, user history and external MCP schemas; those are added
 and metered separately. It is a regression budget, not a provider invoice.
 
+### One-shot external lead-profile routing
+
+For a newly correlated top-level task, the local gateway may obtain one bounded
+classification from the private TypeSafe Jev sidecar. The cloud graph receives
+only the resulting immutable `lead_profile` (`deepseek` or `luna`) and uses that
+profile for the task's lead generation. Resumes and workers reuse the stored
+binding; old checkpoints without it preserve the historical Luna route. The
+cloud graph never receives the TypeSafe credential and does not call Jev itself.
+
+This classification is cost selection, not an authority decision: tool grants,
+task budget, emergency stop, artifact verification and release gates remain
+independent. The local gateway validates the actual returned model identity
+against the saved profile. A missing, invalid or unavailable classification
+fails conservatively to Luna and does not retry the user task through a second
+lead model.
+
 Cloud code has no separate dollar cap or `MAX_STEPS` to raise. Recursion is a
 per-invocation graph bound, not the cumulative task-action counter: 200 sequential
 native actions with checkpoint/resume are covered offline at recursion limit 64.
