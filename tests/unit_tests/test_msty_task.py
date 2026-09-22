@@ -140,6 +140,16 @@ def test_incident_diagnosis_is_replaced_by_first_real_memory_action():
     assert guarded.response_metadata['msty_completion_gate'] == 'incident_first_action_required'
 
 
+def test_incident_memory_query_obeys_installed_tool_limit():
+    message = 'Ошибка синхронизации. ' + 'подробность ' * 80
+    state = initial(messages=[{'role': 'user', 'content': message}], tools=[MEMORY])
+    guarded = task.gate_final(state, AIMessage(content='Диагноз.', usage_metadata=USAGE),
+                              [MEMORY], False)
+    query = guarded.tool_calls[0]['args']['query']
+    assert len(query) == 300
+    assert query.startswith('Ошибка синхронизации.')
+
+
 def test_incident_first_action_never_repeats_after_a_real_tool_call():
     state = initial(messages=[
         {'role': 'user', 'content': 'Синхронизация не работает, исправь ошибку.'},

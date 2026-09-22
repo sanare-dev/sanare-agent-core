@@ -345,7 +345,8 @@ def _outcome_start_gate(state, result, tools, disabled):
     selected = choice.get('function', {}).get('name') if isinstance(choice, dict) else None
     if len(names) != 1 or selected is not None and names != [selected]:
         return None
-    query = ' '.join(content.split())[:1200]
+    # The installed memory tool has a strict 300-character query contract.
+    query = ' '.join(content.split())[:300]
     return result.model_copy(update={
         'content': 'Сначала проверяю сохранённый контекст этого инцидента, затем продолжаю до результата.',
         'tool_calls': [{'id': 'outcome_' + uuid.uuid4().hex, 'name': names[0],
