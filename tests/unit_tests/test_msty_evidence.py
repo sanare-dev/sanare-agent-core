@@ -1,5 +1,6 @@
 """TAU L5: Evidence Gate — негативное утверждение только по доказательству."""
 import asyncio
+import pytest
 
 from langchain_core.messages import AIMessage
 
@@ -32,10 +33,42 @@ STATUS_HISTORY = [
 def test_successful_status_read_from_history_and_from_evidence_log():
     assert msty_evidence.successful_status_reads({'messages': STATUS_HISTORY}) == [
         'msty_store_sync_status']
+    # Журнал tau_evidence — наблюдаемость, не доказательство: он переживает ходы
+    # и не должен разрешать негатив на новую тему.
     state = {'messages': [], 'tau_evidence': [
         {'kind': 'evidence', 'tool': 'msty_admin_health', 'evidence_class': 'status_read',
          'tool_call_id': 'h1'}]}
-    assert msty_evidence.successful_status_reads(state) == ['msty_admin_health']
+    assert msty_evidence.successful_status_reads(state) == []
+
+
+def test_status_read_from_previous_turn_is_not_evidence():
+    later = [*STATUS_HISTORY, {'role': 'assistant', 'content': 'Синхронизация в порядке.'},
+             {'role': 'user', 'content': 'А таблица orders в Supabase есть?'}]
+    assert msty_evidence.successful_status_reads({'messages': later}) == []
+
+
+@pytest.mark.parametrize('text', [
+    'Дубликат отсутствует, можно публиковать.',
+    'Если кнопка не работает, обновите страницу.',
+    'Nothing is missing.',
+    'Unbroken chain of backups.',
+    'Модуль был сломан в 1.2, исправлен в 1.3.',
+    'Бот не настроен на выходные — так вы и просили.',
+    'В документе отсутствует раздел о ценах.',
+    'Ошибок не обнаружено.',
+])
+def test_ordinary_answers_are_not_negative_claims(text):
+    assert not msty_evidence.has_negative_claim(text)
+
+
+@pytest.mark.parametrize('text', [
+    'Синхронизация магазина не настроена, cron отсутствует.',
+    'Сервис оплаты не работает.',
+    'The webhook is not configured.',
+    'Ключ Supabase отсутствует в окружении.',
+])
+def test_infrastructure_diagnoses_are_negative_claims(text):
+    assert msty_evidence.has_negative_claim(text)
 
 
 def test_failed_status_read_is_not_evidence():

@@ -51,6 +51,19 @@ _EXPLAIN_ONLY = re.compile(
     r"(?is)^\s*(?:объясни|расскажи|что\s+такое|для\s+чего|как\s+работает|"
     r"explain|tell\s+me|what\s+is|how\s+does)"
 )
+# Общий вопрос о состоянии системы без доменного слова («Всё ли работает?»,
+# «Дай обзор состояния системы», «Что сейчас с системой?») раньше не получал ни
+# одного инструмента: доменов нет, intent=direct. Модель отвечала «инструментов
+# нет» при переданных msty_system_overview/msty_admin_health.
+_SYSTEM_STATUS = re.compile(
+    r"(?is)(?:вс[её]\s+ли\s+(?:работает|в\s+порядке|ок\b|живо)|"
+    r"что\s+(?:сейчас\s+|у\s+нас\s+)?(?:с|со)\s+(?:систем|контур|сервис|инфраструктур)|"
+    r"(?:обзор|состояни|статус|здоров\w*|health|overview)\W+(?:\w+\W+){0,3}?"
+    r"(?:систем|контур|сервис|инфраструктур|всего|всей)|"
+    r"что\s+(?:живо|упало|лежит|требует\s+внимания)|"
+    r"(?:is\s+)?everything\s+(?:ok|working|up)|system\s+(?:status|health|overview))"
+)
+_SYSTEM_STATUS_TOOLS = frozenset({"msty_system_overview", "msty_admin_health"})
 _BROWSER_INTERACTION = re.compile(
     r"(?is)(?:клик|нажм|заполни|введи|выбери|загрузи\s+файл|click|fill|type|select|upload)"
 )
@@ -158,6 +171,12 @@ _TRUNCATION_TIERS: tuple[frozenset[str], ...] = (
     frozenset(_FILES_READ | _BROWSER_READ | _WEB),
     frozenset(_SUPABASE_WRITE | _BRAIN_WRITE | _FILES_WRITE | _BROWSER_WRITE),
 )
+
+
+def _access(name: str) -> str:
+    """Класс доступа по манифесту; неизвестный инструмент считается write."""
+    entry = msty_registry.find(name)
+    return entry.access if entry is not None else "write"
 
 
 def _truncation_rank(name: str, lowered: str) -> tuple[int, str]:
@@ -291,6 +310,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     text = latest_user_text(messages)
     fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     semantic: dict | None = None  # диагностика слоя L2; только свежая классификация
+    semantic_names: set[str] = set()
     continuation = (len(text) <= MAX_CONTINUATION_CHARS
                     and bool(_CONTINUATION_VERB.search(text))
                     and not _domains(text))
@@ -318,6 +338,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         # installed connectors without changing this router.
         lowered = text.lower()
         chosen.update(name for name in available if name.lower() in lowered)
+
+        if _SYSTEM_STATUS.search(text):
+            chosen.update(_SYSTEM_STATUS_TOOLS)
+            if intent == "direct":
+                intent = "read"
 
         # A named running job is an instruction on its own, whatever the verb.
         job_tools = {name for pattern, bundle in _JOB_BUNDLES if pattern.search(text)
@@ -423,9 +448,20 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
             # Уже выбранное не дублируется; known_only не протекает через
             # широкое (теперь и эмбеддинговое) совпадение — только точное имя.
             # Слой отключён или недоступен → маршрут идентичен lexical-only.
-            semantic = msty_semantic.select(
-                text, candidates=(available.keys() - chosen) - _KNOWN_ONLY)
-            chosen.update(hit['name'] for hit in semantic['hits'])
+            # Кандидаты: только read (запись выдаёт лишь детерминированный
+            # маршрут по намерению; живая проверка показала msty_site_cancel/
+            # patch от семантики на инцидентном вопросе), без добавок к
+            # изолированному Codex-маршруту. Добавки занимают только свободное
+            # место под лимитом и при усечении идут последними: семантика не
+            # вытесняет детерминированный выбор.
+            if not use_codex:
+                candidates = {name for name in (available.keys() - chosen) - _KNOWN_ONLY
+                              if _access(name) == "read"}
+                room = max(0, MAX_SELECTED_TOOLS - len(chosen & available.keys()))
+                semantic = msty_semantic.select(text, candidates=candidates)
+                semantic = {**semantic, "hits": semantic["hits"][:room]}
+                semantic_names = {hit['name'] for hit in semantic['hits']}
+                chosen.update(semantic_names)
 
     historical_calls = _historical_tool_names(messages)
     historical = historical_calls & available.keys()
@@ -461,7 +497,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         keep = [name for name in ordered if name in protected]
         lowered_turn = text.lower()
         candidates = sorted((name for name in ordered if name not in protected),
-                            key=lambda name: _truncation_rank(name, lowered_turn))
+                            key=lambda name: (name in semantic_names,
+                                              _truncation_rank(name, lowered_turn)))
         keep.extend(candidates[:max(0, MAX_SELECTED_TOOLS - len(keep))])
         chosen = set(keep)
         ordered = [name for name in available if name in chosen]

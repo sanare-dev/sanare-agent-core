@@ -32,7 +32,7 @@ _MAX_ERROR_CHARS = 200
 def _correction(call: dict, error: str, content: str) -> ToolMessage:
     """Структурированный корректирующий ToolMessage вместо сырого исключения."""
     return ToolMessage(content=f'error={error}. {content}', name=call.get('name'),
-                       tool_call_id=call.get('id'), status='error')
+                       tool_call_id=call.get('id') or 'unknown', status='error')
 
 
 def unknown_tool(call: dict) -> ToolMessage:
@@ -61,7 +61,16 @@ def _schema_errors(schema, args) -> list[str]:
         errors = []
         for error in sorted(validator.iter_errors(args), key=lambda e: list(e.absolute_path)):
             path = '.'.join(str(part) for part in error.absolute_path) or '<args>'
-            errors.append(f'{path}: {error.message[:_MAX_ERROR_CHARS]}')
+            # error.message содержит значение аргумента (в т.ч. секретоподобное):
+            # модели отдаём только ключевое слово схемы и её ожидание.
+            expected = error.validator_value if error.validator in (
+                'type', 'enum', 'required', 'minimum', 'maximum', 'minLength',
+                'maxLength', 'pattern', 'format', 'const', 'minItems', 'maxItems') else None
+            detail = f'нарушено «{error.validator}»' + (
+                f', ожидается {expected!r}'[:_MAX_ERROR_CHARS] if expected is not None else '')
+            if error.validator == 'additionalProperties':
+                detail = 'передано поле вне схемы'
+            errors.append(f'{path}: {detail}')
             if len(errors) >= _MAX_ERRORS:
                 break
         return errors

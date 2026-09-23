@@ -377,10 +377,15 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         raw_result = (await stream.invoke(model, full_messages) if stream else
                       await model.ainvoke(full_messages))
     except msty_stream.StreamFailure as error:
+        if getattr(error, 'transient', False):
+            msty_breaker.record_transient_failure(connection)
+        else:
+            msty_breaker.record_success(connection)  # провайдер ответил: контур жив
         return publish_result(AIMessage(content=str(error), usage_metadata=None,
             response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
     except Exception as error:
         if not msty_taxonomy.is_transient_exception(error):
+            msty_breaker.record_success(connection)  # не транспорт: не держать пробу
             raise
         # Transient-отказ транспорта: классифицированный честный отказ вместо
         # падения рана; повтор поколения не выполняем — оно платное.

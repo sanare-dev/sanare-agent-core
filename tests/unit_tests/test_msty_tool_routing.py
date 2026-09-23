@@ -301,3 +301,24 @@ def test_a_continuation_without_a_prior_route_can_still_orient():
         assert names == routing._CORE_READ, text
         # Recovery orients, it never acts on its own.
         assert value["intent"] == "read", text
+
+
+import pytest as _pytest  # noqa: E402,I001
+
+
+@_pytest.mark.parametrize('question', [
+    'Дай фактический обзор состояния всей системы: что живо, что требует внимания.',
+    'Что сейчас с системой?',
+    'Всё ли работает?',
+    'Какой статус всего контура?',
+    'Is everything ok?',
+])
+def test_general_system_status_question_gets_status_tools(question):
+    """Живой дефект 2026-09-23: общий вопрос о состоянии без доменного слова
+    получал 0 инструментов при переданных msty_system_overview/msty_admin_health."""
+    tools = [{'type': 'function', 'function': {'name': name, 'description': 'x',
+              'parameters': {'type': 'object', 'properties': {}}}}
+             for name in ('msty_store_sync_status', 'msty_system_overview',
+                          'msty_admin_health', 'execute_sql', 'list_tables')]
+    _, route, _ = routing.select_tools([{"role": "user", "content": question}], tools)
+    assert {'msty_system_overview', 'msty_admin_health'} <= set(route['selected_names'])

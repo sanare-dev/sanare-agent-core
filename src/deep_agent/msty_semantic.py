@@ -11,17 +11,18 @@ critical_path, доменная и лексическая логика ниче�
 `MSTY_SEMANTIC=off`, роутер молча работает как раньше (lexical-only), а в
 диагностике маршрута стоит `semantic: {'status': 'disabled', ...}`.
 
-Модель по умолчанию — intfloat/multilingual-e5-small: компактная (≈470 МБ
-ONNX-кеша, 384-мерные векторы), обучена на 100+ языках, включая русский —
-запросы владельца и описания инструментов двуязычны. Для e5 каноничны
-префиксы query:/passage: — fastembed добавляет их в query_embed/passage_embed.
+Модель по умолчанию — sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+(384-мерные векторы, 50+ языков, включая русский). Прежний дефолт
+intfloat/multilingual-e5-small в fastembed 0.8.1 не поддерживается — слой
+не включился бы ни при каком деплое. Калибровка 2026-09-23 на реестре:
+релевантные совпадения 0.35–0.80, шум ≤0.30, медиана ≈0.05–0.2; query ≈3 мс.
 
 Инварианты деплоя (AGENTS.md: «веб-сервер, без обращений к ФС в рантайме»):
-модуль сам файловую систему не трогает. Модель fastembed живёт в её
-стандартном кеше; загрузка происходит только по lazy-пути первого запроса,
-при недоступности кеша слой отключается на весь процесс. Рекомендуемый
-прогрев — `uv run python -c "from deep_agent import msty_semantic;
-msty_semantic.warmup()"` на этапе деплоя, до старта веб-сервера.
+модуль сам файловую систему не трогает. Веб-запрос НИКОГДА не загружает
+модель синхронно: первый запрос запускает фоновую загрузку (поток) и получает
+`disabled/warming`, пока индекс не готов; сбой загрузки или индекса отключает
+слой до конца процесса. Кеш — MSTY_SEMANTIC_CACHE_DIR (иначе стандартный кеш
+fastembed). Прогрев на деплое — `msty_semantic.warmup()` (синхронно).
 
 Конфигурация (env, как MSTY_NEGATIVE_MARKERS):
 - MSTY_SEMANTIC=off — принудительно выключить слой (A/B, откат);
@@ -41,7 +42,7 @@ import threading
 from . import msty_registry
 
 
-MODEL_ID = 'intfloat/multilingual-e5-small'
+MODEL_ID = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
 DEFAULT_TOP_K = 5
 DEFAULT_MIN_SCORE = 0.35
 
@@ -51,6 +52,9 @@ _LOCK = threading.Lock()
 _ENCODER = None
 # Индекс реестра: каноническое имя → вектор (tuple[float, ...]).
 _INDEX: dict[str, tuple[float, ...]] | None = None
+# Причина окончательного отказа индекса (сбой passage_embed): без повторов.
+_INDEX_FAILED: str | None = None
+_BACKGROUND: threading.Thread | None = None
 
 
 def _env_int(name: str, default: int) -> int:
@@ -83,7 +87,8 @@ def _load_encoder_unlocked():
         return _ENCODER if not isinstance(_ENCODER, str) else None
     try:
         from fastembed import TextEmbedding
-        _ENCODER = TextEmbedding(model_name=config()['model'])
+        cache_dir = os.environ.get('MSTY_SEMANTIC_CACHE_DIR') or None
+        _ENCODER = TextEmbedding(model_name=config()['model'], cache_dir=cache_dir)
     except Exception:
         _ENCODER = 'encoder_unavailable'
         return None
@@ -108,11 +113,11 @@ def _entry_text(entry: msty_registry.ToolEntry) -> str:
 
 def _index() -> dict[str, tuple[float, ...]] | None:
     """Кеш эмбеддингов описаний реестра; None, если энкодер недоступен."""
-    global _INDEX
-    if _INDEX is not None:
+    global _INDEX, _INDEX_FAILED
+    if _INDEX is not None or _INDEX_FAILED:
         return _INDEX
     with _LOCK:
-        if _INDEX is not None:
+        if _INDEX is not None or _INDEX_FAILED:
             return _INDEX
         encoder = _load_encoder_unlocked()
         if encoder is None:
@@ -122,7 +127,7 @@ def _index() -> dict[str, tuple[float, ...]] | None:
             vectors = [tuple(float(value) for value in vector)
                        for vector in encoder.passage_embed(texts)]
         except Exception:
-            _INDEX = None
+            _INDEX_FAILED = 'index_unavailable'
             return None
         _INDEX = {entry.name: vector for entry, vector in zip(msty_registry.TOOLS, vectors)}
         return _INDEX
@@ -151,19 +156,40 @@ def select(query_text: str, candidates: set[str]) -> dict:
     if not (query_text or '').strip() or not candidates:
         return {**result, 'status': 'skipped'}
     try:
-        index = _index()
+        index = _INDEX
         if index is None:
-            return {**result, 'status': 'disabled', 'reason': 'encoder_unavailable'}
-        encoder = _load_encoder()
+            reason = _start_background()
+            return {**result, 'status': 'disabled', 'reason': reason}
+        encoder = _ENCODER
         vector = tuple(float(value) for value in next(encoder.query_embed([query_text])))
-        scored = sorted(
-            ((name, _cosine(vector, index[name])) for name in candidates if name in index),
-            key=lambda item: (-item[1], item[0]))
+        # Клиент может неймспейсить имена (sanare_admin_msty_admin_health):
+        # вектор берётся по канонической записи, в hits — имя из запроса.
+        scored = []
+        for name in candidates:
+            entry = msty_registry.find(name)
+            if entry is not None and entry.name in index:
+                scored.append((name, _cosine(vector, index[entry.name])))
+        scored.sort(key=lambda item: (-item[1], item[0]))
         hits = [{'name': name, 'score': round(score, 4)}
                 for name, score in scored if score >= cfg['min_score']][:cfg['top_k']]
         return {**result, 'hits': hits}
     except Exception:
         return {**result, 'status': 'disabled', 'reason': 'encoder_unavailable'}
+
+
+def _start_background() -> str:
+    """Запустить фоновую загрузку один раз; причина текущего отказа."""
+    global _BACKGROUND
+    if isinstance(_ENCODER, str):
+        return _ENCODER
+    if _INDEX_FAILED:
+        return _INDEX_FAILED
+    with _LOCK:
+        if _BACKGROUND is None:
+            _BACKGROUND = threading.Thread(target=_index, name='msty-semantic-warmup',
+                                           daemon=True)
+            _BACKGROUND.start()
+    return 'warming'
 
 
 def warmup() -> bool:
@@ -173,7 +199,9 @@ def warmup() -> bool:
 
 def _reset_for_tests():
     """Сброс lazy-состояния; только для юнит-тестов (мок энкодера)."""
-    global _ENCODER, _INDEX
+    global _ENCODER, _INDEX, _INDEX_FAILED, _BACKGROUND
     with _LOCK:
         _ENCODER = None
         _INDEX = None
+        _INDEX_FAILED = None
+        _BACKGROUND = None

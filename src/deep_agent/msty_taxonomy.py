@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 
 from langchain_core.messages import ToolMessage
@@ -65,11 +66,71 @@ _DETERMINISTIC_TEXT = re.compile(
     r'отказано в доступе|недопустим\w+\s+запрос')
 
 
+# Конверт отказа: результат ЯВНО объявляет себя ошибкой в начале текста
+# («Error: …», «MCP error -32000: …», «Tool execution failed», «Ошибка: …»).
+# Сигнатуры классов ищутся только внутри конверта: успешный ответ с полями
+# вроде "timeout": 300, историей статусов [200, 502] или именем job
+# «check-404-pages» раньше помечался сбоем, и Evidence Gate отбрасывал верный
+# диагноз.
+_ERROR_ENVELOPE = re.compile(
+    r'(?is)^\W{0,3}(?:error\b|mcp\s+error|tool\s+(?:execution\s+)?(?:failed|error)|'
+    r'failed\s+to\b|exception\b|traceback\b|unknown\s+tool\b|no\s+such\s+tool\b|'
+    r'request\s+failed|http\s+(?:error\s+)?[45]\d\d\b|ошибка\b|сбой\b|'
+    r'не\s+удалось\b|инструмент\s+\S+\s+не\s+(?:существует|найден))')
+_ENVELOPE_HEAD = 600
+# Короткий результат без конверта («404 Not Found», «Request timed out after
+# 30s») тоже является отказом, но только по строгим сигнатурам: HTTP-код с
+# фразой причины, а не голое число (job «check-404-pages» — не 404).
+_SHORT_RESULT = 300
+_STRICT_SIGNATURE = re.compile(
+    r'(?is)\b(?:[45]\d\d\s+(?:not\s+found|unauthori[sz]ed|forbidden|bad\s+request|'
+    r'service\s+unavailable|bad\s+gateway|gateway\s+time-?out|internal\s+server\s+error|'
+    r'too\s+many\s+requests|unprocessable|conflict|request\s+timeout)|'
+    r'(?:http|status(?:\s+code)?)\s*[:=]?\s*[45]\d\d\b|timed\s+out|time-?out\s+(?:after|exceeded|error)|'
+    r'rate\s*limit\w*\s+(?:exceeded|reached|hit)|connection\s+(?:refused|reset|aborted)|'
+    r'permission\s+denied|access\s+denied|invalid\s+(?:argument|parameter|args)|'
+    r'validation\s+error|unknown\s+tool|no\s+such\s+tool|temporarily\s+unavailable|'
+    r'тайм-?аут|превышено\s+время|отказано\s+в\s+доступе|временно\s+недоступ)')
+
+
+def _json_error_text(content: str) -> str | None:
+    """Текст ошибки JSON-результата; '' — JSON без ошибки; None — не JSON."""
+    stripped = content.strip()
+    if stripped[:1] not in ('{', '['):
+        return None
+    try:
+        data = json.loads(stripped)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return ''
+    if data.get('isError') is True or data.get('is_error') is True:
+        return json.dumps(data, ensure_ascii=False)[:_ENVELOPE_HEAD]
+    error = data.get('error')
+    if error and data.get('ok') is not True:
+        return ('error: ' + (error if isinstance(error, str)
+                             else json.dumps(error, ensure_ascii=False)))[:_ENVELOPE_HEAD]
+    return ''
+
+
 def classify_tool_text(content) -> str | None:
-    """Класс отказа по тексту результата инструмента; None — признаков отказа нет."""
+    """Класс отказа результата инструмента; None — результат не объявлен ошибкой.
+
+    Консервативно в сторону «успех»: без явного конверта ошибки текст — данные,
+    даже если в нём встречаются числа 404/502 или слово timeout.
+    """
     if not isinstance(content, str) or not content.strip():
         return None
-    head = content[:2000]  # сигнатуры ищутся в заголовке отказа, не в данных
+    head = _json_error_text(content)
+    if head is None:
+        head = content.lstrip()[:_ENVELOPE_HEAD]
+        if not _ERROR_ENVELOPE.search(head):
+            short = content.strip()
+            if len(short) > _SHORT_RESULT or not _STRICT_SIGNATURE.search(short):
+                return None
+            head = short
+    elif not head:
+        return None
     if _UNKNOWN_TOOL_TEXT.search(head):
         return UNKNOWN_TOOL
     if _INVALID_ARGS_TEXT.search(head):
@@ -78,7 +139,9 @@ def classify_tool_text(content) -> str | None:
         return TRANSIENT
     if _DETERMINISTIC_TEXT.search(head):
         return DETERMINISTIC
-    return None
+    # Явная ошибка без распознанной сигнатуры: исход известен (отказ), повтор
+    # без изменения условий бесполезен.
+    return DETERMINISTIC
 
 
 # Имена типов исключений, которые заведомо являются временными сбоями транспорта.
@@ -90,7 +153,7 @@ _TRANSIENT_EXC_NAMES = frozenset((
     'RateLimitError', 'InternalServerError', 'ServiceUnavailableError',
     'RemoteProtocolError', 'ReadError', 'ConnectError',
 ))
-_TRANSIENT_STATUS = frozenset((408, 409, 425, 429, 500, 502, 503, 504))
+_TRANSIENT_STATUS = frozenset((408, 425, 429, 500, 502, 503, 504))
 
 
 def is_transient_exception(error: BaseException) -> bool:
@@ -125,25 +188,46 @@ def is_idempotent(name: str) -> bool:
     return entry is not None and entry.access == 'read'
 
 
-def prior_attempts(errors, call: dict) -> int:
-    """Сколько раз этот точный вызов уже отказал в текущем состоянии графа."""
+#: Предел журналов tau_errors/tau_evidence в checkpoint (последние записи).
+LOG_LIMIT = 50
+
+
+def turn_of(messages) -> int:
+    """Номер хода владельца: число человеческих сообщений в истории.
+
+    Бюджет попыток живёт в пределах одного хода: после двух сбоев чтение не
+    должно блокироваться навсегда во всех следующих ходах треда.
+    """
+    count = 0
+    for message in messages or ():
+        role = (message.get('role') if isinstance(message, dict)
+                else getattr(message, 'type', None))
+        count += role in ('user', 'human')
+    return count
+
+
+def prior_attempts(errors, call: dict, turn: int | None = None) -> int:
+    """Сколько раз этот точный вызов уже отказал в текущем ходе (turn=None — всего)."""
     mark = fingerprint(call)
     return sum(1 for entry in errors or ()
-               if isinstance(entry, dict) and entry.get('fingerprint') == mark)
+               if isinstance(entry, dict) and entry.get('fingerprint') == mark
+               and (turn is None or entry.get('turn') == turn))
 
 
-def error_entry(call: dict, failure_class: str, source: str, attempt: int) -> dict:
-    """Запись errors[] в состоянии графа: класс, инструмент, попытка, источник."""
+def error_entry(call: dict, failure_class: str, source: str, attempt: int,
+                turn: int | None = None) -> dict:
+    """Запись errors[] в состоянии графа: класс, инструмент, попытка, источник, ход."""
     return {'version': 1, 'tool': call.get('name'), 'fingerprint': fingerprint(call),
             'class': failure_class, 'source': source, 'attempt': attempt,
-            'tool_call_id': call.get('id')}
+            'tool_call_id': call.get('id'), 'turn': turn}
 
 
-def budget_exhausted_message(call: dict, errors) -> ToolMessage:
+def budget_exhausted_message(call: dict, errors, turn: int | None = None) -> ToolMessage:
     """Честный дегрейд: бюджет исчерпан, перечислено проверенное. Не сдача молча."""
     mark = fingerprint(call)
     history = [entry for entry in errors or ()
-               if isinstance(entry, dict) and entry.get('fingerprint') == mark]
+               if isinstance(entry, dict) and entry.get('fingerprint') == mark
+               and (turn is None or entry.get('turn') == turn)]
     classes = []
     for entry in history:
         if entry.get('class') not in classes:
@@ -155,11 +239,17 @@ def budget_exhausted_message(call: dict, errors) -> ToolMessage:
                  f'{ATTEMPT_BUDGET} попыток исчерпан (классы: {", ".join(classes) or "неизвестно"}). '
                  f'Проверено: {checked}. Не повторяй этот вызов без изменения условий; '
                  'продолжай доступными инструментами или честно доложи блокер владельцу.'),
-        name=call.get('name'), tool_call_id=call.get('id'), status='error')
+        name=call.get('name'), tool_call_id=call.get('id') or 'unknown', status='error')
 
 
-def annotate_failure(content: str, failure_class: str) -> str:
-    """Класс и детерминированная политика поверх текста отказа внешнего вызова."""
+def annotate_failure(content: str, failure_class: str, name: str | None = None) -> str:
+    """Класс и детерминированная политика поверх текста отказа внешнего вызова.
+
+    Для не-идемпотентного вызова (write или неизвестный) временный сбой — это
+    неизвестный исход: подсказка «повтори» могла бы продублировать эффект.
+    """
+    if failure_class == TRANSIENT and name is not None and not is_idempotent(name):
+        failure_class = UNKNOWN_STATE
     hint = POLICY_HINT.get(failure_class)
     if not hint:
         return content

@@ -110,16 +110,28 @@ def test_middleware_still_raises_for_registry_tool_not_admitted_on_this_step():
     asyncio.run(run())
 
 
-def test_middleware_corrects_invalid_args_of_admitted_tool_without_execution():
+def test_middleware_never_discards_result_of_already_executed_external_call():
+    # Допущенный внешний вызов уже исполнен клиентом Msty (аргументы сверены до
+    # отправки). Повторная проверка после исполнения выбрасывала бы реальный
+    # результат записи и толкала модель на повтор — двойной побочный эффект.
     async def run():
         request = SimpleNamespace(
             tool_call=call('execute_sql', {'query': 42}),
-            state={'tools': [tool_schema('execute_sql', SQL_SCHEMA)]})
+            state={'tools': [tool_schema('execute_sql', SQL_SCHEMA)],
+                   'native_external_observations': {'call-1': 'rows: 1'}})
         result = await middleware().awrap_tool_call(request, forbidden_handler)
-        assert result.status == 'error'
-        assert 'invalid_arguments' in result.content
-        assert 'query' in result.content
+        assert result.content == 'rows: 1'
+        assert result.status != 'error'
     asyncio.run(run())
+
+
+def test_guard_messages_do_not_echo_argument_values():
+    secret = 'sk-proj-SECRETVALUE0123456789'
+    schema = {'type': 'object', 'properties': {'role': {'enum': ['a', 'b']}},
+              'additionalProperties': False}
+    result = msty_guard.guard_arguments(call('execute_sql', {'role': secret, 'x': secret}),
+                                        schema=schema)
+    assert result is not None and secret not in result.content
 
 
 def test_middleware_passes_valid_call_to_verified_observation():

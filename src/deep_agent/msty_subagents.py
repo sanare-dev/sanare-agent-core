@@ -44,6 +44,8 @@ DELEGATE_TOOL = 'msty_delegate_task'
 RECOMMEND_TOOL = 'native_request_external'
 
 DEFAULT_MAX_STEPS = 6       # консервативный бюджет под-прогона
+#: Общий предел времени под-прогона (все шаги модели и инструментов).
+RUN_TIMEOUT_SECONDS = 300
 HARD_MAX_STEPS = 12         # потолок и для аргумента, и для env
 ATTEMPT_BUDGET = msty_taxonomy.ATTEMPT_BUDGET
 MAX_FINDINGS_CHARS = 4000   # отчёт не должен раздувать контекст родителя
@@ -291,14 +293,21 @@ async def _execute(call: dict, loadout: dict, backend, scratch: dict,
 
 
 def _gate_findings(findings: str, successful_reads: list, errors: list) -> str:
-    """Evidence gate на отчёте под-агента: негатив без статус-чтения — не факт."""
+    """Evidence gate на отчёте под-агента: негатив без статус-чтения — не факт.
+
+    Под-прогон не исполняет статус-чтения (status_read — внешние инструменты,
+    их исполняет родитель по recommended_calls); чтение виртуальной ФС
+    доказательством состояния системы не является. Поэтому диагноз-негатив
+    под-агента всегда помечается неподтверждённым.
+    """
     if not msty_evidence.has_negative_claim(findings):
         return findings
-    if successful_reads:
-        return findings
-    state = {'tau_evidence': [{'tool': name} for name in successful_reads],
-             'tau_errors': errors}
-    return msty_evidence.rewrite_unconfirmed(findings, state)
+    checked = ', '.join(sorted(set(successful_reads))) or 'ничего'
+    failed = ', '.join(sorted({str(entry.get('tool')) for entry in errors})) or 'нет'
+    return ('Не могу подтвердить негативный вывод: под-агент не выполнял профильных '
+            f'статус-чтений. Прочитано: {checked}; отказы: {failed}. Ниже — оценка '
+            'под-агента, она НЕ подтверждена; для проверки исполни recommended_calls.'
+            f'\n\n{findings}')
 
 
 async def run(*, goal: str, role: str, domains: list, max_steps, report_format,

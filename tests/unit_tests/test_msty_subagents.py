@@ -276,14 +276,16 @@ def test_middleware_guard_rejects_invalid_args():
 
     result = asyncio.run(run())
     event = (result.additional_kwargs or {}).get('tau_event')
-    assert result.status == 'error' and 'hacker' in result.content
+    # Значение аргумента в корректирующее сообщение не попадает, только поле.
+    assert result.status == 'error' and 'role' in result.content
+    assert 'hacker' not in result.content
     assert event['class'] == msty_taxonomy.INVALID_ARGS
 
 
 def test_middleware_budget_exhausted_without_execution():
     delegate_call = call('msty_delegate_task', {'goal': 'g', 'role': 'researcher'})
-    errors = [msty_taxonomy.error_entry(delegate_call, msty_taxonomy.TRANSIENT, 'subagent', 1),
-              msty_taxonomy.error_entry(delegate_call, msty_taxonomy.TRANSIENT, 'subagent', 2)]
+    errors = [msty_taxonomy.error_entry(delegate_call, msty_taxonomy.TRANSIENT, 'subagent', 1, 0),
+              msty_taxonomy.error_entry(delegate_call, msty_taxonomy.TRANSIENT, 'subagent', 2, 0)]
 
     async def forbidden(request):
         raise AssertionError('бюджет исчерпан: исполнения быть не должно')

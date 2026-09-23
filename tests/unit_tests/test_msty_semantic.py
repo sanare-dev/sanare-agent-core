@@ -46,6 +46,8 @@ def encoder(monkeypatch):
     msty_semantic._reset_for_tests()
     monkeypatch.setattr(msty_semantic, '_ENCODER', _HashEncoder())
     monkeypatch.setenv('MSTY_SEMANTIC_MIN_SCORE', '0.05')
+    # Индекс строится прогревом (деплой), не в веб-запросе.
+    assert msty_semantic.warmup()
     yield _HashEncoder
     msty_semantic._reset_for_tests()
 
@@ -117,7 +119,9 @@ def test_router_adds_semantic_hits_without_losing_deterministic(encoder):
     «ключи» совпадают с описанием записи реестра)."""
     tools = _tools(('msty_admin_health', 'msty_admin_route_request',
                     'msty_admin_memory_search', 'execute_sql'))
-    question = 'Здоровье контура: проверь сервисы и ключи.'
+    # «Здоровье контура» теперь ловит детерминированный маршрут статуса
+    # системы; здесь — формулировка без его лексики.
+    question = 'Проверь сервисы и ключи.'
     selected, route, _ = msty_tool_routing.select_tools(
         [{'role': 'user', 'content': question}], tools)
     names = route['selected_names']
@@ -193,3 +197,30 @@ def test_route_semantic_key_always_present():
                      'domains': ['commerce'], 'selected_names': ['execute_sql']})
     assert route_continued['semantic']['status'] == 'skipped'
     assert route_continued['selected_names'] == ['execute_sql']
+
+
+def test_semantic_never_adds_write_tools_without_mutation_intent(encoder):
+    tools = _tools(('msty_admin_health', 'execute_sql', 'apply_migration',
+                    'msty_admin_route_request', 'msty_admin_memory_search'))
+    _, route, _ = msty_tool_routing.select_tools(
+        [{'role': 'user', 'content': 'Покажи что в базе: таблицы и миграции.'}], tools)
+    hits = {hit['name'] for hit in route['semantic'].get('hits', [])}
+    assert not hits & {'execute_sql', 'apply_migration'}
+
+
+def test_semantic_hits_resolve_namespaced_client_names(encoder):
+    candidates = {'sanare_admin_msty_store_sync_status', 'sanare_admin_msty_brain_lessons'}
+    result = msty_semantic.select(SYNC_QUESTION, candidates)
+    assert result['status'] == 'ok'
+    assert result['hits'] and result['hits'][0]['name'] == 'sanare_admin_msty_store_sync_status'
+
+
+def test_request_path_never_loads_encoder_synchronously(monkeypatch):
+    msty_semantic._reset_for_tests()
+    started = []
+    monkeypatch.setattr(msty_semantic, '_start_background',
+                        lambda: started.append(1) or 'warming')
+    result = msty_semantic.select(SYNC_QUESTION, {'msty_store_sync_status'})
+    assert result['status'] == 'disabled' and result['reason'] == 'warming'
+    assert started == [1]
+    msty_semantic._reset_for_tests()

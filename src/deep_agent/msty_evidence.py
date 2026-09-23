@@ -13,10 +13,20 @@
 
 Маркеры конфигурируемы: переменная окружения MSTY_NEGATIVE_MARKERS (через запятую)
 заменяет список по умолчанию; пустое значение отключает Gate.
+
+Точность (аудит 2026-09-23): подстрочный поиск переписывал ~13 из 20 обычных
+ответов («дубликат отсутствует», «если кнопка не работает, обновите»,
+«Nothing is missing»). Теперь негативом считается только предложение, где
+маркер стоит рядом с объектом инфраструктуры (cron, синхронизация, сервис,
+интеграция, ключ, база, …) и которое не является условием, советом,
+отрицанием отрицания или историей исправления. Доказательство принимается
+только из ТЕКУЩЕГО хода владельца (после последнего его сообщения): одно
+статус-чтение в прошлом ходе больше не разрешает любой негатив навсегда.
 """
 from __future__ import annotations
 
 import os
+import re
 
 from . import msty_registry, msty_taxonomy
 
@@ -44,9 +54,46 @@ def _text(content) -> str:
     return ''
 
 
+# Объекты инфраструктуры, о состоянии которых делается диагноз.
+_SUBJECT = re.compile(
+    r'(?is)(?:cron|крон|синхрониз|\bsync|сервис|service|интеграц|integration|'
+    r'подключен|коннектор|connector|webhook|вебхук|\bключ|\bkey|токен|token|'
+    r'баз[аеуы]\b|database|\bdb\b|сервер|server|магазин|store|деплой|deploy|'
+    r'очеред|queue|\bjob|джоб|расписан|schedule|\bmcp\b|\bapi\b|vercel|supabase|'
+    r'pressable|\bbrain\b|контур|мониторинг|monitoring|бэкап|backup|воркер|worker|'
+    r'заказ|order|оплат|payment|почт|email|домен|domain|dns|ssl|сертификат)')
+# Предложения, где негатив — не диагноз: условие, совет, отрицание отрицания,
+# прошлое исправленное состояние, желаемое поведение.
+_NOT_A_DIAGNOSIS = re.compile(
+    r'(?is)(?:^|\W)(?:если|when|if|в\s+случае|когда|ничего\s+не|nothing\s+is|'
+    r'не\s+отсутств|исправлен|fixed|был\w*\s+сломан|was\s+broken|'
+    r'как\s+вы\s+(?:и\s+)?просили|as\s+(?:you\s+)?requested|по\s+задумке|by\s+design|'
+    r'проверьте|убедитесь|make\s+sure)(?:\W|$)')
+_SENTENCE = re.compile(r'(?<=[.!?;])\s+|\n+')
+
+
+def _marker_pattern(marker: str) -> re.Pattern[str]:
+    # Границы слова: «broken» не должно совпадать внутри «unbroken».
+    return re.compile(r'(?<![\wа-яё])' + re.escape(marker), re.IGNORECASE)
+
+
 def has_negative_claim(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in negative_markers())
+    """Есть ли в тексте диагноз-негатив о состоянии инфраструктуры.
+
+    Явно заданные владельцем маркеры (MSTY_NEGATIVE_MARKERS) ищутся как есть:
+    владелец сам выбрал точные формулировки; фильтры контекста применяются
+    только к списку по умолчанию.
+    """
+    markers = negative_markers()
+    patterns = [_marker_pattern(marker) for marker in markers]
+    custom = os.getenv('MSTY_NEGATIVE_MARKERS') is not None
+    for sentence in _SENTENCE.split(text or ''):
+        if not any(pattern.search(sentence) for pattern in patterns):
+            continue
+        if not custom and (_NOT_A_DIAGNOSIS.search(sentence) or not _SUBJECT.search(sentence)):
+            continue
+        return True
+    return False
 
 
 def _call_names(messages) -> dict[str, str]:
@@ -72,19 +119,28 @@ def _tool_messages(messages):
             yield message
 
 
-def successful_status_reads(state) -> list[str]:
-    """Имена evidence-инструментов (status_read) с успешным результатом в сессии.
+def _current_turn(messages) -> list:
+    """Сообщения после последнего сообщения владельца (текущий ход)."""
+    messages = list(messages or ())
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        role = (message.get('role') if isinstance(message, dict)
+                else getattr(message, 'type', None))
+        if role in ('user', 'human'):
+            return messages[index + 1:]
+    return messages
 
-    Источники: evidence log состояния графа (tau_evidence, пишет контур L4) и
-    скан истории сообщений — результаты инструментов без признаков отказа.
+
+def successful_status_reads(state) -> list[str]:
+    """Имена evidence-инструментов (status_read) с успешным результатом в ТЕКУЩЕМ ходе.
+
+    Источник — только история сообщений этого хода: результаты статус-чтений
+    без признаков отказа. Журнал tau_evidence — наблюдаемость, не доказательство:
+    он переживает ходы и не должен разрешать негатив на новую тему.
     """
     found = []
-    for item in state.get('tau_evidence') or ():
-        if (isinstance(item, dict) and item.get('evidence_class') == 'status_read'
-                and isinstance(item.get('tool'), str) and item['tool'] not in found):
-            found.append(item['tool'])
-    messages = state.get('messages') or ()
-    names = _call_names(messages)
+    messages = _current_turn(state.get('messages') or ())
+    names = _call_names(state.get('messages') or ())
     for message in _tool_messages(messages):
         if isinstance(message, dict):
             name = message.get('name') or names.get(message.get('tool_call_id'))
@@ -106,22 +162,29 @@ def successful_status_reads(state) -> list[str]:
 
 
 def evidence_summary(state) -> str:
-    """Перечень проверенного: успешные чтения и классифицированные отказы."""
+    """Перечень проверенного в текущем ходе: имена вызванных инструментов и исход."""
+    messages = state.get('messages') or ()
+    names = _call_names(messages)
     checked = []
-    for item in state.get('tau_evidence') or ():
-        if isinstance(item, dict) and isinstance(item.get('tool'), str):
-            checked.append(f"{item['tool']}: ok")
-    for item in state.get('tau_errors') or ():
-        if isinstance(item, dict) and isinstance(item.get('tool'), str):
-            checked.append(f"{item['tool']}: {item.get('class', 'отказ')}")
-    return '; '.join(checked) if checked else 'ничего'
+    for message in _tool_messages(_current_turn(messages)):
+        if isinstance(message, dict):
+            name = message.get('name') or names.get(message.get('tool_call_id'))
+            status = message.get('status')
+        else:
+            name = getattr(message, 'name', None) or names.get(getattr(message, 'tool_call_id', None))
+            status = getattr(message, 'status', None)
+        if isinstance(name, str):
+            item = f"{name}: {'отказ' if status == 'error' else 'ok'}"
+            if item not in checked:
+                checked.append(item)
+    return '; '.join(checked[:12]) if checked else 'ничего'
 
 
 def rewrite_unconfirmed(content: str, state) -> str:
     status_tools = ', '.join(sorted(
         entry.name for entry in msty_registry.TOOLS
         if entry.evidence_class == 'status_read'))
-    return ('Не могу подтвердить негативный вывод: в этой сессии не было успешного '
+    return ('Не могу подтвердить негативный вывод: в этом ходе не было успешного '
             f'профильного статус-чтения ({status_tools}). Проверено: {evidence_summary(state)}. '
             'Ниже — исходная оценка модели, она НЕ подтверждена и не является диагнозом.'
             f'\n\n{content}')

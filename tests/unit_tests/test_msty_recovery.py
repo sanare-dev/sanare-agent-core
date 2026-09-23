@@ -106,8 +106,9 @@ def test_deterministic_native_failure_never_retries_even_for_reads():
 
 def test_exhausted_budget_degrades_instead_of_executing():
     failed_call = call('native_read_file', {'file_path': '/memory/PROJECT.md'})
-    errors = [msty_taxonomy.error_entry(failed_call, 'transient', 'native', 1),
-              msty_taxonomy.error_entry(failed_call, 'transient', 'native', 2)]
+    # turn=0: отказы текущего хода (в state нет сообщений владельца).
+    errors = [msty_taxonomy.error_entry(failed_call, 'transient', 'native', 1, 0),
+              msty_taxonomy.error_entry(failed_call, 'transient', 'native', 2, 0)]
 
     async def run():
         request = SimpleNamespace(tool_call=failed_call,
@@ -119,6 +120,26 @@ def test_exhausted_budget_degrades_instead_of_executing():
         assert 'попытка 2' in result.content
         # Дегрейд не добавляет новых записей: маркера события нет.
         assert 'tau_event' not in result.additional_kwargs
+    asyncio.run(run())
+
+
+def test_budget_from_previous_turn_does_not_block_new_turn():
+    failed_call = call('native_read_file', {'file_path': '/memory/PROJECT.md'})
+    # Два отказа в ходе 1; сейчас ход 2 — чтение должно исполниться.
+    errors = [msty_taxonomy.error_entry(failed_call, 'transient', 'native', 1, 1),
+              msty_taxonomy.error_entry(failed_call, 'transient', 'native', 2, 1)]
+    executed = []
+
+    async def handler(request):
+        executed.append(request.tool_call['id'])
+        return ToolMessage(content='ok', name='native_read_file', tool_call_id='call-1')
+
+    async def run():
+        request = SimpleNamespace(tool_call=failed_call, state={
+            'native_tool_names': ['native_read_file'], 'tau_errors': errors,
+            'messages': [{'role': 'user', 'content': 'a'}, {'role': 'user', 'content': 'b'}]})
+        result = await middleware().awrap_tool_call(request, handler)
+        assert result.content == 'ok' and executed == ['call-1']
     asyncio.run(run())
 
 
@@ -141,7 +162,9 @@ def test_external_transient_observation_is_classified_and_annotated():
             state=external_state('HTTP 503 Service Unavailable'))
         result = await middleware().awrap_tool_call(request, forbidden_handler)
         assert result.status == 'error'
-        assert result.content.startswith('tau_class=transient.')
+        # execute_sql — write: временный сбой = неизвестный исход, не «повтори».
+        assert result.content.startswith('tau_class=unknown_state.')
+        assert 'допустим один повтор' not in result.content
         assert 'HTTP 503' in result.content  # исходное наблюдение сохранено
         event = result.additional_kwargs['tau_event']
         assert event['kind'] == 'failure' and event['class'] == 'transient'
@@ -164,8 +187,8 @@ def test_external_unknown_tool_passthrough_is_classified():
 
 def test_external_failure_beyond_budget_is_replaced_by_honest_degradation():
     failed_call = call('execute_sql', {'query': 'select 1'})
-    errors = [msty_taxonomy.error_entry(failed_call, 'transient', 'external', 1),
-              msty_taxonomy.error_entry(failed_call, 'transient', 'external', 2)]
+    errors = [msty_taxonomy.error_entry(failed_call, 'transient', 'external', 1, 0),
+              msty_taxonomy.error_entry(failed_call, 'transient', 'external', 2, 0)]
 
     async def run():
         request = SimpleNamespace(

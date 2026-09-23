@@ -25,7 +25,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.types import Command, interrupt
 
 from . import msty, msty_compaction, msty_execution, msty_guard, msty_models, msty_prompts, msty_task, msty_tool_routing
-from . import msty_registry, msty_subagents, msty_taxonomy
+from . import msty_breaker, msty_registry, msty_subagents, msty_taxonomy
 from .msty_native_memory import backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware
 
 _ORIGINAL_TOOLS = frozenset({'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep', 'write_todos'})
@@ -318,8 +318,36 @@ class State(AgentState, total=False):
     # TAU L4/L5: классифицированные отказы вызовов (errors[] дизайна §4.2) и
     # журнал успешных evidence-чтений. Живут в checkpoint-состоянии графа,
     # переживают compaction и являются заделом наблюдаемости.
-    tau_errors: list
-    tau_evidence: list
+    # Приватные: клиент не может подставить evidence (обход Gate) или
+    # errors (блокировка нужных вызовов) через вход графа.
+    tau_errors: Annotated[NotRequired[list], PrivateStateAttr]
+    tau_evidence: Annotated[NotRequired[list], PrivateStateAttr]
+
+
+def _report_json(report: dict, limit: int = 8000) -> str:
+    """JSON отчёта под-агента в пределе размера — всегда валидный JSON.
+
+    Срез строки мог разрезать JSON посередине; вместо этого ужимаются поля.
+    """
+    report = dict(report)
+    text = json.dumps(report, ensure_ascii=False)
+    for key, keep in (('artifacts', None), ('errors', 5), ('recommended_calls', 5),
+                      ('findings', 2000), ('errors', 0)):
+        if len(text) <= limit:
+            break
+        value = report.get(key)
+        if key == 'artifacts' and value:
+            report['artifacts'] = {path: '(усечено)' for path in value}
+        elif isinstance(value, list):
+            report[key] = value[-keep:] if keep else []
+        elif isinstance(value, str):
+            report[key] = value[:keep] + '…'
+        report['truncated'] = True
+        text = json.dumps(report, ensure_ascii=False)
+    return text if len(text) <= limit else json.dumps(
+        {'version': report.get('version', 1), 'status': report.get('status'),
+         'truncated': True, 'findings': str(report.get('findings', ''))[:1000]},
+        ensure_ascii=False)
 
 
 def _tau_mark(message, event: dict):
@@ -346,7 +374,7 @@ def _fold_tau(existing, events, kind):
         if event.get('kind') == kind and event['tool_call_id'] not in seen:
             merged.append(event)
             seen.add(event['tool_call_id'])
-    return merged
+    return merged[-msty_taxonomy.LOG_LIMIT:]
 
 
 class _GuardedModelFacade(BaseChatModel):
@@ -399,8 +427,14 @@ class NativeMstyMiddleware(AgentMiddleware):
         analyst = state.get('brain_task_role') == 'analyst'
         native = ([] if analyst else [_native_tool_schema(tool) for tool in request.tools
                   if getattr(tool, 'name', None) in NATIVE_TOOLS])
-        external, tool_route, route_prompt = msty_tool_routing.select_tools(
-            request.messages, state.get('tools') or [],
+        # Серверный инструмент делегирования не может быть подменён одноимённой
+        # схемой клиента (иначе valid_tool_calls блокировал бы оба).
+        client_tools = [tool for tool in state.get('tools') or []
+                        if not (isinstance(tool, dict) and isinstance(tool.get('function'), dict)
+                                and tool['function'].get('name') == msty_subagents.DELEGATE_TOOL)]
+        # Роутер синхронный (семантический слой считает эмбеддинг): вне event loop.
+        external, tool_route, route_prompt = await asyncio.to_thread(
+            msty_tool_routing.select_tools, request.messages, client_tools,
             prior_route=state.get('native_tool_route'), tool_choice=state.get('tool_choice'))
         if (not analyst and tool_route.get('source') == 'classified'
                 and tool_route.get('intent') != 'direct'):
@@ -538,31 +572,33 @@ class NativeMstyMiddleware(AgentMiddleware):
                 'task_contract': resumed.get('task_contract'), 'native_needs_admission': False,
                 'native_external_observations': results}
 
-    async def _native_call_with_recovery(self, request, handler, errors):
+    async def _native_call_with_recovery(self, request, handler, errors, turn=None):
         """TAU L4 recovery: transient → retry ×2 с backoff+jitter (только
         идемпотентные), остальное — классифицированный отказ с записью в errors[].
         Детали исключения в контекст не попадают (content-free дисциплина)."""
         call = request.tool_call
         retries = (msty_taxonomy.TRANSIENT_RETRIES
                    if msty_taxonomy.is_idempotent(call['name']) else 0)
+        retry = 0
         while True:
             try:
                 return await handler(request)
             except Exception as error:
-                if msty_taxonomy.is_transient_exception(error) and retries > 0:
-                    retries -= 1
-                    await asyncio.sleep(min(2.0, 0.25 * 2 ** retries) + random.random() * 0.2)
+                if msty_taxonomy.is_transient_exception(error) and retry < retries:
+                    # Экспоненциальный рост паузы: 0.25 с, 0.5 с (+jitter).
+                    await asyncio.sleep(min(2.0, 0.25 * 2 ** retry) + random.random() * 0.2)
+                    retry += 1
                     continue
                 failure_class = (msty_taxonomy.TRANSIENT
                                  if msty_taxonomy.is_transient_exception(error)
                                  else msty_taxonomy.DETERMINISTIC)
-                attempt = msty_taxonomy.prior_attempts(errors, call) + 1
+                attempt = msty_taxonomy.prior_attempts(errors, call, turn) + 1
                 message = ToolMessage(
                     content=(f'error={failure_class}. Исполнение native-инструмента не удалось. '
                              f'Политика: {msty_taxonomy.POLICY_HINT[failure_class]}.'),
                     name=call['name'], tool_call_id=call['id'], status='error')
                 return _tau_mark(message, {'kind': 'failure', **msty_taxonomy.error_entry(
-                    call, failure_class, 'native', attempt)})
+                    call, failure_class, 'native', attempt, turn)})
 
     async def _run_delegate(self, call, request):
         """Серверный под-прогон под-агента (msty_subagents) с моделью профиля
@@ -571,19 +607,60 @@ class NativeMstyMiddleware(AgentMiddleware):
         args = call.get('args') or {}
         backend = backend_factory(request.runtime)
         profile = msty.selected_profile(request.state)
+        connection = 'model:' + profile
+        usage = {'model_calls': 0, 'input_tokens': 0, 'output_tokens': 0, 'unknown_calls': 0}
+
+        class _MeteredModel:
+            """Учёт расхода и circuit breaker на каждом платном шаге под-прогона."""
+            def __init__(self, model):
+                self.model = model
+
+            async def ainvoke(self, messages):
+                if msty_breaker.open_remaining(connection) is not None:
+                    raise ConnectionError('circuit open')
+                try:
+                    raw = await self.model.ainvoke(messages)
+                except Exception as error:
+                    if msty_taxonomy.is_transient_exception(error):
+                        msty_breaker.record_transient_failure(connection)
+                    raise
+                msty_breaker.record_success(connection)
+                usage['model_calls'] += 1
+                checked = None
+                try:
+                    checked = msty_models.checked_usage(profile, raw)
+                except Exception:
+                    checked = None
+                if isinstance(checked, dict):
+                    usage['input_tokens'] += int(checked.get('input_tokens') or 0)
+                    usage['output_tokens'] += int(checked.get('output_tokens') or 0)
+                else:
+                    usage['unknown_calls'] += 1  # неизвестный расход не равен нулю
+                return raw
 
         def model_factory(schemas):
             model = msty_models.make_model(profile, 2048)
-            return msty_models.bind_tools(profile, model, schemas, 'auto')
+            return _MeteredModel(msty_models.bind_tools(profile, model, schemas, 'auto'))
 
         try:
-            return await msty_subagents.run(
+            report = await asyncio.wait_for(msty_subagents.run(
                 goal=str(args.get('goal') or ''), role=str(args.get('role') or ''),
                 domains=[str(item) for item in args.get('domains') or []],
                 max_steps=args.get('max_steps'),
                 report_format=str(args.get('report_format') or ''),
-                model_factory=model_factory, backend=backend)
+                model_factory=model_factory, backend=backend),
+                timeout=msty_subagents.RUN_TIMEOUT_SECONDS)
+            return {**report, 'usage': usage}
         except Exception as error:
+            if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+                return {'version': 1, 'status': 'failed', 'role': str(args.get('role') or ''),
+                        'goal': str(args.get('goal') or '')[:200],
+                        'findings': (f'Под-прогон остановлен по общему пределу '
+                                     f'{msty_subagents.RUN_TIMEOUT_SECONDS} с.'),
+                        'evidence': [], 'errors': [msty_taxonomy.error_entry(
+                            call, msty_taxonomy.UNKNOWN_STATE, 'subagent', 1)],
+                        'steps_used': usage['model_calls'], 'budget': 0,
+                        'recommended_calls': [], 'artifacts': {}, 'usage': usage}
             failure_class = (msty_taxonomy.TRANSIENT
                              if msty_taxonomy.is_transient_exception(error)
                              else msty_taxonomy.DETERMINISTIC)
@@ -592,27 +669,30 @@ class NativeMstyMiddleware(AgentMiddleware):
                     'findings': 'Под-прогон не запустился; детали не раскрываются.',
                     'evidence': [], 'errors': [msty_taxonomy.error_entry(
                         call, failure_class, 'subagent', 1)],
-                    'steps_used': 0, 'budget': 0, 'recommended_calls': [], 'artifacts': {}}
+                    'steps_used': 0, 'budget': 0, 'recommended_calls': [], 'artifacts': {},
+                    'usage': usage}
 
     async def awrap_tool_call(self, request, handler):
         call = request.tool_call
         errors = request.state.get('tau_errors') or []
+        # Бюджет попыток — в пределах хода владельца, не всего треда.
+        turn = msty_taxonomy.turn_of(request.state.get('messages'))
         if call['name'] == msty_subagents.DELEGATE_TOOL:
             # Sub-agents: серверное исполнение, НЕ клиентское. Имя сверено с
             # выданным на шаге списком, аргументы — со статической схемой
             # манифеста; бюджет попыток — общий, повтор делегирования платный.
             if call['name'] not in request.state.get('native_tool_names', []):
                 raise msty_execution.ExecutionProtocolError('Инструмент делегирования не передавался модели.')
-            if msty_taxonomy.prior_attempts(errors, call) >= msty_taxonomy.ATTEMPT_BUDGET:
-                return msty_taxonomy.budget_exhausted_message(call, errors)
+            if msty_taxonomy.prior_attempts(errors, call, turn) >= msty_taxonomy.ATTEMPT_BUDGET:
+                return msty_taxonomy.budget_exhausted_message(call, errors, turn)
             entry = msty_registry.find(call['name'])
             correction = msty_guard.guard_arguments(call, schema=entry.schema)
             if correction is not None:
                 return _tau_mark(correction, {'kind': 'failure', **msty_taxonomy.error_entry(
                     call, msty_taxonomy.INVALID_ARGS, 'guard',
-                    msty_taxonomy.prior_attempts(errors, call) + 1)})
+                    msty_taxonomy.prior_attempts(errors, call, turn) + 1, turn)})
             report = await self._run_delegate(call, request)
-            message = ToolMessage(content=json.dumps(report, ensure_ascii=False)[:8000],
+            message = ToolMessage(content=_report_json(report),
                                   name=call['name'], tool_call_id=call['id'],
                                   status='error' if report['status'] == 'failed' else 'success')
             if report['status'] == 'failed':
@@ -620,7 +700,7 @@ class NativeMstyMiddleware(AgentMiddleware):
                                  else msty_taxonomy.DETERMINISTIC)
                 return _tau_mark(message, {'kind': 'failure', **msty_taxonomy.error_entry(
                     call, failure_class, 'subagent',
-                    msty_taxonomy.prior_attempts(errors, call) + 1)})
+                    msty_taxonomy.prior_attempts(errors, call, turn) + 1, turn)})
             return message
         if call['name'] in NATIVE_TOOLS:
             if call['name'] not in request.state.get('native_tool_names', []):
@@ -631,9 +711,9 @@ class NativeMstyMiddleware(AgentMiddleware):
             if call['name'] == 'native_ls' and call['args'].get('path') == '/':
                 return ToolMessage(content='VIRTUAL mountpoints only (not Mac): ' + ', '.join(
                     root + '/' for root in VIRTUAL_ROOTS), name=call['name'], tool_call_id=call['id'])
-            if msty_taxonomy.prior_attempts(errors, call) >= msty_taxonomy.ATTEMPT_BUDGET:
-                return msty_taxonomy.budget_exhausted_message(call, errors)
-            result = await self._native_call_with_recovery(request, handler, errors)
+            if msty_taxonomy.prior_attempts(errors, call, turn) >= msty_taxonomy.ATTEMPT_BUDGET:
+                return msty_taxonomy.budget_exhausted_message(call, errors, turn)
+            result = await self._native_call_with_recovery(request, handler, errors, turn)
             return (_virtual_write_observation(result) if call['name'] in {
                 'native_write_file', 'native_edit_file'} else result)
         # TAU L3 Guard: имя (с алиасами) и схема сверяются с реестром до
@@ -644,8 +724,8 @@ class NativeMstyMiddleware(AgentMiddleware):
         tools = request.state.get('tools') or []
         admitted = msty.tool_names(tools)
         if call['name'] not in admitted:
-            if msty_taxonomy.prior_attempts(errors, call) >= msty_taxonomy.ATTEMPT_BUDGET:
-                return msty_taxonomy.budget_exhausted_message(call, errors)
+            if msty_taxonomy.prior_attempts(errors, call, turn) >= msty_taxonomy.ATTEMPT_BUDGET:
+                return msty_taxonomy.budget_exhausted_message(call, errors, turn)
             correction = msty_guard.guard_validate(call)
             if correction is not None:
                 # Отказ Guard учитывается в errors[]: повтор того же вызова
@@ -654,19 +734,13 @@ class NativeMstyMiddleware(AgentMiddleware):
                                  if msty_registry.find(call['name']) is None
                                  else msty_taxonomy.INVALID_ARGS)
                 return _tau_mark(correction, {'kind': 'failure', **msty_taxonomy.error_entry(
-                    call, failure_class, 'guard', msty_taxonomy.prior_attempts(errors, call) + 1)})
+                    call, failure_class, 'guard', msty_taxonomy.prior_attempts(errors, call, turn) + 1, turn)})
             raise msty_execution.ExecutionProtocolError('Внешний инструмент не передавался модели.')
-        live_schema = next((tool['function'].get('parameters') for tool in tools
-                            if isinstance(tool, dict) and tool.get('type') == 'function'
-                            and isinstance(tool.get('function'), dict)
-                            and tool['function'].get('name') == call['name']), None)
-        correction = msty_guard.guard_arguments(call, schema=live_schema)
-        if correction is not None:
-            if msty_taxonomy.prior_attempts(errors, call) >= msty_taxonomy.ATTEMPT_BUDGET:
-                return msty_taxonomy.budget_exhausted_message(call, errors)
-            return _tau_mark(correction, {'kind': 'failure', **msty_taxonomy.error_entry(
-                call, msty_taxonomy.INVALID_ARGS, 'guard',
-                msty_taxonomy.prior_attempts(errors, call) + 1)})
+        # Допущенный внешний вызов УЖЕ исполнен клиентом Msty (interrupt в
+        # aafter_model → observations): аргументы сверены с живой схемой до
+        # отправки (msty.valid_tool_calls). Повторная проверка здесь могла только
+        # выбросить реальный результат записи и толкнуть модель на повтор —
+        # двойной побочный эффект. Поэтому Guard для них не применяется.
         observations = request.state.get('native_external_observations') or {}
         if call['id'] not in observations:
             raise msty_execution.ExecutionProtocolError('Нет проверенного результата внешнего инструмента.')
@@ -683,12 +757,12 @@ class NativeMstyMiddleware(AgentMiddleware):
                                            'evidence_class': entry.evidence_class,
                                            'tool_call_id': call['id']})
             return message
-        if msty_taxonomy.prior_attempts(errors, call) >= msty_taxonomy.ATTEMPT_BUDGET:
-            return msty_taxonomy.budget_exhausted_message(call, errors)
-        message = ToolMessage(content=msty_taxonomy.annotate_failure(content, failure_class),
+        if msty_taxonomy.prior_attempts(errors, call, turn) >= msty_taxonomy.ATTEMPT_BUDGET:
+            return msty_taxonomy.budget_exhausted_message(call, errors, turn)
+        message = ToolMessage(content=msty_taxonomy.annotate_failure(content, failure_class, call['name']),
                               name=call['name'], tool_call_id=call['id'], status='error')
         return _tau_mark(message, {'kind': 'failure', **msty_taxonomy.error_entry(
-            call, failure_class, 'external', msty_taxonomy.prior_attempts(errors, call) + 1)})
+            call, failure_class, 'external', msty_taxonomy.prior_attempts(errors, call, turn) + 1, turn)})
 
 
 def build_graph(*, checkpointer=None, store=None):

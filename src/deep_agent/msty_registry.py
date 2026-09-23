@@ -137,8 +137,9 @@ TOOLS: tuple[ToolEntry, ...] = (
            domains=('supabase',), groups=('supabase_read',)),
     _entry('get_project_url', 'URL проекта Supabase.',
            domains=('supabase',), groups=('supabase_read',)),
+    # access=write: произвольный SQL может менять данные; группа роутера прежняя.
     _entry('execute_sql', 'Выполнить SQL в базе проекта Supabase.',
-           domains=('supabase',), groups=('supabase_read',)),
+           domains=('supabase',), groups=('supabase_read',), access='write'),
 
     # --- Supabase: запись ------------------------------------------------------
     _entry('apply_migration', 'Применить миграцию базы проекта Supabase.',
@@ -163,8 +164,9 @@ TOOLS: tuple[ToolEntry, ...] = (
            domains=('supabase',), groups=('supabase_write',), access='write'),
 
     # --- Браузер: чтение -------------------------------------------------------
+    # access=write: переход по URL может вызвать действие на сайте (GET-ссылки).
     _entry('browser_navigate', 'Открыть URL в управляемом браузере.',
-           domains=('browser',), groups=('browser_read',)),
+           domains=('browser',), groups=('browser_read',), access='write'),
     _entry('browser_snapshot', 'Снимок дерева доступности текущей страницы.',
            domains=('browser',), groups=('browser_read',)),
     _entry('browser_console_messages', 'Сообщения консоли страницы.',
@@ -278,7 +280,7 @@ TOOLS: tuple[ToolEntry, ...] = (
            kind=KIND_NATIVE, domains=('brain',),
            groups=('brain_write', 'brain_job', 'known_only')),
     _entry('msty_brain_consult', 'Консультация второй модели для сложного противоречия.',
-           kind=KIND_NATIVE, domains=('brain',), groups=('brain_write',)),
+           kind=KIND_NATIVE, domains=('brain',), groups=('brain_write',), access='write'),
 
     # --- Codex: широкая автономная локальная задача ----------------------------
     _entry('msty_codex_start', 'Запустить одну автономную Codex job с исходной целью.',
@@ -423,8 +425,13 @@ def find(name: str) -> ToolEntry | None:
     entry = _BY_NAME.get(name) or _BY_ALIAS.get(name)
     if entry is not None:
         return entry
+    # Суффикс признаётся для явного MCP-неймспейса «сервер__имя» и для
+    # составных имён (execute_sql, msty_store_sync_status). Однословные общие
+    # имена (fetch) по суффиксу не резолвятся: сторонний shop_fetch не должен
+    # получать доступ/evidence-класс чужой записи.
     for candidate in _NAMES_BY_LENGTH:
-        if name.endswith('_' + candidate):
+        if (name.endswith('__' + candidate) or
+                '_' in candidate and name.endswith('_' + candidate)):
             return _BY_NAME[candidate]
     return None
 

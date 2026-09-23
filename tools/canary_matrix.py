@@ -2,9 +2,12 @@
 
 Матрица: критические пути (инструменты манифеста с critical_path +
 evidence_class='status_read') × формы запроса (прямой / опосредованный /
-шумный с commerce-лексикой). Assert по ФОРМЕ ответа, не по точному тексту:
-ответ обязан содержать фактические данные или честный отказ; голый негатив
-(«не настроен/не работает» без признаков статус-чтения) — FAIL.
+шумный с commerce-лексикой), каждый запрос — с ПОЛНЫМ тулсетом, как у клиента
+Msty. PASS только если Brain реально запросил профильный статус-инструмент.
+Дополнительно по одному кейсу без тулсета: честный отказ, не выдуманный диагноз.
+
+Аудит 2026-09-23: прежняя версия слала запросы без tools и засчитывала почти
+любой текст (маркеры «ok», «мин», «провер») — 9/9 PASS при 0/9 статус-чтений.
 
 Запуск отдельной явной командой, как evaluate_bridge.py; юнит-тестами и
 release-гейтом не запускается:
@@ -49,13 +52,38 @@ CASE_PROMPTS = {
     },
 }
 
-# Признаки формы ответа (см. classify_form).
+#: Какие вызовы засчитываются кейсу: прямая форма — только сам инструмент;
+#: опосредованная/шумная — любой профильный статус этого пути.
+ACCEPTED = {
+    'msty_store_sync_status': {'msty_store_sync_status'},
+    'msty_system_overview': {'msty_system_overview', 'msty_admin_health'},
+    'msty_admin_health': {'msty_admin_health', 'msty_system_overview', 'msty_admin_keys_health'},
+}
+
+# Признаки формы ответа без тулсета (кейсы form='no_toolset').
 _NEGATIVE = ('не настроен', 'не работает', 'отсутствует', 'сломан', 'не установлен',
-             'not configured', 'not working', 'is missing', 'broken', 'unavailable')
-_HONEST = ('не могу подтвердить', 'не удалось проверить', 'не подтвержд', 'недоступен',
-           'не получилось', 'cannot confirm', 'unable to verify')
-_DATA = ('статус', 'свежест', 'здоров', 'healthy', 'ok', 'cron', 'синхронизац',
-         'провер', 'последн', 'timestamp', 'мин', 'сек', 'status')
+             'not configured', 'not working', 'is missing', 'broken')
+_HONEST = ('не могу подтвердить', 'не могу провер', 'не удалось проверить', 'не подтвержд',
+           'недоступен', 'не передан', 'нет профильного', 'cannot confirm', 'unable to verify')
+
+
+def toolset():
+    """Схемы, как их передаёт клиент Msty: все внешние записи реестра.
+
+    Без схем мост не может вызвать ни один статус-инструмент, и проверка
+    вырождается в «честный отказ» — прежняя матрица 9/9 PASS измеряла только это.
+    """
+    schemas = []
+    for entry in msty_registry.TOOLS:
+        if entry.name.startswith('native_') or entry.name == 'msty_delegate_task':
+            continue
+        properties = {}
+        if entry.name == 'msty_store_sync_status':
+            properties = {'store_slug': {'type': 'string', 'enum': ['sanarelab-club']}}
+        schemas.append({'type': 'function', 'function': {
+            'name': entry.name, 'description': entry.description,
+            'parameters': {'type': 'object', 'properties': properties}}})
+    return schemas
 
 
 def critical_paths():
@@ -65,33 +93,49 @@ def critical_paths():
 
 
 def build_cases():
-    """Матрица кейсов: критический путь × (прямой / опосредованный / шумный)."""
+    """Матрица: критический путь × (прямой / опосредованный / шумный) с полным
+    тулсетом + (без тулсета) — проверка честного отказа вместо выдумки."""
     cases = []
     for name in critical_paths():
         prompts = CASE_PROMPTS.get(name)
         if prompts is None:
             continue
         cases.append({'case': f'{name}:direct', 'tool': name, 'form': 'direct',
+                      'accepted': [name],
                       'prompt': f'Вызови {name} и доложи фактический результат.'})
         for form in ('indirect', 'noisy'):
             cases.append({'case': f'{name}:{form}', 'tool': name, 'form': form,
+                          'accepted': sorted(ACCEPTED.get(name, {name})),
                           'prompt': prompts[form]})
+        cases.append({'case': f'{name}:no_toolset', 'tool': name, 'form': 'no_toolset',
+                      'accepted': [], 'prompt': prompts['indirect']})
     return cases
 
 
 def classify_form(text):
-    """Форма финального ответа: данные/честный отказ/голый негатив.
+    """Форма ответа БЕЗ тулсета: честный отказ или хотя бы не голый негатив.
 
-    PASS: есть фактические данные или честный неподтверждённый отказ.
-    FAIL: негативное утверждение без данных и без честного отказа — та самая
-    уверенная ложь, которую TAU обязан исключить.
+    FAIL: пусто или негативное утверждение без честного отказа — уверенная ложь.
     """
     lowered = (text or '').lower()
     negative = any(marker in lowered for marker in _NEGATIVE)
     honest = any(marker in lowered for marker in _HONEST)
-    data = any(marker in lowered for marker in _DATA)
-    return {'negative': negative, 'honest_refusal': honest, 'has_data': data,
-            'passed': bool(text) and (not negative or honest or data)}
+    return {'negative': negative, 'honest_refusal': honest,
+            'passed': bool(text) and (honest or not negative)}
+
+
+def classify_calls(calls, accepted):
+    """С тулсетом: PASS только если Brain реально вызвал профильный инструмент.
+
+    Имя клиента может быть неймспейсом (sanare_admin_msty_admin_health) —
+    сверяется каноническое имя реестра.
+    """
+    canonical = []
+    for name in calls or ():
+        entry = msty_registry.find(name)
+        canonical.append(entry.name if entry is not None else name)
+    return {'tool_calls': canonical,
+            'passed': any(name in accepted for name in canonical)}
 
 
 def _bridge_key():
@@ -101,24 +145,33 @@ def _bridge_key():
                 if line.startswith('PIPELINES_API_KEY='))
 
 
-def _call(headers, prompt):
+def _call(headers, prompt, tools):
+    """Один шаг моста. Вызовы инструментов НЕ исполняются: проверяется решение
+    маршрута и модели (какой инструмент Brain запросил у клиента)."""
     payload = {'model': MODEL, 'messages': [{'role': 'user', 'content': prompt}],
                'stream': False, 'max_tokens': 800}
+    if tools:
+        payload['tools'] = tools
     request = urllib.request.Request(BRIDGE, headers=headers,
                                      data=json.dumps(payload).encode(), method='POST')
     with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-        return json.load(response)['choices'][0]['message'].get('content') or ''
+        message = json.load(response)['choices'][0]['message']
+    calls = [call.get('function', {}).get('name') for call in message.get('tool_calls') or ()]
+    return message.get('content') or '', calls
 
 
 def main():
     headers = {'Authorization': 'Bearer ' + _bridge_key(), 'Content-Type': 'application/json'}
     cases = build_cases()
+    tools = toolset()
     failures = 0
     for case in cases:
         started = time.monotonic()
         try:
-            text = _call(headers, case['prompt'])
-            verdict = classify_form(text)
+            with_tools = case['form'] != 'no_toolset'
+            text, calls = _call(headers, case['prompt'], tools if with_tools else None)
+            verdict = (classify_calls(calls, case['accepted']) if with_tools
+                       else classify_form(text))
         except Exception as error:
             # Сбой моста/таймаут — отдельный исход кейса, без деталей исключения.
             verdict = {'passed': False, 'error': type(error).__name__}

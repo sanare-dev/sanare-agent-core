@@ -7,7 +7,13 @@ MCP-соединения инструментов живут за коннект
 Семантика: N подряд transient-отказов одного соединения → контур открывается на
 cooldown; пока контур открыт, вызовы получают детерминированный отказ «контур
 недоступен, cooldown до T» без обращения к провайдеру (без расхода и без
-нагрузки на лежащий сервис). Успешный вызов сбрасывает счётчик.
+нагрузки на лежащий сервис). Успешный вызов сбрасывает счётчик. После cooldown —
+полуоткрытое состояние: ровно один пробный вызов; его провал сразу открывает
+контур снова, остальные запросы во время пробы получают отказ.
+
+Ключ — профиль модели: провайдер и его ключ общие для всех пользователей
+процесса, поэтому лежащий провайдер закрывается для всех. 409 (конфликт) в
+transient не входит — это ответ бизнес-логики, не сбой транспорта.
 
 Состояние — в памяти процесса (Agent Server — один процесс-рантайм); файловая
 система не используется. Breaker никогда не падает сам: его сбой не должен
@@ -22,6 +28,8 @@ import time
 FAILURE_THRESHOLD = 3
 #: Секунды охлаждения открытого контура.
 COOLDOWN_SECONDS = 60.0
+#: Предел ожидания исхода пробного вызова полуоткрытого контура.
+PROBE_SECONDS = 150.0
 
 _lock = threading.Lock()
 _connections: dict[str, dict] = {}
@@ -34,13 +42,18 @@ def open_remaining(connection: str) -> float | None:
             state = _connections.get(connection)
             if not state:
                 return None
-            remaining = state.get('open_until', 0.0) - time.monotonic()
+            now = time.monotonic()
+            remaining = state.get('open_until', 0.0) - now
             if remaining > 0:
                 return remaining
+            if state.get('probe_until', 0.0) > now:
+                return state['probe_until'] - now  # проба уже идёт
             if state.get('open_until'):
                 # Cooldown истёк: полуоткрытое состояние, один пробный вызов.
+                # Провал пробы (failures = порог-1 → +1) сразу открывает контур.
                 state['open_until'] = 0.0
-                state['failures'] = 0
+                state['failures'] = FAILURE_THRESHOLD - 1
+                state['probe_until'] = now + PROBE_SECONDS
             return None
     except Exception:
         return None
@@ -60,6 +73,7 @@ def record_transient_failure(connection: str) -> bool:
         with _lock:
             state = _connections.setdefault(connection, {'failures': 0, 'open_until': 0.0})
             state['failures'] += 1
+            state['probe_until'] = 0.0
             if state['failures'] >= FAILURE_THRESHOLD and not state.get('open_until'):
                 state['open_until'] = time.monotonic() + COOLDOWN_SECONDS
                 return True
