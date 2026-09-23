@@ -369,6 +369,39 @@ TOOLS: tuple[ToolEntry, ...] = (
            kind=KIND_NATIVE, domains=('brain',)),
     _entry('native_write_todos', 'Рабочий список шагов сложной задачи (не доказательство).',
            kind=KIND_NATIVE, domains=('brain',), access='write'),
+
+    # Sub-agents (фундамент, задание владельца «создавать ботов»): Brain поручает
+    # ограниченный под-прогон роли с детерминированным loadout по этому манифесту.
+    # kind=native: исполняется серверным контуром (msty_subagents), НЕ клиентом.
+    # access=write: делегирование не идемпотентно — повтор порождает новый прогон.
+    _entry('msty_delegate_task',
+           'Purpose: поручить под-агенту ограниченную задачу и получить '
+           'структурированный отчёт (status/findings/evidence/errors/steps_used). '
+           'Guidelines: короткие атомарные задачи — operator, длинные read-only '
+           'исследования — researcher, перепроверка критичных утверждений — auditor. '
+           'Опирайся на evidence отчёта, а не на уверенность текста. '
+           'Limitations: под-агент исполняет только серверные инструменты '
+           '(виртуальная ФС); внешние msty_* он не вызывает — возвращает '
+           'recommended_calls для исполнения родителем. Глубина 1: под-агент '
+           'не может делегировать дальше. Бюджет шагов ограничен. '
+           'Parameters: goal (цель), role (researcher|operator|auditor), '
+           'domains (домены инструментов), max_steps, report_format. '
+           'Examples: исследовать содержимое /memory по теме; проверить '
+           'утверждение по файлам /scratch перед ответом владельцу.',
+           kind=KIND_NATIVE, domains=('brain',), access='write',
+           schema={'type': 'object',
+                   'properties': {
+                       'goal': {'type': 'string',
+                                'description': 'Цель задачи под-агента, одна конкретная.'},
+                       'role': {'type': 'string',
+                                'enum': ['researcher', 'operator', 'auditor']},
+                       'domains': {'type': 'array', 'items': {'type': 'string'},
+                                   'description': 'Домены манифеста, чьи инструменты нужны.'},
+                       'max_steps': {'type': 'integer', 'minimum': 1, 'maximum': 12},
+                       'report_format': {'type': 'string',
+                                         'description': 'Ожидаемая форма findings.'}},
+                   'required': ['goal', 'role'],
+                   'additionalProperties': False}),
 )
 
 
