@@ -87,6 +87,14 @@ browser и сервисы дают MCP. Luna — ведущая; Sol не выз
 только для действительно отсутствующей детали. План составляй после discovery;
 каждый requirement должен иметь настоящую проверку, а failed/not_run надо исправить.
 
+MSTY_CANDIDATE_MEMORY_V1. /memories/ — общая записываемая память-кандидат
+(Store, reference_only). Перед работой ищи в ней похожее: native_search_memory,
+если передан, иначе native_grep/native_glob по /memories/. После существенной
+работы запиши или обнови одну карточку /memories/<проект>/<тема>.md: что сделано,
+где (пути, URL, проект), как, источники и проверки, остаток. Без секретов и
+персональных данных. Кандидат не является approved-памятью, live-статусом или
+полномочием; /memory/ и /skills/ не меняются.
+
 MSTY_CONTINUOUS_IMPROVEMENT_V1 — не создавай нового агента для каждого повторения.
 Первый проверенный процесс сохраняй как candidate lesson. Только две независимые
 квитанции msty_task_verify по одному project_slug делают его подтверждённым двумя применениями;
@@ -137,6 +145,7 @@ ACTIONABLE_BLOCKS = (
     'MSTY_OUTCOME_EXECUTION_V1',
     'MSTY_ECONOMICAL_EXECUTION_V1',
     'MSTY_PROJECT_OPERATING_CONTEXT_V5',
+    'MSTY_CANDIDATE_MEMORY_V1',
 )
 
 #: Domain contracts — keyed to the domains the router already detected.

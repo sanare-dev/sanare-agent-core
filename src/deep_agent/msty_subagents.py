@@ -64,7 +64,7 @@ _ROLES = {
         'evidence_only': False,
         'prompt': (
             'Ты researcher — под-агент Brain для ДЛИННЫХ read-only исследований. '
-            'Изучай виртуальную файловую систему (/memory, /skills, /scratch) '
+            'Изучай виртуальную файловую систему (/memory, /skills, /memories, /scratch) '
             'методично: сначала ls/glob, затем чтение по делу. Писать файлы тебе '
             'запрещено ролью. Внешние инструменты исполняет родитель: если нужен '
             'вызов из списка доступных — запроси его через native_request_external '
@@ -125,7 +125,7 @@ def _server_schemas(write: bool) -> dict[str, dict]:
     Зеркалят native-контракт родителя: пути строго виртуальные, записи только
     в /scratch/ (у под-агента — изолированный in-memory scratch).
     """
-    path_desc = ('Абсолютный ВИРТУАЛЬНЫЙ путь в /scratch/, /memory/, /skills/, '
+    path_desc = ('Абсолютный ВИРТУАЛЬНЫЙ путь в /scratch/, /memory/, /skills/, /memories/, '
                  '/large_tool_results/; записи только /scratch/. Не путь Mac.')
     schemas = {
         'native_ls': {'path': {'type': 'string', 'description': path_desc}},
@@ -189,7 +189,7 @@ def role_loadout(role: str, domains: list[str]) -> dict:
 
 def _valid_path(path) -> bool:
     """Зеркало msty_native._valid_virtual_path: только виртуальные корни."""
-    roots = ('/scratch', '/memory', '/skills', '/large_tool_results')
+    roots = ('/scratch', '/memory', '/skills', '/memories', '/large_tool_results')
     return (isinstance(path, str) and path.startswith('/') and not path.startswith('//')
             and not any(ord(char) < 32 for char in path) and '\\' not in path
             and not any(part in {'.', '..'} for part in path.split('/'))
@@ -239,7 +239,7 @@ async def _execute(call: dict, loadout: dict, backend, scratch: dict,
     if name != _TODOS and not _valid_path(path):
         _record(errors, call, msty_taxonomy.DETERMINISTIC)
         return ('error=deterministic. Путь обязан быть виртуальным (/scratch/, /memory/, '
-                '/skills/, /large_tool_results/); записи только /scratch/. Ничего не '
+                '/skills/, /memories/, /large_tool_results/); записи только /scratch/. Ничего не '
                 'прочитано и не записано.'), False
     try:
         if name == _TODOS:
