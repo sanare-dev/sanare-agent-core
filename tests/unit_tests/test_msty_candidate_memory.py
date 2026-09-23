@@ -212,10 +212,11 @@ def test_recent_conversations_tool_is_read_only_bounded_search(monkeypatch):
 def test_recent_conversations_gated_until_bridge_admits_it(monkeypatch):
     name = msty_native.RECENT_CONVERSATIONS_TOOL
     assert name in msty_native.SERVER_EXECUTED and name in msty_native.RESERVED_TOOLS
+    # С 2026-09-23 включён по умолчанию (мост допускает имя); off выключает.
     monkeypatch.delenv('MSTY_RECENT_CONVERSATIONS', raising=False)
-    assert name not in msty_native.server_executed()
-    monkeypatch.setenv('MSTY_RECENT_CONVERSATIONS', 'on')
     assert name in msty_native.server_executed()
+    monkeypatch.setenv('MSTY_RECENT_CONVERSATIONS', 'off')
+    assert name not in msty_native.server_executed()
 
 
 def test_recent_conversations_offered_and_executed_through_native_harness(monkeypatch):

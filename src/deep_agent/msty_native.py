@@ -280,8 +280,11 @@ def _calls_this_turn(messages, name: str) -> int:
 def enabled_optional_tools() -> set:
     """Optional server-executed tools switched on by their operator flags."""
     import os
+    # native_recent_conversations включён по умолчанию (2026-09-23): он выдаётся
+    # только в прогоне консолидации с маркером; мост допускает имя после патча.
+    defaults = {RECENT_CONVERSATIONS_TOOL: 'on'}
     return {name for name, flag in OPTIONAL_TOOL_FLAGS.items()
-            if os.environ.get(flag, 'off').strip().lower() == 'on'}
+            if os.environ.get(flag, defaults.get(name, 'off')).strip().lower() == 'on'}
 
 
 def memory_search_tool():
