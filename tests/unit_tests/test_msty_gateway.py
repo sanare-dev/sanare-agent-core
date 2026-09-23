@@ -109,10 +109,8 @@ def test_gateway_requires_reported_model_identity():
 
 
 @pytest.mark.parametrize('profile,selector', [
-    ('astra', 'openai/gpt-6-astra'),
-    ('sol', 'openai/gpt-5.6-sol'),
-    ('opus', 'anthropic/claude-opus-4-8'),
-    ('fable', 'anthropic/claude-fable-5-1'),
+    ('sol6', 'openai/gpt-6-sol'),
+    ('opus5', 'anthropic/claude-opus-5-5'),
 ])
 def test_consult_profiles_wire(profile, selector, monkeypatch):
     monkeypatch.setenv('OPENAI_BASE_URL', 'https://untrusted.invalid')
@@ -121,8 +119,8 @@ def test_consult_profiles_wire(profile, selector, monkeypatch):
     seen = []
     async def respond(request):
         seen.append(request)
-        # Live-proven 2026-09-21: the gateway echoes the provider-prefixed
-        # BYOK selector verbatim as the response model identity.
+        # Offline contract: the gateway must echo the provider-prefixed BYOK
+        # selector verbatim as the response model identity.
         return httpx.Response(200, json={'id':'synthetic', 'object':'chat.completion',
             'created':1, 'model':gateway.CONSULT_WIRE[profile],
             'choices':[{'index':0,'message':{'role':'assistant','content':'OK'},'finish_reason':'stop'}],
@@ -143,17 +141,20 @@ def test_consult_profiles_wire(profile, selector, monkeypatch):
     assert model.max_retries == 0
     assert model.use_responses_api is False
     assert model.http_client.follow_redirects is False
-    if profile == 'astra':
-        # gpt-6-astra has no 'none' tier; 'low' is its minimal reasoning effort.
-        assert wire['reasoning_effort'] == 'low' and wire['store'] is False
-    elif profile == 'sol':
+    if profile == 'sol6':
         assert wire['reasoning_effort'] == 'medium' and wire['store'] is False
     assert models.stamp_usage(profile, reply).usage_metadata['total_tokens'] == 4
 
 
-@pytest.mark.parametrize('profile', ['astra', 'sol', 'opus', 'fable'])
+@pytest.mark.parametrize('profile', ['sol6', 'opus5'])
 def test_consult_identity_rejects_wrong_model(profile):
     reply = AIMessage(content='OK', response_metadata={'model_name': 'gpt-4o-mini'},
                       usage_metadata={'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2})
     with pytest.raises(models.ModelAdapterError, match='неожиданной модели'):
         models.stamp_usage(profile, reply)
+
+
+@pytest.mark.parametrize('profile', ['astra', 'sol', 'opus', 'fable'])
+def test_legacy_premium_gateway_profiles_are_not_admitted(profile):
+    with pytest.raises(models.ModelAdapterError, match='не допущен'):
+        models.make_model(profile, 100)

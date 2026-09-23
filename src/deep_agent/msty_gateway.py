@@ -11,13 +11,11 @@ HOST = 'https://gateway.smith.langchain.com'
 DEEPSEEK_CONFIG_ID = 'ae7376e7-fea6-43cb-b50c-97db118c8c47'
 DEEPSEEK_SELECTOR = 'custom/Msty%20DeepSeek%20Flash'
 VERSION = 'msty-langsmith-routing-v1'
-# Consult-only profiles (2026-09-21) ride the OpenAI-compatible wire with
-# provider-prefixed BYOK ids; all four proven live against this gateway.
+# Consult-only profiles ride the OpenAI-compatible wire with provider-prefixed
+# BYOK ids. Legacy premium selectors are refused by this active route.
 CONSULT_WIRE = {
-    'astra': 'openai/gpt-6-astra',
-    'sol': 'openai/gpt-5.6-sol',
-    'opus': 'anthropic/claude-opus-4-8',
-    'fable': 'anthropic/claude-fable-5-1',
+    'sol6': 'openai/gpt-6-sol',
+    'opus5': 'anthropic/claude-opus-5-5',
 }
 
 

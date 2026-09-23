@@ -21,7 +21,7 @@ MAX_ACTIONS = 200
 PRICING_VERSION = '2026-09-23-brain-model-profiles-v4-luna6'
 # Profiles a budget binding may pin: admitted lead profiles (Luna/DeepSeek/Sol)
 # plus the server-allowlisted analyst set. The bridge pins one profile per task.
-BINDING_PROFILES = frozenset(('luna', 'deepseek', 'astra', 'sol', 'opus', 'fable'))
+BINDING_PROFILES = frozenset(('luna', 'deepseek', 'sol6', 'opus5'))
 
 
 class ExecutionProtocolError(ValueError):

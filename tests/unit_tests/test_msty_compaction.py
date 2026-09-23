@@ -208,7 +208,7 @@ def test_task_id_cannot_change_on_checkpoint():
         execution.validate_binding(state, 'luna', 100)
 
 
-@pytest.mark.parametrize('profile', ['deepseek', 'astra', 'sol', 'opus', 'fable'])
+@pytest.mark.parametrize('profile', ['deepseek', 'sol6', 'opus5'])
 def test_consult_profile_binding_validates(profile):
     state = initial()
     state['task_budget_binding'] = {'version': 1, 'pricing_version': execution.PRICING_VERSION,
@@ -221,9 +221,18 @@ def test_binding_rejects_unlisted_or_mismatched_profile():
     with pytest.raises(execution.ExecutionProtocolError):
         execution.validate_binding(state, 'gpt-4o-mini', 100)
     state['task_budget_binding'] = {'version': 1, 'pricing_version': execution.PRICING_VERSION,
-        'profile': 'opus', 'input_limit': 180000, 'output_limit': 100}
+        'profile': 'opus5', 'input_limit': 180000, 'output_limit': 100}
     with pytest.raises(execution.ExecutionProtocolError):
-        execution.validate_binding(state, 'fable', 100)
+        execution.validate_binding(state, 'sol6', 100)
+
+
+@pytest.mark.parametrize('profile', ['astra', 'sol', 'opus', 'fable'])
+def test_retired_consult_binding_is_rejected(profile):
+    state = initial()
+    state['task_budget_binding'] = {'version': 1, 'pricing_version': execution.PRICING_VERSION,
+        'profile': profile, 'input_limit': 180000, 'output_limit': 2048}
+    with pytest.raises(execution.ExecutionProtocolError):
+        execution.validate_binding(state, profile, 2048)
 
 
 def test_routed_lead_profile_must_match_exact_budget_binding():
