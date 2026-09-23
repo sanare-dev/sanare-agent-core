@@ -80,7 +80,14 @@ _CHECK_SYSTEM = re.compile(
 REQUEST_TOOL = "native_request_tools"
 # «Установи / разверни / запусти бота» на Mac владельца: узкого коннектора нет,
 # исполнитель — одна Codex job (терминал, файлы, браузер), не отказ.
-_INSTALL = re.compile(r"(?is)(?:установ(?!лен|к)|инсталл|разверн|развёрт|install|set\s*up|запусти\s+бот)")
+_INSTALL = re.compile(
+    r"(?is)(?:установ(?!лен|к)\w*|инсталл\w*|разверн\w*|install\w*|set\s*up|запусти|подключи|настрой)"
+    r"[^.!?\n]{0,60}?(?:\bбот|\bbot|приложени|\bapp\b|пакет|package|\bmcp\b|коннектор|connector|"
+    r"сервер|server|локальн\w*\s+модел|\bcli\b|утилит|программ|на\s+mac|на\s+маке)")
+# Ограниченные домены со своими исполнителями: Codex там не выдаётся.
+_INSTALL_EXCLUDED_DOMAINS = frozenset({"supabase", "pressable", "sites"})
+# Brain меняет себя только через self-improve; «подключи бота к Msty» — не это.
+_SELF_CHANGE = re.compile(r"(?is)\bbrain\b|мозг|себя")
 _INSTALL_TOOLS = frozenset({"msty_codex_start", "msty_codex_status"})
 
 
@@ -368,14 +375,35 @@ def requested_names(messages: list[Any], available: set[str]) -> set[str]:
             name = call.get("name") or (call.get("function") or {}).get("name") or ""
             args = _call_args(call)
             if name == REQUEST_TOOL:
+                # Только при включённом диспетчере: иначе история (или клиент)
+                # не может выдать схемы в обход маршрута.
                 names = args.get("names")
-                if isinstance(names, list):
+                if dispatcher_enabled() and isinstance(names, list):
                     found.update(item for item in names[:MAX_REQUESTED] if isinstance(item, str))
             elif name.endswith(_PASSTHROUGH_SUFFIX) and isinstance(args.get("tool_name"), str):
+                # Точное имя (или неймспейс клиента поверх канонического имени
+                # реестра); короткие «file»/«status»/«start» ничего не открывают.
                 target = args["tool_name"]
+                entry = msty_registry.find(target)
+                canonical = entry.name if entry is not None and entry.name == target else None
                 found.update(item for item in available
-                             if item == target or item.endswith("_" + target))
+                             if item == target or canonical and item.endswith("_" + canonical))
     return found & available
+
+
+def _explicit_requests(messages: list[Any]) -> set[str]:
+    """Имена из native_request_tools текущего хода (только при диспетчере)."""
+    if not dispatcher_enabled():
+        return set()
+    names: set[str] = set()
+    for message in _current_turn(messages):
+        calls = message.get("tool_calls") if isinstance(message, dict) else getattr(message, "tool_calls", None)
+        for call in calls or []:
+            if isinstance(call, dict) and (call.get("name") or (call.get("function") or {}).get("name")) == REQUEST_TOOL:
+                values = _call_args(call).get("names")
+                if isinstance(values, list):
+                    names.update(item for item in values if isinstance(item, str))
+    return names
 
 
 def catalog_prompt(tools: list[dict], selected: list[str], limit: int = 160) -> str:
@@ -418,6 +446,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     """Return provider-visible schemas, a serializable route and its short prompt."""
     available = {_tool_name(tool): tool for tool in tools if _tool_name(tool)}
     requested = requested_names(messages, set(available))
+    # Запросы не выходят за общий лимит шага.
+    requested = set(sorted(requested)[:MAX_SELECTED_TOOLS])
     text = latest_user_text(messages)
     fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     semantic: dict | None = None  # диагностика слоя L2; только свежая классификация
@@ -450,10 +480,10 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         lowered = text.lower()
         chosen.update(name for name in available if name.lower() in lowered)
 
-        if _INSTALL.search(text):
+        if (_INSTALL.search(text) and not set(domains) & _INSTALL_EXCLUDED_DOMAINS
+                and not _SELF_CHANGE.search(text)):
             chosen.update(_INSTALL_TOOLS)
-            if intent == "direct":
-                intent = "read"
+            intent = "mutate"  # установка — изменение; гейты записи применяются
         if _SYSTEM_STATUS.search(text) or _CHECK_SYSTEM.search(text):
             chosen.update(_SYSTEM_STATUS_TOOLS)
             if intent == "direct":
@@ -599,6 +629,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         if any(name == canonical or name.endswith("_" + canonical) for canonical in chosen)
     }
     chosen.update(aliases)
+    # Инструмент записи, раскрытый через execute_tool, видим только при намерении
+    # изменить (native_request_tools при диспетчере — явный выбор модели).
+    if intent != "mutate":
+        requested = {name for name in requested if _access(name) == "read"
+                     or name in _explicit_requests(messages)}
     chosen = (chosen | historical | required | requested) & available.keys()
 
     # `none` blocks new actions, but historical schemas remain for providers
