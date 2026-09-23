@@ -81,6 +81,7 @@ def test_luna_policy_rejection_falls_back_to_deepseek_once(monkeypatch):
     policy = seen['invocations'][1][1][0].content
     policy = policy if isinstance(policy, str) else ''.join(b.get('text', '') for b in policy)
     assert 'отвечаешь ты как резервная модель' in policy
+    assert '↪ Ответ резервной модели DeepSeek' in policy
 
 
 def test_fallback_replaces_images_with_explicit_text_not_silent_drop(monkeypatch):

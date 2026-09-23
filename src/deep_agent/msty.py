@@ -354,7 +354,9 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         if policy_fallback is not None:
             policy += ('\n\nОсновная модель отклонила этот запрос фильтром политики провайдера; '
                        'отвечаешь ты как резервная модель. Изображения из переписки тебе не переданы: '
-                       'если вопрос о картинке, прямо скажи, что её не видно, и попроси описать текстом.')
+                       'если вопрос о картинке, прямо скажи, что её не видно, и попроси описать текстом. '
+                       'Если отвечаешь текстом, начни с одной строки: «↪ Ответ резервной модели DeepSeek: '
+                       'основная модель OpenAI отклонила запрос фильтром своей политики.»')
         full_messages = [SystemMessage(content=policy), *messages]
         full_messages = (cache_system_prefix(full_messages, tools) if profile == 'sonnet'
                          else msty_models.prepare_messages(profile, full_messages, tools))
