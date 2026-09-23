@@ -13,9 +13,9 @@
     <string>/opt/homebrew/bin/uv</string>
     <string>run</string>
     <string>--project</string>
-    <string>/Users/vb/Documents/Kimi/Workspaces/MSTY/sanare-agent-core</string>
+    <string>/Users/vb/Documents/ChatGPT/LLM/work/sanare-agent-core</string>
     <string>python</string>
-    <string>/Users/vb/Documents/Kimi/Workspaces/MSTY/sanare-agent-core/tools/consolidate_memory.py</string>
+    <string>/Users/vb/Documents/ChatGPT/LLM/work/sanare-agent-core/tools/consolidate_memory.py</string>
   </array>
   <key>StartInterval</key>
   <integer>21600</integer>
