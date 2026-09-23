@@ -374,31 +374,36 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                                'tau_circuit_open': connection}), budget_check)
     stream = msty_stream.TextStream(state) if incremental else None
     try:
-        raw_result = (await stream.invoke(model, full_messages) if stream else
-                      await model.ainvoke(full_messages))
-    except msty_stream.StreamFailure as error:
-        if getattr(error, 'transient', False):
-            msty_breaker.record_transient_failure(connection)
-        else:
-            msty_breaker.record_success(connection)  # провайдер ответил: контур жив
-        return publish_result(AIMessage(content=str(error), usage_metadata=None,
-            response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
-    except Exception as error:
-        if not msty_taxonomy.is_transient_exception(error):
-            msty_breaker.record_success(connection)  # не транспорт: не держать пробу
-            raise
-        # Transient-отказ транспорта: классифицированный честный отказ вместо
-        # падения рана; повтор поколения не выполняем — оно платное.
-        opened = msty_breaker.record_transient_failure(connection)
-        if stream:
-            stream.invalidate()
-        return publish_result(AIMessage(content=(
-            'Вызов модели не завершён из-за временного сбоя контура'
-            + ('; circuit breaker открыт, контур охлаждается.' if opened else
-               '; допустим один повтор позже.')
-            + ' Действия не выполнены, расход не подтверждён.'), usage_metadata=None,
-            response_metadata={'msty_generation': 'transient_failure', 'msty_blocked': True,
-                               'tau_circuit_open': connection if opened else None}), budget_check)
+        try:
+            raw_result = (await stream.invoke(model, full_messages) if stream else
+                          await model.ainvoke(full_messages))
+        except msty_stream.StreamFailure as error:
+            if getattr(error, 'transient', False):
+                msty_breaker.record_transient_failure(connection)
+            else:
+                msty_breaker.record_success(connection)  # провайдер ответил: контур жив
+            return publish_result(AIMessage(content=str(error), usage_metadata=None,
+                response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
+        except Exception as error:
+            if not msty_taxonomy.is_transient_exception(error):
+                msty_breaker.record_success(connection)  # не транспорт: не держать пробу
+                raise
+            # Transient-отказ транспорта: классифицированный честный отказ вместо
+            # падения рана; повтор поколения не выполняем — оно платное.
+            opened = msty_breaker.record_transient_failure(connection)
+            if stream:
+                stream.invalidate()
+            return publish_result(AIMessage(content=(
+                'Вызов модели не завершён из-за временного сбоя контура'
+                + ('; circuit breaker открыт, контур охлаждается.' if opened else
+                   '; допустим один повтор позже.')
+                + ' Действия не выполнены, расход не подтверждён.'), usage_metadata=None,
+                response_metadata={'msty_generation': 'transient_failure', 'msty_blocked': True,
+                                   'tau_circuit_open': connection if opened else None}), budget_check)
+    finally:
+        # Исход пробы полуоткрытого контура записан выше (success/transient);
+        # отмена или непредвиденный выход не должны держать пробу 150 с.
+        msty_breaker.release_probe(connection)
     msty_breaker.record_success(connection)
     try:
         result = msty_models.stamp_usage(profile, raw_result)

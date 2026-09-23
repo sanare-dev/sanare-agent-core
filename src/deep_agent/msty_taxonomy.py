@@ -59,29 +59,34 @@ _INVALID_ARGS_TEXT = re.compile(
     r'(?is)invalid (?:argument|parameter|args)|validation error|schema violation|'
     r'не\s+прош[её]л\s+валидац|наруша\w+\s+схем')
 _TRANSIENT_TEXT = re.compile(
-    r'(?is)time[ds]? ?out|тайм-?аут|\b429\b|\b50[234]\b|rate\s*limit|temporarily unavailable|'
+    r'(?is)time[ds]? ?out|тайм-?аут|\b429\b|\b5\d\d\b|rate\s*limit|temporarily unavailable|'
     r'connection (?:refused|reset|aborted)|временно недоступ|превышено время ожидания')
 _DETERMINISTIC_TEXT = re.compile(
     r'(?is)\b40[0134]\b|\b422\b|permission denied|\bforbidden\b|\bbad request\b|'
     r'отказано в доступе|недопустим\w+\s+запрос')
 
 
-# Конверт отказа: результат ЯВНО объявляет себя ошибкой в начале текста
-# («Error: …», «MCP error -32000: …», «Tool execution failed», «Ошибка: …»).
-# Сигнатуры классов ищутся только внутри конверта: успешный ответ с полями
-# вроде "timeout": 300, историей статусов [200, 502] или именем job
-# «check-404-pages» раньше помечался сбоем, и Evidence Gate отбрасывал верный
-# диагноз.
+# Конверт отказа: результат ЯВНО объявляет себя ошибкой — в начале текста
+# («Error: …», «MCP error -32000: …», «Ошибка: …», собственные префиксы TAU
+# error=/tau_class=) или фразой «Tool 'x' failed» в первой строке. Сигнатуры
+# классов ищутся только внутри конверта: успешный ответ с полями вроде
+# "timeout": 300, историей статусов [200, 502] или job «check-404-pages»
+# раньше помечался сбоем. «Error count: 0», «Сбой не обнаружен», «Не удалось
+# найти ошибок» — данные, не конверт.
 _ERROR_ENVELOPE = re.compile(
-    r'(?is)^\W{0,3}(?:error\b|mcp\s+error|tool\s+(?:execution\s+)?(?:failed|error)|'
-    r'failed\s+to\b|exception\b|traceback\b|unknown\s+tool\b|no\s+such\s+tool\b|'
-    r'request\s+failed|http\s+(?:error\s+)?[45]\d\d\b|ошибка\b|сбой\b|'
-    r'не\s+удалось\b|инструмент\s+\S+\s+не\s+(?:существует|найден))')
+    r'(?is)^\W{0,3}(?:error\s*[:=\-—]|error\s+(?:executing|calling|while|in|during)\b|'
+    r'tau_class=|mcp\s+error|tool\s+(?:execution\s+)?(?:failed|error)\b|failed\s+to\b|'
+    r'exception\s*[:\-]|traceback\b|unknown\s+tool\b|no\s+such\s+tool\b|request\s+failed|'
+    r'http\s+(?:error\s+)?[45]\d\d\b|ошибка\s*[:\-—]|ошибка\s+(?:выполнения|вызова|при)\b|'
+    r'сбой\s*[:\-—]|не\s+удалось(?!\s+(?:найти|обнаружить)\s+(?:ни\s+)?(?:ошиб|сбо|проблем))\b|'
+    r'инструмент\s+\S+\s+не\s+(?:существует|найден))')
+_FIRST_LINE_FAILURE = re.compile(
+    r'(?is)\btool\s+\S+\s+(?:failed|errored)\b|\bfailed\s+with\s+(?:status|error)\b|'
+    r'(?:произошла|возникла)\s+ошибка\b')
 _ENVELOPE_HEAD = 600
-# Короткий результат без конверта («404 Not Found», «Request timed out after
-# 30s») тоже является отказом, но только по строгим сигнатурам: HTTP-код с
-# фразой причины, а не голое число (job «check-404-pages» — не 404).
-_SHORT_RESULT = 300
+# Результат без конверта тоже отказ, если его ПЕРВАЯ СТРОКА (или весь короткий
+# ответ) несёт строгую сигнатуру: HTTP-код с фразой причины, а не голое число.
+_FIRST_LINE = 300
 _STRICT_SIGNATURE = re.compile(
     r'(?is)\b(?:[45]\d\d\s+(?:not\s+found|unauthori[sz]ed|forbidden|bad\s+request|'
     r'service\s+unavailable|bad\s+gateway|gateway\s+time-?out|internal\s+server\s+error|'
@@ -93,44 +98,65 @@ _STRICT_SIGNATURE = re.compile(
     r'тайм-?аут|превышено\s+время|отказано\s+в\s+доступе|временно\s+недоступ)')
 
 
-def _json_error_text(content: str) -> str | None:
-    """Текст ошибки JSON-результата; '' — JSON без ошибки; None — не JSON."""
-    stripped = content.strip()
-    if stripped[:1] not in ('{', '['):
-        return None
-    try:
-        data = json.loads(stripped)
-    except ValueError:
-        return None
+def _json_error_text(data) -> str | None:
+    """Текст ошибки разобранного JSON-результата; '' — ошибки нет."""
     if not isinstance(data, dict):
         return ''
+    dump = json.dumps(data, ensure_ascii=False)[:_ENVELOPE_HEAD]
     if data.get('isError') is True or data.get('is_error') is True:
-        return json.dumps(data, ensure_ascii=False)[:_ENVELOPE_HEAD]
+        return 'error: ' + dump
     error = data.get('error')
     if error and data.get('ok') is not True:
         return ('error: ' + (error if isinstance(error, str)
                              else json.dumps(error, ensure_ascii=False)))[:_ENVELOPE_HEAD]
+    # success:false описывает сам вызов. ok:false / status:"failed" НЕ считаются
+    # отказом: у статус-чтений (health, job status) это данные о состоянии
+    # системы — ровно то доказательство, которое нужно Evidence Gate.
+    if data.get('success') is False:
+        return 'error: ' + dump
     return ''
+
+
+def _text_parts(content) -> str | None:
+    """Текст из списка MCP-частей [{"type":"text","text":...}]; None — не такой список."""
+    if not isinstance(content, list):
+        return None
+    parts = [part.get('text') for part in content
+             if isinstance(part, dict) and isinstance(part.get('text'), str)]
+    return '\n'.join(parts) if parts else None
 
 
 def classify_tool_text(content) -> str | None:
     """Класс отказа результата инструмента; None — результат не объявлен ошибкой.
 
-    Консервативно в сторону «успех»: без явного конверта ошибки текст — данные,
-    даже если в нём встречаются числа 404/502 или слово timeout.
+    Консервативно в сторону «успех» только для данных: без конверта ошибки
+    текст — данные, даже если в нём встречаются числа 404/502 или слово timeout.
     """
+    joined = _text_parts(content)
+    if joined is not None:
+        content = joined
     if not isinstance(content, str) or not content.strip():
         return None
-    head = _json_error_text(content)
-    if head is None:
-        head = content.lstrip()[:_ENVELOPE_HEAD]
-        if not _ERROR_ENVELOPE.search(head):
-            short = content.strip()
-            if len(short) > _SHORT_RESULT or not _STRICT_SIGNATURE.search(short):
+    stripped = content.strip()
+    head = None
+    if stripped[:1] in ('{', '['):
+        try:
+            data = json.loads(stripped)
+        except ValueError:
+            data = None
+        if data is not None:
+            nested = _text_parts(data)
+            if nested is not None:
+                return classify_tool_text(nested)
+            head = _json_error_text(data)
+            if not head:
                 return None
-            head = short
-    elif not head:
-        return None
+    if head is None:
+        head = stripped[:_ENVELOPE_HEAD]
+        first = stripped.split('\n', 1)[0][:_FIRST_LINE]
+        if not (_ERROR_ENVELOPE.search(head) or _FIRST_LINE_FAILURE.search(first) or
+                _STRICT_SIGNATURE.search(first)):
+            return None
     if _UNKNOWN_TOOL_TEXT.search(head):
         return UNKNOWN_TOOL
     if _INVALID_ARGS_TEXT.search(head):

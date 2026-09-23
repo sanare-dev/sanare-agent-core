@@ -82,6 +82,22 @@ def record_transient_failure(connection: str) -> bool:
         return False
 
 
+def release_probe(connection: str) -> None:
+    """Снять отметку пробы без изменения счётчика; вызывать в finally.
+
+    Проба, прерванная отменой (CancelledError, таймаут под-прогона) или
+    нетранспортной ошибкой, иначе держала бы профиль закрытым для всех до
+    PROBE_SECONDS, хотя отказов не было.
+    """
+    try:
+        with _lock:
+            state = _connections.get(connection)
+            if state:
+                state['probe_until'] = 0.0
+    except Exception:
+        pass
+
+
 def reset() -> None:
     """Полный сброс; для офлайн-тестов, не для рантайм-логики."""
     with _lock:

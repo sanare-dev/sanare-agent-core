@@ -302,3 +302,18 @@ def test_repeated_external_transient_failure_lands_in_state_and_degrades(monkeyp
         assert 'budget_exhausted' in tool_messages[-1].content
         assert state.values['execution']['status'] == 'answered'
     asyncio.run(run())
+
+
+def test_cancelled_probe_does_not_block_profile():
+    from deep_agent import msty_breaker
+    msty_breaker.reset()
+    connection = 'model:test-probe'
+    for _ in range(msty_breaker.FAILURE_THRESHOLD):
+        msty_breaker.record_transient_failure(connection)
+    state = msty_breaker._connections[connection]
+    state['open_until'] = 0.1  # cooldown истёк
+    assert msty_breaker.open_remaining(connection) is None  # выдана проба
+    assert msty_breaker.open_remaining(connection) is not None  # проба идёт
+    msty_breaker.release_probe(connection)  # отменённая проба
+    assert msty_breaker.open_remaining(connection) is None
+    msty_breaker.reset()

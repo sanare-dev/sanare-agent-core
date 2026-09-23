@@ -346,7 +346,8 @@ def _report_json(report: dict, limit: int = 8000) -> str:
         text = json.dumps(report, ensure_ascii=False)
     return text if len(text) <= limit else json.dumps(
         {'version': report.get('version', 1), 'status': report.get('status'),
-         'truncated': True, 'findings': str(report.get('findings', ''))[:1000]},
+         'truncated': True, 'findings': str(report.get('findings', ''))[:1000],
+         'usage': report.get('usage')},
         ensure_ascii=False)
 
 
@@ -608,7 +609,8 @@ class NativeMstyMiddleware(AgentMiddleware):
         backend = backend_factory(request.runtime)
         profile = msty.selected_profile(request.state)
         connection = 'model:' + profile
-        usage = {'model_calls': 0, 'input_tokens': 0, 'output_tokens': 0, 'unknown_calls': 0}
+        usage = {'model_calls': 0, 'input_tokens': 0, 'output_tokens': 0, 'unknown_calls': 0,
+                 'started_calls': 0}
 
         class _MeteredModel:
             """Учёт расхода и circuit breaker на каждом платном шаге под-прогона."""
@@ -618,12 +620,19 @@ class NativeMstyMiddleware(AgentMiddleware):
             async def ainvoke(self, messages):
                 if msty_breaker.open_remaining(connection) is not None:
                     raise ConnectionError('circuit open')
+                # Начатый вызов без измеренного итога (отмена, таймаут) — неизвестный
+                # расход, не ноль: unknown_calls = started_calls - измеренные.
+                usage['started_calls'] += 1
                 try:
                     raw = await self.model.ainvoke(messages)
                 except Exception as error:
                     if msty_taxonomy.is_transient_exception(error):
                         msty_breaker.record_transient_failure(connection)
+                    else:
+                        msty_breaker.record_success(connection)  # провайдер ответил
                     raise
+                finally:
+                    msty_breaker.release_probe(connection)
                 msty_breaker.record_success(connection)
                 usage['model_calls'] += 1
                 checked = None
@@ -634,9 +643,13 @@ class NativeMstyMiddleware(AgentMiddleware):
                 if isinstance(checked, dict):
                     usage['input_tokens'] += int(checked.get('input_tokens') or 0)
                     usage['output_tokens'] += int(checked.get('output_tokens') or 0)
-                else:
-                    usage['unknown_calls'] += 1  # неизвестный расход не равен нулю
+                    usage['measured_calls'] = usage.get('measured_calls', 0) + 1
                 return raw
+
+        def _final_usage():
+            measured = usage.pop('measured_calls', 0)
+            usage['unknown_calls'] = usage['started_calls'] - measured
+            return usage
 
         def model_factory(schemas):
             model = msty_models.make_model(profile, 2048)
@@ -650,7 +663,7 @@ class NativeMstyMiddleware(AgentMiddleware):
                 report_format=str(args.get('report_format') or ''),
                 model_factory=model_factory, backend=backend),
                 timeout=msty_subagents.RUN_TIMEOUT_SECONDS)
-            return {**report, 'usage': usage}
+            return {**report, 'usage': _final_usage()}
         except Exception as error:
             if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
                 return {'version': 1, 'status': 'failed', 'role': str(args.get('role') or ''),
@@ -660,7 +673,7 @@ class NativeMstyMiddleware(AgentMiddleware):
                         'evidence': [], 'errors': [msty_taxonomy.error_entry(
                             call, msty_taxonomy.UNKNOWN_STATE, 'subagent', 1)],
                         'steps_used': usage['model_calls'], 'budget': 0,
-                        'recommended_calls': [], 'artifacts': {}, 'usage': usage}
+                        'recommended_calls': [], 'artifacts': {}, 'usage': _final_usage()}
             failure_class = (msty_taxonomy.TRANSIENT
                              if msty_taxonomy.is_transient_exception(error)
                              else msty_taxonomy.DETERMINISTIC)
@@ -670,7 +683,7 @@ class NativeMstyMiddleware(AgentMiddleware):
                     'evidence': [], 'errors': [msty_taxonomy.error_entry(
                         call, failure_class, 'subagent', 1)],
                     'steps_used': 0, 'budget': 0, 'recommended_calls': [], 'artifacts': {},
-                    'usage': usage}
+                    'usage': _final_usage()}
 
     async def awrap_tool_call(self, request, handler):
         call = request.tool_call

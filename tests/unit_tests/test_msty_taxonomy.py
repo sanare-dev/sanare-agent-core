@@ -111,3 +111,28 @@ def test_breaker_success_resets_and_expired_cooldown_half_opens():
         msty_breaker.record_transient_failure('model:luna')
     msty_breaker._connections['model:luna']['open_until'] = time.monotonic() - 1
     assert msty_breaker.open_remaining('model:luna') is None  # cooldown истёк
+
+
+@pytest.mark.parametrize('content,expected', [
+    ("Tool 'x' failed: upstream returned 503", 'transient'),
+    ('Tool X failed with status 503 Service Unavailable. ' + 'x' * 400, 'transient'),
+    ('[{"type":"text","text":"Error: timeout"}]', 'transient'),
+    ('The service is temporarily unavailable. ' + 'y' * 400, 'transient'),
+    ('При вызове произошла ошибка: 502 Bad Gateway. ' + 'z' * 400, 'transient'),
+    ('{"success": false, "message": "Database connection failed"}', 'deterministic'),
+    ('{"error": {"code": 500}}', 'transient'),
+    ('tau_class=transient. Политика: x\n---\nError: 503 ' + 'w' * 400, 'transient'),
+    # Данные, а не отказ.
+    ('Error count: 0. All 12 jobs healthy.', None),
+    ('Сбой не обнаружен, все сервисы работают.', None),
+    ('Не удалось найти ошибок: всё ок', None),
+    ('{"jobs":[{"timeout":300,"status":"ok"}]}', None),
+    ('Job check-404-pages scheduled', None),
+    ('{"history":[200,502]}', None),
+    ('{"state":"healthy","evidence":[{"message":"fetch timeout"}]}', None),
+    # ok:false / status:failed у статус-чтения — данные о системе (доказательство).
+    ('{"ok": false, "checks": [{"name": "cron", "ok": false}]}', None),
+    ('{"status": "failed", "job_id": "worker-1"}', None),
+])
+def test_classify_envelopes_and_data_after_review(content, expected):
+    assert msty_taxonomy.classify_tool_text(content) == expected

@@ -157,3 +157,22 @@ def test_respond_positive_final_is_untouched(monkeypatch):
     result = asyncio.run(msty.respond({'messages': [
         {'role': 'user', 'content': 'Как там синхронизация?'}], 'tools': []}))['result']
     assert result['content'] == 'Синхронизация здорова, свежесть 3 минуты.'
+
+
+def test_failed_status_read_in_openai_dicts_is_not_evidence():
+    """Ревью 2026-09-23: convert_to_openai_messages теряет status='error';
+    отказ с префиксом tau_class= длиннее 300 символов засчитывался успехом."""
+    failed = [dict(STATUS_HISTORY[0]), STATUS_HISTORY[1],
+              {'role': 'tool', 'tool_call_id': 's1',
+               'content': 'tau_class=transient. Политика: x\n---\nError: 503 Service Unavailable '
+                          + 'x' * 400}]
+    assert msty_evidence.successful_status_reads({'messages': failed}) == []
+
+
+@pytest.mark.parametrize('text', [
+    'Интеграция Stripe не работает — проверьте токен.',
+    'Cron не работает с тех пор, когда обновили сервер.',
+    'Ничего не синхронизируется: cron сломан.',
+])
+def test_diagnosis_with_advice_is_still_a_claim(text):
+    assert msty_evidence.has_negative_claim(text)

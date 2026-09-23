@@ -62,13 +62,15 @@ _SUBJECT = re.compile(
     r'очеред|queue|\bjob|джоб|расписан|schedule|\bmcp\b|\bapi\b|vercel|supabase|'
     r'pressable|\bbrain\b|контур|мониторинг|monitoring|бэкап|backup|воркер|worker|'
     r'заказ|order|оплат|payment|почт|email|домен|domain|dns|ssl|сертификат)')
-# Предложения, где негатив — не диагноз: условие, совет, отрицание отрицания,
-# прошлое исправленное состояние, желаемое поведение.
+# Предложения, где негатив — не диагноз: условное придаточное В НАЧАЛЕ
+# предложения («Если кнопка не работает, …»), «ничего не отсутствует»,
+# прошлое исправленное состояние, желаемое поведение. Совет в конце диагноза
+# («Интеграция не работает — проверьте токен») диагноз не отменяет.
+_CONDITIONAL_START = re.compile(r'(?is)^\W*(?:если|в\s+случае|when|if|in\s+case)\b(?!\s+you\s+ask)')
 _NOT_A_DIAGNOSIS = re.compile(
-    r'(?is)(?:^|\W)(?:если|when|if|в\s+случае|когда|ничего\s+не|nothing\s+is|'
-    r'не\s+отсутств|исправлен|fixed|был\w*\s+сломан|was\s+broken|'
-    r'как\s+вы\s+(?:и\s+)?просили|as\s+(?:you\s+)?requested|по\s+задумке|by\s+design|'
-    r'проверьте|убедитесь|make\s+sure)(?:\W|$)')
+    r'(?is)(?:^|\W)(?:nothing\s+is\s+(?:missing|broken)|ничего\s+не\s+(?:отсутствует|сломано)|'
+    r'не\s+отсутств|исправлен\w*|fixed|был\w*\s+сломан|was\s+broken|'
+    r'как\s+вы\s+(?:и\s+)?просили|as\s+(?:you\s+)?requested|по\s+задумке|by\s+design)(?:\W|$)')
 _SENTENCE = re.compile(r'(?<=[.!?;])\s+|\n+')
 
 
@@ -90,7 +92,8 @@ def has_negative_claim(text: str) -> bool:
     for sentence in _SENTENCE.split(text or ''):
         if not any(pattern.search(sentence) for pattern in patterns):
             continue
-        if not custom and (_NOT_A_DIAGNOSIS.search(sentence) or not _SUBJECT.search(sentence)):
+        if not custom and (_CONDITIONAL_START.search(sentence) or
+                           _NOT_A_DIAGNOSIS.search(sentence) or not _SUBJECT.search(sentence)):
             continue
         return True
     return False
