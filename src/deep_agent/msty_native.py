@@ -43,6 +43,18 @@ NATIVE_TOOLS = frozenset('native_' + name for name in _ORIGINAL_TOOLS)
 MEMORY_SEARCH_TOOL = 'native_search_memory'
 SERVER_EXECUTED = NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL, msty_tool_routing.REQUEST_TOOL,
                                   MEMORY_SEARCH_TOOL}
+
+
+def server_executed() -> frozenset:
+    """Серверно исполняемые имена ЭТОГО шага. Выключенные флагами инструменты не
+    входят: выдуманный моделью вызов уходит штатным путём отказа внешнего
+    инструмента, а не в native-прерывание, которое мост/граф отвергнут (ревью PR #5)."""
+    names = set(NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL})
+    if msty_tool_routing.dispatcher_enabled():
+        names.add(msty_tool_routing.REQUEST_TOOL)
+    if memory_search_enabled():
+        names.add(MEMORY_SEARCH_TOOL)
+    return frozenset(names)
 RESERVED_TOOLS = NATIVE_TOOLS | {'native_execute', 'native_task', 'native_compact_conversation',
                                  MEMORY_SEARCH_TOOL}
 VIRTUAL_ROOTS = ('/scratch', '/memory', '/skills', '/memories', '/large_tool_results')
@@ -527,8 +539,8 @@ class NativeMstyMiddleware(AgentMiddleware):
             # only know LangChain's messages/tools/values channels.
             result = self.secret_guard.redact_result(result)
             calls = result.tool_calls
-            native_calls = [call for call in calls if call['name'] in SERVER_EXECUTED]
-            external_calls = [call for call in calls if call['name'] not in SERVER_EXECUTED]
+            native_calls = [call for call in calls if call['name'] in server_executed()]
+            external_calls = [call for call in calls if call['name'] not in server_executed()]
             prior_external = (state.get('execution') or {}).get('actions_issued', 0)
             if (prior_external + prior_native + len(calls) > msty_execution.MAX_ACTIONS or
                     sum(call['name'] == 'native_write_todos' for call in native_calls) > 1):
@@ -562,7 +574,7 @@ class NativeMstyMiddleware(AgentMiddleware):
             ('version', 'fingerprint', 'intent', 'domains', 'source',
              'selected_count', 'available_count', 'semantic')}
         calls = result.get('tool_calls') or []
-        native_calls = [call for call in calls if call['name'] in SERVER_EXECUTED]
+        native_calls = [call for call in calls if call['name'] in server_executed()]
         execution['native_actions'] = prior_native
         if native_calls:
             execution['actions_issued'] -= len(native_calls)

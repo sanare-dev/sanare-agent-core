@@ -148,7 +148,9 @@ def test_policy_block_tells_brain_to_search_and_record_candidates():
     assert 'MSTY_CANDIDATE_MEMORY_V1' in msty_prompts.POLICY
     assert 'MSTY_CANDIDATE_MEMORY_V1' in msty_prompts.ACTIONABLE_BLOCKS
     block = next(b for b in msty_prompts.POLICY.split('\n\n') if b.startswith('MSTY_CANDIDATE_MEMORY_V1'))
-    for needle in ('/memories/', 'native_search_memory', 'native_grep', 'источники', 'reference_only'):
+    # Имя поиска не называется: пока флаг выключен, модель не должна его выдумывать (ревью PR #5).
+    assert 'native_search_memory' not in block
+    for needle in ('/memories/', 'поиска', 'native_grep', 'источники', 'reference_only'):
         assert needle in block
     assert '/memories/' in msty_native.VIRTUAL_FS_SCOPE and '/memories' in msty_native.VIRTUAL_ROOTS
 
@@ -228,3 +230,15 @@ def test_search_schema_offered_only_when_enabled(monkeypatch):
         assert 'native_search_memory' in names
         assert 'native_search_memory' in state.values['native_tool_names']
     asyncio.run(run())
+
+
+def test_disabled_tools_are_not_server_executed(monkeypatch):
+    """Ревью PR #5: выдуманный native_search_memory при выключенном флаге не должен
+    уходить в native-прерывание (ExecutionProtocolError на продолжении)."""
+    from deep_agent import msty_native
+    monkeypatch.delenv('MSTY_MEMORY_SEARCH', raising=False)
+    monkeypatch.delenv('MSTY_TOOL_DISPATCHER', raising=False)
+    names = msty_native.server_executed()
+    assert msty_native.MEMORY_SEARCH_TOOL not in names
+    monkeypatch.setenv('MSTY_MEMORY_SEARCH', 'on')
+    assert msty_native.MEMORY_SEARCH_TOOL in msty_native.server_executed()
