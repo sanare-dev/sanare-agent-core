@@ -80,13 +80,17 @@ _ERROR_ENVELOPE = re.compile(
     r'http\s+(?:error\s+)?[45]\d\d\b|ошибка\s*[:\-—]|ошибка\s+(?:выполнения|вызова|при)\b|'
     r'сбой\s*[:\-—]|не\s+удалось(?!\s+(?:найти|обнаружить)\s+(?:ни\s+)?(?:ошиб|сбо|проблем))\b|'
     r'инструмент\s+\S+\s+не\s+(?:существует|найден))')
+# Отказ, объявленный фразой В НАЧАЛЕ ответа (не в середине строки лога).
 _FIRST_LINE_FAILURE = re.compile(
-    r'(?is)\btool\s+\S+\s+(?:failed|errored)\b|\bfailed\s+with\s+(?:status|error)\b|'
-    r'(?:произошла|возникла)\s+ошибка\b')
+    r'(?is)^\W{0,3}(?:tool\s+\S+\s+(?:failed|errored)\b|'
+    r'(?:the\s+)?service\s+is\s+temporarily\s+unavailable|'
+    r'(?:при\s+\S+\s+)?(?:произошла|возникла)\s+ошибка\b)')
+# Счётчики вида «Jobs timed out: 0», «HTTP 503 count: 0» — данные.
+_ZERO_COUNTER = re.compile(r'(?is)(?:count|errors?|failures?|timed\s+out|out)\s*[:=]\s*0\b')
 _ENVELOPE_HEAD = 600
 # Результат без конверта тоже отказ, если его ПЕРВАЯ СТРОКА (или весь короткий
 # ответ) несёт строгую сигнатуру: HTTP-код с фразой причины, а не голое число.
-_FIRST_LINE = 300
+_SHORT_RESULT = 300
 _STRICT_SIGNATURE = re.compile(
     r'(?is)\b(?:[45]\d\d\s+(?:not\s+found|unauthori[sz]ed|forbidden|bad\s+request|'
     r'service\s+unavailable|bad\s+gateway|gateway\s+time-?out|internal\s+server\s+error|'
@@ -106,6 +110,8 @@ def _json_error_text(data) -> str | None:
     if data.get('isError') is True or data.get('is_error') is True:
         return 'error: ' + dump
     error = data.get('error')
+    if isinstance(error, str) and error.strip().lower() in ('', 'none', 'null', 'ok', 'false'):
+        error = None
     if error and data.get('ok') is not True:
         return ('error: ' + (error if isinstance(error, str)
                              else json.dumps(error, ensure_ascii=False)))[:_ENVELOPE_HEAD]
@@ -118,12 +124,14 @@ def _json_error_text(data) -> str | None:
 
 
 def _text_parts(content) -> str | None:
-    """Текст из списка MCP-частей [{"type":"text","text":...}]; None — не такой список."""
-    if not isinstance(content, list):
+    """Текст списка MCP-частей, где ВСЕ элементы {"type":"text","text":...};
+    None — не такой список (строки из базы с колонкой text — данные)."""
+    if not isinstance(content, list) or not content:
         return None
-    parts = [part.get('text') for part in content
-             if isinstance(part, dict) and isinstance(part.get('text'), str)]
-    return '\n'.join(parts) if parts else None
+    if not all(isinstance(part, dict) and part.get('type') == 'text'
+               and isinstance(part.get('text'), str) for part in content):
+        return None
+    return '\n'.join(part['text'] for part in content)
 
 
 def classify_tool_text(content) -> str | None:
@@ -139,11 +147,11 @@ def classify_tool_text(content) -> str | None:
         return None
     stripped = content.strip()
     head = None
-    if stripped[:1] in ('{', '['):
+    if stripped[:1] == '{' or stripped[:2] in ('[{', '["', '[]'):
         try:
             data = json.loads(stripped)
         except ValueError:
-            data = None
+            return None  # усечённый/битый JSON — данные, конверта ошибки нет
         if data is not None:
             nested = _text_parts(data)
             if nested is not None:
@@ -153,9 +161,12 @@ def classify_tool_text(content) -> str | None:
                 return None
     if head is None:
         head = stripped[:_ENVELOPE_HEAD]
-        first = stripped.split('\n', 1)[0][:_FIRST_LINE]
-        if not (_ERROR_ENVELOPE.search(head) or _FIRST_LINE_FAILURE.search(first) or
-                _STRICT_SIGNATURE.search(first)):
+        short = len(stripped) <= _SHORT_RESULT and '\n' not in stripped
+        if short and _ZERO_COUNTER.search(stripped) and not stripped.lower().startswith(
+                ('error', 'tau_class=', 'mcp error')):
+            return None  # «HTTP 503 count: 0» — счётчик, не отказ
+        if not (_ERROR_ENVELOPE.search(head) or _FIRST_LINE_FAILURE.search(head) or
+                short and _STRICT_SIGNATURE.search(stripped)):
             return None
     if _UNKNOWN_TOOL_TEXT.search(head):
         return UNKNOWN_TOOL

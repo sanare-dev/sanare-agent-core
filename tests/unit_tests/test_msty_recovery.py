@@ -312,8 +312,11 @@ def test_cancelled_probe_does_not_block_profile():
         msty_breaker.record_transient_failure(connection)
     state = msty_breaker._connections[connection]
     state['open_until'] = 0.1  # cooldown истёк
-    assert msty_breaker.open_remaining(connection) is None  # выдана проба
+    remaining, token = msty_breaker.admit(connection)
+    assert remaining is None and token  # выдана проба этому вызову
     assert msty_breaker.open_remaining(connection) is not None  # проба идёт
-    msty_breaker.release_probe(connection)  # отменённая проба
+    msty_breaker.release_probe(connection)  # посторонний вызов пробу не снимает
+    assert msty_breaker.open_remaining(connection) is not None
+    msty_breaker.release_probe(connection, token)  # владелец: отменённая проба
     assert msty_breaker.open_remaining(connection) is None
     msty_breaker.reset()

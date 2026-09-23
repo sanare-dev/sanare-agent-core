@@ -363,7 +363,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     # модели по серверным профилям. Открытый контур даёт детерминированный отказ
     # без обращения к провайдеру (без расхода и без нагрузки на лежащий сервис).
     connection = 'model:' + profile
-    remaining = msty_breaker.open_remaining(connection)
+    remaining, probe_token = msty_breaker.admit(connection)
     if remaining is not None:
         return publish_result(AIMessage(content=(
             f'Контур модели недоступен: circuit breaker открыт после '
@@ -372,8 +372,9 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             usage_metadata=None,
             response_metadata={'msty_generation': 'not_started', 'msty_blocked': True,
                                'tau_circuit_open': connection}), budget_check)
-    stream = msty_stream.TextStream(state) if incremental else None
+    stream = None
     try:
+        stream = msty_stream.TextStream(state) if incremental else None
         try:
             raw_result = (await stream.invoke(model, full_messages) if stream else
                           await model.ainvoke(full_messages))
@@ -403,7 +404,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     finally:
         # Исход пробы полуоткрытого контура записан выше (success/transient);
         # отмена или непредвиденный выход не должны держать пробу 150 с.
-        msty_breaker.release_probe(connection)
+        msty_breaker.release_probe(connection, probe_token)
     msty_breaker.record_success(connection)
     try:
         result = msty_models.stamp_usage(profile, raw_result)

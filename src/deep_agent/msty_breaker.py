@@ -32,31 +32,42 @@ COOLDOWN_SECONDS = 60.0
 PROBE_SECONDS = 150.0
 
 _lock = threading.Lock()
+_token_seq = 0
 _connections: dict[str, dict] = {}
 
 
 def open_remaining(connection: str) -> float | None:
     """Секунды до закрытия контура, если он открыт; None — вызовы допустимы."""
+    return admit(connection)[0]
+
+
+def admit(connection: str) -> tuple[float | None, int]:
+    """(секунды до закрытия | None, токен пробы). Токен != 0 — этот вызов
+    владеет пробой полуоткрытого контура и только он снимает её в release_probe."""
     try:
         with _lock:
             state = _connections.get(connection)
             if not state:
-                return None
+                return None, 0
             now = time.monotonic()
             remaining = state.get('open_until', 0.0) - now
             if remaining > 0:
-                return remaining
+                return remaining, 0
             if state.get('probe_until', 0.0) > now:
-                return state['probe_until'] - now  # проба уже идёт
+                return state['probe_until'] - now, 0  # проба уже идёт
             if state.get('open_until'):
                 # Cooldown истёк: полуоткрытое состояние, один пробный вызов.
                 # Провал пробы (failures = порог-1 → +1) сразу открывает контур.
+                global _token_seq
+                _token_seq += 1
                 state['open_until'] = 0.0
                 state['failures'] = FAILURE_THRESHOLD - 1
                 state['probe_until'] = now + PROBE_SECONDS
-            return None
+                state['probe_token'] = _token_seq
+                return None, _token_seq
+            return None, 0
     except Exception:
-        return None
+        return None, 0
 
 
 def record_success(connection: str) -> None:
@@ -82,7 +93,7 @@ def record_transient_failure(connection: str) -> bool:
         return False
 
 
-def release_probe(connection: str) -> None:
+def release_probe(connection: str, token: int = 0) -> None:
     """Снять отметку пробы без изменения счётчика; вызывать в finally.
 
     Проба, прерванная отменой (CancelledError, таймаут под-прогона) или
@@ -92,8 +103,11 @@ def release_probe(connection: str) -> None:
     try:
         with _lock:
             state = _connections.get(connection)
-            if state:
+            # Снимает только владелец: отмена постороннего вызова, начатого до
+            # открытия контура, не должна пропускать всех во время пробы.
+            if state and token and state.get('probe_token') == token:
                 state['probe_until'] = 0.0
+                state['probe_token'] = 0
     except Exception:
         pass
 

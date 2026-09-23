@@ -58,11 +58,13 @@ _EXPLAIN_ONLY = re.compile(
 # Только формулировки о системе в целом: «что лежит в папке», «всё ли в
 # порядке с письмом», «что упало в цене» маршрут не получают.
 _SYSTEM_STATUS = re.compile(
-    r"(?is)(?:вс[её]\s+ли\s+(?:у\s+нас\s+)?(?:работает|живо)\s*[?.!]?\s*$|"
+    r"(?is)(?:вс[её]\s+ли\s+(?:у\s+нас\s+)?(?:работает|живо|в\s+порядке|ок)"
+    r"(?:\s+(?:сегодня|сейчас|с\s+систем\w*|в\s+систем\w*))?\s*[?.!]|"
+    r"^\W*что\s+(?:сейчас\s+|у\s+нас\s+)?(?:упало|лежит|требует\s+внимания)\s*[?.!]?\s*$|"
     r"что\s+(?:сейчас\s+|у\s+нас\s+)?(?:с|со)\s+(?:систем|контур|сервис|инфраструктур)|"
     r"(?:обзор|состояни|статус|здоров\w*|health|overview)\W+(?:\w+\W+){0,3}?"
     r"(?:систем|контур|сервис|инфраструктур|всего\s+контур|всей\s+систем)|"
-    r"is\s+everything\s+(?:working|up)|system\s+(?:status|health|overview))"
+    r"is\s+everything\s+(?:ok|okay|fine|working|up)\s*[?.!]|system\s+(?:status|health|overview))"
 )
 _SYSTEM_STATUS_TOOLS = frozenset({"msty_system_overview", "msty_admin_health"})
 _BROWSER_INTERACTION = re.compile(

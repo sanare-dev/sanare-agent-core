@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -66,10 +67,13 @@ _SUBJECT = re.compile(
 # предложения («Если кнопка не работает, …»), «ничего не отсутствует»,
 # прошлое исправленное состояние, желаемое поведение. Совет в конце диагноза
 # («Интеграция не работает — проверьте токен») диагноз не отменяет.
-_CONDITIONAL_START = re.compile(r'(?is)^\W*(?:если|в\s+случае|when|if|in\s+case)\b(?!\s+you\s+ask)')
+_CONDITIONAL_START = re.compile(
+    r'(?is)^\W*(?:(?:если|в\s+случае|когда|when|if|in\s+case)\b'
+    r'(?!\s+(?:you\s+ask|коротко|честно|кратко|по\s+сути))|'
+    r'(?:убедитесь|проверьте|make\s+sure|check|ensure)\b[^.!?]{0,40}\b(?:что|that)\b)')
 _NOT_A_DIAGNOSIS = re.compile(
     r'(?is)(?:^|\W)(?:nothing\s+is\s+(?:missing|broken)|ничего\s+не\s+(?:отсутствует|сломано)|'
-    r'не\s+отсутств|исправлен\w*|fixed|был\w*\s+сломан|was\s+broken|'
+    r'не\s+отсутству\w*|исправлен\w*|fixed|был\w*\s+сломан|was\s+broken|'
     r'как\s+вы\s+(?:и\s+)?просили|as\s+(?:you\s+)?requested|по\s+задумке|by\s+design)(?:\W|$)')
 _SENTENCE = re.compile(r'(?<=[.!?;])\s+|\n+')
 
@@ -134,6 +138,26 @@ def _current_turn(messages) -> list:
     return messages
 
 
+_UNREAD_STATES = frozenset(('unavailable', 'rejected', 'error', 'failed', 'unknown', 'denied'))
+
+
+def _unread_state(text: str) -> bool:
+    """Статус-инструмент ответил, что сам статус прочитать не удалось.
+
+    Для таксономии это данные (вызов прошёл), но доказательством состояния
+    системы такой ответ не является: {"state":"unavailable","code":...}.
+    """
+    stripped = text.strip()
+    if not stripped.startswith('{'):
+        return False
+    try:
+        data = json.loads(stripped)
+    except ValueError:
+        return False
+    value = data.get('state') if isinstance(data, dict) else None
+    return isinstance(value, str) and value.lower() in _UNREAD_STATES
+
+
 def successful_status_reads(state) -> list[str]:
     """Имена evidence-инструментов (status_read) с успешным результатом в ТЕКУЩЕМ ходе.
 
@@ -159,6 +183,8 @@ def successful_status_reads(state) -> list[str]:
         text = _text(content)
         if text.startswith('error=') or msty_taxonomy.classify_tool_text(text) is not None:
             continue  # неуспешное чтение — не доказательство
+        if _unread_state(text):
+            continue  # инструмент не смог прочитать статус (state=unavailable/rejected)
         if name not in found:
             found.append(name)
     return found

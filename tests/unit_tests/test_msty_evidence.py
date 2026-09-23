@@ -176,3 +176,24 @@ def test_failed_status_read_in_openai_dicts_is_not_evidence():
 ])
 def test_diagnosis_with_advice_is_still_a_claim(text):
     assert msty_evidence.has_negative_claim(text)
+
+
+@pytest.mark.parametrize('text', [
+    'Когда cron не работает, бот пишет в лог.',
+    'Убедитесь, что вебхук не сломан.',
+    'Проверьте, что сервис не отключён и ключ не отсутствует.',
+    'Ключ API не отсутствует.',
+])
+def test_advice_and_conditions_are_not_claims_round2(text):
+    assert not msty_evidence.has_negative_claim(text)
+
+
+def test_short_answer_prefix_is_still_a_claim():
+    assert msty_evidence.has_negative_claim('Если коротко: синхронизация не работает.')
+
+
+def test_status_tool_that_could_not_read_is_not_evidence():
+    unread = [dict(STATUS_HISTORY[0]), STATUS_HISTORY[1],
+              {'role': 'tool', 'tool_call_id': 's1',
+               'content': '{"state": "unavailable", "code": "vercel_logs_failed"}'}]
+    assert msty_evidence.successful_status_reads({'messages': unread}) == []

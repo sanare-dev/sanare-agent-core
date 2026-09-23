@@ -618,7 +618,8 @@ class NativeMstyMiddleware(AgentMiddleware):
                 self.model = model
 
             async def ainvoke(self, messages):
-                if msty_breaker.open_remaining(connection) is not None:
+                remaining, probe_token = msty_breaker.admit(connection)
+                if remaining is not None:
                     raise ConnectionError('circuit open')
                 # Начатый вызов без измеренного итога (отмена, таймаут) — неизвестный
                 # расход, не ноль: unknown_calls = started_calls - измеренные.
@@ -632,7 +633,7 @@ class NativeMstyMiddleware(AgentMiddleware):
                         msty_breaker.record_success(connection)  # провайдер ответил
                     raise
                 finally:
-                    msty_breaker.release_probe(connection)
+                    msty_breaker.release_probe(connection, probe_token)
                 msty_breaker.record_success(connection)
                 usage['model_calls'] += 1
                 checked = None

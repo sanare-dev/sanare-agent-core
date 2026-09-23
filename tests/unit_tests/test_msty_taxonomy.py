@@ -136,3 +136,18 @@ def test_breaker_success_resets_and_expired_cooldown_half_opens():
 ])
 def test_classify_envelopes_and_data_after_review(content, expected):
     assert msty_taxonomy.classify_tool_text(content) == expected
+
+
+@pytest.mark.parametrize('content', [
+    '2026-09-23 10:00 Request timed out after 30s\n' + 'ok line\n' * 50,
+    '[cron] job sync failed with status 1\nnext',
+    'Журнал: 22.09 произошла ошибка, 23.09 исправлено',
+    'Last 3 runs: tool sync failed once, then recovered',
+    'Jobs timed out: 0',
+    'HTTP 503 count: 0',
+    '[{"id": 1, "text": "Request timed out"}]',
+    '{"rows": ["a", "b timed out' + 'q' * 500,
+    '{"error": "none", "state": "ok"}',
+])
+def test_successful_data_is_not_a_failure_round2(content):
+    assert msty_taxonomy.classify_tool_text(content) is None
