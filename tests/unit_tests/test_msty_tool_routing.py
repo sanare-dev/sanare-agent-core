@@ -301,3 +301,40 @@ def test_a_continuation_without_a_prior_route_can_still_orient():
         assert names == routing._CORE_READ, text
         # Recovery orients, it never acts on its own.
         assert value["intent"] == "read", text
+
+
+import pytest as _pytest  # noqa: E402,I001
+
+
+@_pytest.mark.parametrize('question', [
+    'Дай фактический обзор состояния всей системы: что живо, что требует внимания.',
+    'Что сейчас с системой?',
+    'Всё ли работает?',
+    'Какой статус всего контура?',
+    'Is everything ok?',
+    'Всё ли в порядке?',
+    'Всё ли в порядке с системой?',
+    'Всё ли у нас работает сегодня?',
+    'Всё ли работает? Проверь.',
+    'Что упало?',
+    'Что требует внимания?',
+])
+def test_general_system_status_question_gets_status_tools(question):
+    """Живой дефект 2026-09-23: общий вопрос о состоянии без доменного слова
+    получал 0 инструментов при переданных msty_system_overview/msty_admin_health."""
+    tools = [{'type': 'function', 'function': {'name': name, 'description': 'x',
+              'parameters': {'type': 'object', 'properties': {}}}}
+             for name in ('msty_store_sync_status', 'msty_system_overview',
+                          'msty_admin_health', 'execute_sql', 'list_tables')]
+    _, route, _ = routing.select_tools([{"role": "user", "content": question}], tools)
+    assert {'msty_system_overview', 'msty_admin_health'} <= set(route['selected_names'])
+
+
+@_pytest.mark.parametrize('question', [
+    'Что лежит в папке Downloads?', 'Всё ли в порядке с текстом письма?', 'что упало в цене'])
+def test_non_system_questions_do_not_get_status_tools(question):
+    tools = [{'type': 'function', 'function': {'name': name, 'description': 'x',
+              'parameters': {'type': 'object', 'properties': {}}}}
+             for name in ('msty_system_overview', 'msty_admin_health')]
+    _, route, _ = routing.select_tools([{"role": "user", "content": question}], tools)
+    assert not {'msty_system_overview', 'msty_admin_health'} & set(route['selected_names'])

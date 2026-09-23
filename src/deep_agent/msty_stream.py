@@ -21,7 +21,12 @@ KNOWN_FINISH = frozenset(('stop', 'tool_calls', 'function_call', 'end_turn', 'to
 
 
 class StreamFailure(RuntimeError):
-    """Content-free failure; partial provider totals are not final usage."""
+    """Content-free failure; partial provider totals are not final usage.
+
+    `transient` — сбой транспорта провайдера (timeout/5xx/429): его учитывает
+    circuit breaker. Детали исходного исключения не сохраняются.
+    """
+    transient = False
 
 
 def enabled(state):
@@ -96,6 +101,12 @@ class TextStream:
         except asyncio.CancelledError:
             self.invalidate()
             raise
-        except Exception:
+        except StreamFailure:
             self.invalidate()
-            raise StreamFailure('Поток модели не завершён; действия не выданы, расход не подтверждён.') from None
+            raise
+        except Exception as error:
+            self.invalidate()
+            from . import msty_taxonomy  # локально: без цикла импорта
+            failure = StreamFailure('Поток модели не завершён; действия не выданы, расход не подтверждён.')
+            failure.transient = msty_taxonomy.is_transient_exception(error)
+            raise failure from None

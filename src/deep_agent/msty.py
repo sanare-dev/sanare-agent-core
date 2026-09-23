@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, conve
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
+from . import msty_breaker, msty_evidence, msty_taxonomy
 from . import msty_execution, msty_models, msty_compaction, msty_task, msty_stream, msty_memory
 from .msty_prompts import ANALYST_POLICY, POLICY
 
@@ -358,13 +359,53 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         elif isinstance(choice, dict) and choice.get("type") == "function":
             choice = choice["function"]["name"]
         model = model.bind_tools(tools, tool_choice=choice)
-    stream = msty_stream.TextStream(state) if incremental else None
+    # TAU L4 circuit breaker: единственные удалённые вызовы графа — генерация
+    # модели по серверным профилям. Открытый контур даёт детерминированный отказ
+    # без обращения к провайдеру (без расхода и без нагрузки на лежащий сервис).
+    connection = 'model:' + profile
+    remaining, probe_token = msty_breaker.admit(connection)
+    if remaining is not None:
+        return publish_result(AIMessage(content=(
+            f'Контур модели недоступен: circuit breaker открыт после '
+            f'{msty_breaker.FAILURE_THRESHOLD} transient-отказов подряд, cooldown ещё '
+            f'{int(remaining) + 1} с. Провайдер не вызывался; действия не выполнены, расхода нет.'),
+            usage_metadata=None,
+            response_metadata={'msty_generation': 'not_started', 'msty_blocked': True,
+                               'tau_circuit_open': connection}), budget_check)
+    stream = None
     try:
-        raw_result = (await stream.invoke(model, full_messages) if stream else
-                      await model.ainvoke(full_messages))
-    except msty_stream.StreamFailure as error:
-        return publish_result(AIMessage(content=str(error), usage_metadata=None,
-            response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
+        stream = msty_stream.TextStream(state) if incremental else None
+        try:
+            raw_result = (await stream.invoke(model, full_messages) if stream else
+                          await model.ainvoke(full_messages))
+        except msty_stream.StreamFailure as error:
+            if getattr(error, 'transient', False):
+                msty_breaker.record_transient_failure(connection)
+            else:
+                msty_breaker.record_success(connection)  # провайдер ответил: контур жив
+            return publish_result(AIMessage(content=str(error), usage_metadata=None,
+                response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
+        except Exception as error:
+            if not msty_taxonomy.is_transient_exception(error):
+                msty_breaker.record_success(connection)  # не транспорт: не держать пробу
+                raise
+            # Transient-отказ транспорта: классифицированный честный отказ вместо
+            # падения рана; повтор поколения не выполняем — оно платное.
+            opened = msty_breaker.record_transient_failure(connection)
+            if stream:
+                stream.invalidate()
+            return publish_result(AIMessage(content=(
+                'Вызов модели не завершён из-за временного сбоя контура'
+                + ('; circuit breaker открыт, контур охлаждается.' if opened else
+                   '; допустим один повтор позже.')
+                + ' Действия не выполнены, расход не подтверждён.'), usage_metadata=None,
+                response_metadata={'msty_generation': 'transient_failure', 'msty_blocked': True,
+                                   'tau_circuit_open': connection if opened else None}), budget_check)
+    finally:
+        # Исход пробы полуоткрытого контура записан выше (success/transient);
+        # отмена или непредвиденный выход не должны держать пробу 150 с.
+        msty_breaker.release_probe(connection, probe_token)
+    msty_breaker.record_success(connection)
     try:
         result = msty_models.stamp_usage(profile, raw_result)
     except msty_models.ModelAdapterError:
@@ -407,6 +448,10 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     if native_result_filter is not None:
         # Trusted Python integration only; never selected by request/state data.
         result = native_result_filter(result)
+    # TAU L5 Evidence Gate: негативный вывод допускается только после успешного
+    # профильного статус-чтения. До stream.finish: переписанный текст
+    # инвалидирует уже показанный provisional-поток.
+    result, _ = msty_evidence.gate_final_answer(state, result)
     # Explicit None clears any check left in a persisted LangGraph thread;
     # an earlier accepted count must never attest a different request.
     if stream:
