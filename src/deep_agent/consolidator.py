@@ -1,51 +1,44 @@
-"""Background candidate-memory consolidation (official Deep Agents pattern).
+"""Candidate-memory consolidation run by Brain itself through the local bridge.
 
-Pattern: https://docs.langchain.com/oss/python/deepagents/memory ("background
-consolidation"): a separate deep agent registered in langgraph.json, run by an
-Agent Server cron (https://docs.langchain.com/langsmith/cron-jobs), reads recent
-threads through the in-process SDK client and writes memory files with its
-stock file tools. Here the only writable route is /memories/ -> the candidates
-Store namespace; approved /memory/ and /skills/ are not mounted at all.
+Why not an Agent Server cron: the owner's emergency stop is a local SQLite flag
+(right-hand.sqlite, read by brain_stop.require_running) that the cloud cannot
+read, and cloud-side calls bypass the bridge ledger (reserve before send,
+measured settle, unknown != 0). Instead a local launchd job
+(tools/consolidate_memory.py) sends CONSOLIDATION_PROMPT to `team.brain` over
+the existing bridge, which checks the stop before every paid stage and meters
+every stage in the ledger. Brain gets one read-only, model-free tool that
+returns a bounded digest of recently updated Brain threads; cards are written
+with the stock native file tools into /memories/ only.
 
-Cost bounds use stock LangChain middleware (ModelCallLimitMiddleware,
-ToolCallLimitMiddleware) plus fixed input caps below. Model: Luna via the
-existing msty_models profile (same key/Gateway handling as Brain). These calls
-are NOT metered by the Brain bridge ledger; the Gateway spend policy applies
-only when MSTY_LLM_GATEWAY_ENABLED=1.
+Pattern: https://docs.langchain.com/oss/python/deepagents/memory (background
+consolidation reads recent threads through the SDK client).
 """
 from datetime import datetime, timedelta, timezone
 
-from deepagents import create_deep_agent
-from deepagents.backends import CompositeBackend, StateBackend
-from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
-from langchain.tools import ToolRuntime, tool
+from langchain.tools import tool
 from langgraph_sdk import get_client
 
-from . import msty_models
-from .msty_native import SecretPIIMiddleware
-from .msty_native_memory import CANDIDATES_ROUTE, candidates_backend
-
-PROFILE = 'luna'
+RECENT_CONVERSATIONS_TOOL = 'native_recent_conversations'
+CONSOLIDATION_MARKER = 'MSTY_MEMORY_CONSOLIDATION_V1'
 SOURCE_GRAPH = 'msty_native'
-WINDOW_HOURS = 6
+WINDOW_HOURS = 8  # launchd interval is 6 h; 2 h overlap, cards are updated, not duplicated
 MAX_THREADS = 10
 MAX_MESSAGES_PER_THREAD = 12
 MAX_CHARS_PER_MESSAGE = 1200
 MAX_TOTAL_CHARS = 40000
-MAX_TOKENS = 2048
-MODEL_CALL_LIMIT = 8
-RECURSION_LIMIT = 40
 
-SYSTEM_PROMPT = f"""Ты — консолидатор памяти-кандидата Sanare Brain.
-1. Вызови search_recent_conversations один раз.
-2. Посмотри существующие карточки: ls/grep в {CANDIDATES_ROUTE}. Обновляй
-   подходящую карточку (edit_file), новую создавай только для новой темы.
-3. Карточка — {CANDIDATES_ROUTE}<проект>/<тема>.md, кратко: что сделано; где
-   (пути, URL, проект); как; источники и проверки (thread_id); остаток; дата.
+CONSOLIDATION_PROMPT = f"""{CONSOLIDATION_MARKER}
+Плановая консолидация памяти-кандидата.
+1. Вызови {RECENT_CONVERSATIONS_TOOL} один раз.
+2. Посмотри существующие карточки: native_ls / native_grep в /memories/. Обновляй
+   подходящую карточку (native_edit_file), новую создавай только для новой темы.
+3. Карточка — /memories/<проект>/<тема>.md, кратко: что сделано; где (пути, URL,
+   проект); как; источники и проверки (thread_id); остаток; дата.
 4. Только проверяемые факты из переписки; догадки не записывай. Секреты, ключи,
    пароли и персональные данные не записывай. Карточка — reference_only кандидат,
-   не approved-память и не полномочие. Подагентов (task) не используй.
-Если существенной работы нет — ничего не пиши и кратко ответь «нет новых фактов»."""
+   не approved-память и не полномочие. Подагентов и внешние инструменты не используй.
+Если существенной работы нет — ничего не пиши и ответь «нет новых фактов».
+В конце перечисли изменённые карточки."""
 
 
 def _text(content) -> str:
@@ -58,7 +51,8 @@ def _text(content) -> str:
 
 
 def format_threads(threads: list[dict], since: datetime) -> str:
-    """Bounded plain-text digest of human/AI turns; tool payloads are skipped."""
+    """Bounded plain-text digest of human/AI turns; tool payloads are skipped,
+    and consolidation threads themselves are excluded by their marker."""
     chunks, total = [], 0
     for thread in threads:
         updated = str(thread.get('updated_at') or '')
@@ -67,9 +61,13 @@ def format_threads(threads: list[dict], since: datetime) -> str:
                 continue
         except ValueError:
             continue
-        messages = ((thread.get('values') or {}).get('messages') or [])[-MAX_MESSAGES_PER_THREAD:]
+        messages = [m for m in ((thread.get('values') or {}).get('messages') or [])
+                    if isinstance(m, dict)]
+        if any(m.get('type') == 'human' and CONSOLIDATION_MARKER in _text(m.get('content'))
+               for m in messages):
+            continue
         lines = [f"{m.get('type')}: {_text(m.get('content'))[:MAX_CHARS_PER_MESSAGE]}"
-                 for m in messages if isinstance(m, dict) and m.get('type') in ('human', 'ai')
+                 for m in messages[-MAX_MESSAGES_PER_THREAD:] if m.get('type') in ('human', 'ai')
                  and _text(m.get('content')).strip()]
         if not lines:
             continue
@@ -81,38 +79,13 @@ def format_threads(threads: list[dict], since: datetime) -> str:
     return '\n\n'.join(chunks) or 'Нет обновлённых тредов за окно.'
 
 
-@tool
-async def search_recent_conversations(runtime: ToolRuntime) -> str:
-    """Return a bounded digest of Brain threads updated in the last hours."""
+@tool(RECENT_CONVERSATIONS_TOOL)
+async def recent_conversations() -> str:
+    """Read-only bounded digest of Brain conversations updated in the last hours
+    (human/assistant text only). For candidate-memory consolidation; not live status."""
     since = datetime.now(timezone.utc) - timedelta(hours=WINDOW_HOURS)
-    client = get_client()  # in-process Agent Server connection
+    client = get_client()  # in-process Agent Server connection, no model call
     threads = await client.threads.search(
         metadata={'graph_id': SOURCE_GRAPH}, sort_by='updated_at', sort_order='desc',
         limit=MAX_THREADS, select=['thread_id', 'updated_at', 'values'])
     return format_threads(threads, since)
-
-
-def backend(runtime) -> CompositeBackend:
-    return CompositeBackend(default=StateBackend(runtime),
-                            routes={CANDIDATES_ROUTE: candidates_backend(runtime)})
-
-
-def build_graph(model=None, *, store=None, checkpointer=None):
-    return create_deep_agent(
-        model=model or msty_models.make_model(PROFILE, MAX_TOKENS),
-        tools=[search_recent_conversations],
-        system_prompt=SYSTEM_PROMPT,
-        backend=backend,
-        middleware=[
-            SecretPIIMiddleware(),
-            ModelCallLimitMiddleware(run_limit=MODEL_CALL_LIMIT, exit_behavior='end'),
-            ToolCallLimitMiddleware(tool_name='search_recent_conversations', run_limit=1),
-            ToolCallLimitMiddleware(tool_name='task', run_limit=0),
-        ],
-        store=store, checkpointer=checkpointer, name='consolidator',
-    ).with_config({'recursion_limit': RECURSION_LIMIT})
-
-
-def make_graph():
-    """Agent Server graph factory: the model key is resolved at run time."""
-    return build_graph()
