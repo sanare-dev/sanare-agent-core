@@ -370,3 +370,18 @@ def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeyp
     assert result.usage_metadata is not None, result.response_metadata.get('token_usage')
     assert result.usage_metadata['input_token_details']['cache_read'] == 20
     assert result.usage_metadata['input_tokens'] == 55
+
+
+def test_pricing_version_and_luna_model_match_bridge_when_available():
+    """Контракт граф ↔ мост: версия тарифа и модель luna совпадают (ревью PR #4)."""
+    import re
+    from pathlib import Path
+    from deep_agent import msty_execution
+    bridge = Path('/Volumes/LLM-Data/50-projects/open-webui/orchestrator/_sanare_team/brain_accounting.py')
+    if not bridge.exists():
+        pytest.skip('мост недоступен в этом окружении (CI)')
+    text = bridge.read_text()
+    version = re.search(r"PROFILE_PRICE_VERSION = '([^']+)'", text).group(1)
+    luna = re.search(r"'luna': \{'model': '([^']+)'", text).group(1)
+    assert version == msty_execution.PRICING_VERSION
+    assert luna == adapter.PROFILES['luna'].model
