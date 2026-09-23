@@ -19,6 +19,9 @@ def test_window_limits_leave_output_and_count_reserve():
     # 200K models keep the historical admission (window minus 10%).
     assert execution.window_input_limit('opus') == 180000
     assert execution.window_input_limit('fable') == 180000
+    # #58 analysts: Sol 6 1.05M, Opus 5.5 200K (bridge price table 'context').
+    assert execution.window_input_limit('sol6') == 986000
+    assert execution.window_input_limit('opus5') == 180000
     assert set(execution.BINDING_PROFILES) <= set(execution.CONTEXT_WINDOWS)
 
 
@@ -74,8 +77,8 @@ def test_binding_outside_profile_window_is_rejected_before_generation(monkeypatc
 
 def test_200k_profile_cannot_be_bound_to_a_1m_limit():
     with pytest.raises(execution.ExecutionProtocolError):
-        execution.validate_binding(bound(profile='opus'), 'opus', 100)
-    execution.validate_binding(bound(profile='opus', limit=180000), 'opus', 100)
+        execution.validate_binding(bound(profile='opus5'), 'opus5', 100)
+    execution.validate_binding(bound(profile='opus5', limit=180000), 'opus5', 100)
 
 
 def test_binding_with_extra_field_is_rejected(monkeypatch):

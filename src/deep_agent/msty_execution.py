@@ -20,9 +20,9 @@ MAX_ACTIONS = 200
 # Должна совпадать с PROFILE_PRICE_VERSION моста (brain_accounting): иначе
 # validate_binding отклоняет каждую задачу Brain с бюджетом.
 PRICING_VERSION = '2026-09-23-brain-model-profiles-v4-luna6'
-# Profiles a budget binding may pin: admitted lead profiles (Luna/DeepSeek/Sol)
+# Profiles a budget binding may pin: admitted lead profiles (Luna/DeepSeek)
 # plus the server-allowlisted analyst set. The bridge pins one profile per task.
-BINDING_PROFILES = frozenset(('luna', 'deepseek', 'astra', 'sol', 'opus', 'fable'))
+BINDING_PROFILES = frozenset(('luna', 'deepseek', 'sol6', 'opus5'))
 # Context admission (2026-09-24, brain-desk #145). 180000 was the Sonnet-200K era
 # safety threshold, not the window of today's leads (Luna 1.05M, DeepSeek 1M).
 # The bridge pins the per-task admission limit in the budget binding and reserves
@@ -32,7 +32,9 @@ BINDING_PROFILES = frozenset(('luna', 'deepseek', 'astra', 'sol', 'opus', 'fable
 LEGACY_INPUT_LIMIT = 180000
 CONTEXT_WINDOWS = MappingProxyType({
     'luna': 1_050_000, 'deepseek': 1_000_000, 'astra': 1_050_000, 'sol': 1_050_000,
-    'opus': 200_000, 'fable': 200_000, 'sonnet': 200_000})
+    'opus': 200_000, 'fable': 200_000, 'sonnet': 200_000,
+    # #58 analysts; windows match brain_accounting._PROFILES 'context'.
+    'sol6': 1_050_000, 'opus5': 200_000})
 
 
 def window_input_limit(profile):
