@@ -21,7 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, conver
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.types import Command, interrupt
 
-from . import msty, msty_compaction, msty_execution, msty_prompts, msty_task, msty_tool_routing
+from . import msty, msty_compaction, msty_execution, msty_guard, msty_prompts, msty_task, msty_tool_routing
 from .msty_native_memory import backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware
 
 _ORIGINAL_TOOLS = frozenset({'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep', 'write_todos'})
@@ -498,8 +498,25 @@ class NativeMstyMiddleware(AgentMiddleware):
             result = await handler(request)
             return (_virtual_write_observation(result) if call['name'] in {
                 'native_write_file', 'native_edit_file'} else result)
-        if call['name'] not in msty.tool_names(request.state.get('tools') or []):
+        # TAU L3 Guard: имя (с алиасами) и схема сверяются с реестром до
+        # исполнения. Имя вне реестра — ошибка модели, а не нарушение протокола:
+        # корректирующее ToolMessage с fuzzy-кандидатами вместо сырого отказа.
+        # Имя из реестра, но не допущенное на этом шаге, дошло сюда лишь в обход
+        # фильтра публикации — это рассогласование конвейера, не «unknown tool».
+        tools = request.state.get('tools') or []
+        admitted = msty.tool_names(tools)
+        if call['name'] not in admitted:
+            correction = msty_guard.guard_validate(call)
+            if correction is not None:
+                return correction
             raise msty_execution.ExecutionProtocolError('Внешний инструмент не передавался модели.')
+        live_schema = next((tool['function'].get('parameters') for tool in tools
+                            if isinstance(tool, dict) and tool.get('type') == 'function'
+                            and isinstance(tool.get('function'), dict)
+                            and tool['function'].get('name') == call['name']), None)
+        correction = msty_guard.guard_arguments(call, schema=live_schema)
+        if correction is not None:
+            return correction
         observations = request.state.get('native_external_observations') or {}
         if call['id'] not in observations:
             raise msty_execution.ExecutionProtocolError('Нет проверенного результата внешнего инструмента.')
