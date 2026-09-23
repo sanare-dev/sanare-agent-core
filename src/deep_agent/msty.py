@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, conve
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
-from . import msty_breaker, msty_taxonomy
+from . import msty_breaker, msty_evidence, msty_taxonomy
 from . import msty_execution, msty_models, msty_compaction, msty_task, msty_stream, msty_memory
 from .msty_prompts import ANALYST_POLICY, POLICY
 
@@ -437,6 +437,10 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     if native_result_filter is not None:
         # Trusted Python integration only; never selected by request/state data.
         result = native_result_filter(result)
+    # TAU L5 Evidence Gate: негативный вывод допускается только после успешного
+    # профильного статус-чтения. До stream.finish: переписанный текст
+    # инвалидирует уже показанный provisional-поток.
+    result, _ = msty_evidence.gate_final_answer(state, result)
     # Explicit None clears any check left in a persisted LangGraph thread;
     # an earlier accepted count must never attest a different request.
     if stream:
