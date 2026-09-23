@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, conve
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
+from . import msty_breaker, msty_taxonomy
 from . import msty_execution, msty_models, msty_compaction, msty_task, msty_stream, msty_memory
 from .msty_prompts import ANALYST_POLICY, POLICY
 
@@ -358,6 +359,19 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         elif isinstance(choice, dict) and choice.get("type") == "function":
             choice = choice["function"]["name"]
         model = model.bind_tools(tools, tool_choice=choice)
+    # TAU L4 circuit breaker: единственные удалённые вызовы графа — генерация
+    # модели по серверным профилям. Открытый контур даёт детерминированный отказ
+    # без обращения к провайдеру (без расхода и без нагрузки на лежащий сервис).
+    connection = 'model:' + profile
+    remaining = msty_breaker.open_remaining(connection)
+    if remaining is not None:
+        return publish_result(AIMessage(content=(
+            f'Контур модели недоступен: circuit breaker открыт после '
+            f'{msty_breaker.FAILURE_THRESHOLD} transient-отказов подряд, cooldown ещё '
+            f'{int(remaining) + 1} с. Провайдер не вызывался; действия не выполнены, расхода нет.'),
+            usage_metadata=None,
+            response_metadata={'msty_generation': 'not_started', 'msty_blocked': True,
+                               'tau_circuit_open': connection}), budget_check)
     stream = msty_stream.TextStream(state) if incremental else None
     try:
         raw_result = (await stream.invoke(model, full_messages) if stream else
@@ -365,6 +379,22 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     except msty_stream.StreamFailure as error:
         return publish_result(AIMessage(content=str(error), usage_metadata=None,
             response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
+    except Exception as error:
+        if not msty_taxonomy.is_transient_exception(error):
+            raise
+        # Transient-отказ транспорта: классифицированный честный отказ вместо
+        # падения рана; повтор поколения не выполняем — оно платное.
+        opened = msty_breaker.record_transient_failure(connection)
+        if stream:
+            stream.invalidate()
+        return publish_result(AIMessage(content=(
+            'Вызов модели не завершён из-за временного сбоя контура'
+            + ('; circuit breaker открыт, контур охлаждается.' if opened else
+               '; допустим один повтор позже.')
+            + ' Действия не выполнены, расход не подтверждён.'), usage_metadata=None,
+            response_metadata={'msty_generation': 'transient_failure', 'msty_blocked': True,
+                               'tau_circuit_open': connection if opened else None}), budget_check)
+    msty_breaker.record_success(connection)
     try:
         result = msty_models.stamp_usage(profile, raw_result)
     except msty_models.ModelAdapterError:
