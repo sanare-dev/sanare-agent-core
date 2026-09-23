@@ -461,7 +461,7 @@ class NativeMstyMiddleware(AgentMiddleware):
         execution['harness_version'] = 'msty-native-v1'
         execution['tool_route'] = {key: deepcopy(tool_route[key]) for key in
             ('version', 'fingerprint', 'intent', 'domains', 'source',
-             'selected_count', 'available_count')}
+             'selected_count', 'available_count', 'semantic')}
         calls = result.get('tool_calls') or []
         native_calls = [call for call in calls if call['name'] in NATIVE_TOOLS]
         execution['native_actions'] = prior_native

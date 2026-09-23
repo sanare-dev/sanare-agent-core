@@ -21,6 +21,14 @@ dependencies = [
     "python-dotenv>=1.0.1",
 ]
 
+# TAU L2 (неделя 4): семантический retrieval — опциональный extra. Веб-деплой
+# без него работает lexical-only; ONNX-runtime и кеш модели не подтягиваются.
+# Установка: `uv sync --extra semantic` (или `pip install .[semantic]`).
+[project.optional-dependencies]
+semantic = [
+    "fastembed>=0.8.1",
+]
+
 [build-system]
 requires = ["uv_build>=0.8.15,<0.9.0"]
 build-backend = "uv_build"

@@ -13,7 +13,7 @@ import hashlib
 import re
 from typing import Any
 
-from . import msty_registry
+from . import msty_registry, msty_semantic
 
 
 ROUTE_VERSION = 2
@@ -290,6 +290,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     available = {_tool_name(tool): tool for tool in tools if _tool_name(tool)}
     text = latest_user_text(messages)
     fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    semantic: dict | None = None  # диагностика слоя L2; только свежая классификация
     continuation = (len(text) <= MAX_CONTINUATION_CHARS
                     and bool(_CONTINUATION_VERB.search(text))
                     and not _domains(text))
@@ -417,6 +418,15 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                     scored.append((score, name))
             chosen.update(name for _, name in sorted(scored, reverse=True)[:4])
 
+            # TAU L2 (неделя 4): семантический top-K по эмбеддингам описаний
+            # реестра — строгое ДОПОЛНЕНИЕ к детерминированной проекции выше.
+            # Уже выбранное не дублируется; known_only не протекает через
+            # широкое (теперь и эмбеддинговое) совпадение — только точное имя.
+            # Слой отключён или недоступен → маршрут идентичен lexical-only.
+            semantic = msty_semantic.select(
+                text, candidates=(available.keys() - chosen) - _KNOWN_ONLY)
+            chosen.update(hit['name'] for hit in semantic['hits'])
+
     historical_calls = _historical_tool_names(messages)
     historical = historical_calls & available.keys()
     # If a native virtual-file attempt was rejected, surface the corresponding
@@ -466,5 +476,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         "selected_names": ordered,
         "selected_count": len(ordered),
         "available_count": len(available),
+        # Наблюдаемость слоя L2: какие инструменты добавлены семантикой, с какими
+        # скорами; 'skipped' — continuation/direct маршрут без вызова слоя.
+        "semantic": semantic if semantic is not None else {"status": "skipped"},
     }
     return selected, route, _route_prompt(route)
