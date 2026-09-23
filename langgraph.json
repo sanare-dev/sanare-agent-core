@@ -4,7 +4,15 @@
   "graphs": {
     "agent": "deep_agent.graph:get_agent",
     "msty": "deep_agent.msty:graph",
-    "msty_native": "deep_agent.msty_native:graph"
+    "msty_native": "deep_agent.msty_native:graph",
+    "consolidator": "deep_agent.consolidator:make_graph"
+  },
+  "store": {
+    "index": {
+      "embed": "openai:text-embedding-3-small",
+      "dims": 1536,
+      "fields": ["content"]
+    }
   },
   "env": ".env",
   "image_distro": "wolfi"

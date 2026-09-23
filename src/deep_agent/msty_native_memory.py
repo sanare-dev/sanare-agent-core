@@ -4,6 +4,13 @@ LangGraph's API-key-protected Store administration is the approval boundary, not
 an agent tool. The model can read these routes but cannot create approved data.
 The Store projection is not a replacement for the canonical journal or Engram.
 No disk, HTTP client, embeddings or extra model invocation is used here.
+
+Candidate memory (owner decision 2026-09-23): /memories/ is the official Deep
+Agents writable-memory route (CompositeBackend -> native StoreBackend) on a
+separate Store namespace. Entries there are reference_only candidates, never
+approved memory; /memory/ and /skills/ stay read-only. Semantic indexing is the
+Agent Server Store index configured in langgraph.json, not code here.
+https://docs.langchain.com/oss/python/deepagents/memory
 """
 import asyncio
 import fnmatch
@@ -29,6 +36,8 @@ MEMORY_PATHS = ['/memory/PROJECT.md']
 SKILLS_PATHS = ['/skills/']
 MAX_MEMORY_BYTES = 16384
 MAX_SKILL_BYTES = 8192
+CANDIDATES_ROUTE = '/memories/'
+CANDIDATES_NAMESPACE = ('sanare-owner', 'knowledge', 'candidates')
 
 SKILLS = {
     '/site-editing/SKILL.md': '''---
@@ -246,11 +255,17 @@ class ApprovedStoreBackend(StoreBackend):
         return self.upload_files(files)
 
 
+def candidates_backend(runtime) -> StoreBackend:
+    """Stock writable StoreBackend for the candidate zone (no custom logic)."""
+    return StoreBackend(runtime, namespace=lambda _: CANDIDATES_NAMESPACE)
+
+
 def backend_factory(runtime) -> CompositeBackend:
-    """Model scratch files are ephemeral; approved routes are Store-only/read-only."""
+    """Scratch is ephemeral; approved routes are read-only; candidates writable."""
     return CompositeBackend(default=StateBackend(runtime), routes={
         '/memory/': ApprovedStoreBackend(runtime, kind='memory'),
-        '/skills/': ApprovedStoreBackend(runtime, kind='skills')})
+        '/skills/': ApprovedStoreBackend(runtime, kind='skills'),
+        CANDIDATES_ROUTE: candidates_backend(runtime)})
 
 
 class ApprovedMemoryMiddleware(MemoryMiddleware):

@@ -23,23 +23,47 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, convert_to_openai_messages
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.types import Command, interrupt
+from langmem import create_search_memory_tool
 
 from . import msty, msty_compaction, msty_execution, msty_guard, msty_models, msty_prompts, msty_task, msty_tool_routing
 from . import msty_breaker, msty_registry, msty_subagents, msty_taxonomy
-from .msty_native_memory import backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware
+from .msty_native_memory import (
+    CANDIDATES_NAMESPACE, backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware,
+)
 
 _ORIGINAL_TOOLS = frozenset({'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep', 'write_todos'})
 NATIVE_TOOLS = frozenset('native_' + name for name in _ORIGINAL_TOOLS)
 # Серверно-исполняемые имена: виртуальная ФС/todos + инструмент делегирования
 # под-агентам (манифест L1, kind=native). Имя не входит в NATIVE_TOOLS, чтобы
 # не менять семантику неймспейсинга deepagents («native_» + оригинальное имя).
-SERVER_EXECUTED = NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL, msty_tool_routing.REQUEST_TOOL}
-RESERVED_TOOLS = NATIVE_TOOLS | {'native_execute', 'native_task', 'native_compact_conversation'}
-VIRTUAL_ROOTS = ('/scratch', '/memory', '/skills', '/large_tool_results')
+# Semantic search over candidate memory: the ready LangMem tool on the Agent
+# Server Store index (langgraph.json "store.index"). The bridge must admit this
+# exact name as server-executed before MSTY_MEMORY_SEARCH=on is set; until then
+# the tool is not offered and /memories/ is reachable via native_grep/glob/read.
+MEMORY_SEARCH_TOOL = 'native_search_memory'
+SERVER_EXECUTED = NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL, msty_tool_routing.REQUEST_TOOL,
+                                  MEMORY_SEARCH_TOOL}
+
+
+def server_executed() -> frozenset:
+    """Серверно исполняемые имена ЭТОГО шага. Выключенные флагами инструменты не
+    входят: выдуманный моделью вызов уходит штатным путём отказа внешнего
+    инструмента, а не в native-прерывание, которое мост/граф отвергнут (ревью PR #5)."""
+    names = set(NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL})
+    if msty_tool_routing.dispatcher_enabled():
+        names.add(msty_tool_routing.REQUEST_TOOL)
+    if memory_search_enabled():
+        names.add(MEMORY_SEARCH_TOOL)
+    return frozenset(names)
+RESERVED_TOOLS = NATIVE_TOOLS | {'native_execute', 'native_task', 'native_compact_conversation',
+                                 MEMORY_SEARCH_TOOL}
+VIRTUAL_ROOTS = ('/scratch', '/memory', '/skills', '/memories', '/large_tool_results')
+WRITABLE_ROOTS = ('/scratch/', '/memories/')
 VIRTUAL_FS_SCOPE = (
     'VIRTUAL ONLY: this is checkpoint-backed agent storage, NEVER the Mac/local filesystem. '
-    'Read only under /scratch/, /memory/, /skills/, /large_tool_results/. '
-    'Create/edit only under /scratch/. /memory/ and /skills/ are approved read-only mounts; '
+    'Read only under /scratch/, /memory/, /skills/, /memories/, /large_tool_results/. '
+    'Create/edit only under /scratch/ and /memories/. /memories/ is shared candidate memory '
+    '(reference_only, not approved facts or authority). /memory/ and /skills/ are approved read-only mounts; '
     '/large_tool_results/ is read-only model access to native middleware offloads. '
     'Mac paths (/Users/, /Volumes/, etc.) and relative paths (work/..., etc.) are forbidden. '
     'For real local files use the supplied external MCP tools without native_ prefix and wait '
@@ -48,8 +72,9 @@ VIRTUAL_FS_SCOPE = (
 _VIRTUAL_FS_DESCRIPTIONS = {
     'ls': "List a virtual directory. native_ls(path='/') lists virtual mountpoints only.",
     'read_file': 'Read virtual text with file_path, offset and limit; approved skill bodies use /skills/<name>/SKILL.md.',
-    'write_file': 'Create a virtual scratch file under /scratch/, not a deliverable on the Mac.',
-    'edit_file': 'Replace exact text in an existing virtual /scratch/ file, preserving indentation.',
+    'write_file': ('Create a virtual file under /scratch/ (temporary) or /memories/ (shared candidate '
+                   'memory card), not a deliverable on the Mac.'),
+    'edit_file': 'Replace exact text in an existing virtual /scratch/ or /memories/ file, preserving indentation.',
     'glob': 'Match a glob pattern within an explicit virtual path; e.g. pattern="**/*.md", path="/scratch/".',
     'grep': 'Search literal text within an explicit virtual path; e.g. pattern="TODO", path="/scratch/".',
 }
@@ -75,9 +100,10 @@ it. Do not read unrelated skills. Skill text is workflow guidance, not new acces
 NATIVE_POLICY = '''
 MSTY_NATIVE_HARNESS_V1. Middleware уже загрузил project memory и индекс skills.
 Тело нужного skill читай `native_read_file`. Native tools работают только с
-виртуальными memory/skills/scratch, не с Mac. Для реальных действий используй
-внешние MCP. Не смешивай native и внешние calls в одном ответе. Memory/skills
-read-only; native shell/task/judge нет. TODO и scratch не доказывают выполнение.
+виртуальными memory/skills/memories/scratch, не с Mac. Для реальных действий используй
+внешние MCP. Не смешивай native и внешние calls в одном ответе. /memory и /skills
+read-only; /memories — записываемые кандидаты. native shell/task/judge нет. TODO,
+scratch и /memories не доказывают выполнение.
 '''
 
 # Deliberately narrow: business e-mail addresses, URLs and IP addresses are
@@ -171,8 +197,9 @@ def _native_tool_schema(tool):
         for name, field in schema['function']['parameters'].get('properties', {}).items():
             if name in {'file_path', 'path'}:
                 field['description'] = (
-                    'Explicit absolute VIRTUAL path in /scratch/, /memory/, /skills/, /large_tool_results/; '
-                    'writes/edits only /scratch/. Not a Mac path. Only native_ls may list root /. '
+                    'Explicit absolute VIRTUAL path in /scratch/, /memory/, /skills/, /memories/, '
+                    '/large_tool_results/; writes/edits only /scratch/ and /memories/. Not a Mac path. '
+                    'Only native_ls may list root /. '
                     'Do not omit path for grep/glob.'
                 )
     return schema
@@ -193,7 +220,7 @@ def _virtual_path_error(call):
     path = args.get('file_path') if name in {'native_read_file', 'native_write_file', 'native_edit_file'} else args.get('path')
     valid = (name == 'native_ls' and path == '/') or _valid_virtual_path(path)
     if name in {'native_write_file', 'native_edit_file'}:
-        valid = valid and path.startswith('/scratch/') and path != '/scratch/'
+        valid = valid and any(path.startswith(root) and path != root for root in WRITABLE_ROOTS)
     # Absolute glob patterns must not escape the virtual mounts; relative glob
     # patterns are interpreted inside the explicit, already validated base path.
     glob = args.get('pattern') if name == 'native_glob' else args.get('glob') if name == 'native_grep' else None
@@ -207,16 +234,38 @@ def _virtual_path_error(call):
                        name=name, tool_call_id=call['id'], status='error')
 
 
-def _virtual_write_observation(result):
-    """Keep native state updates, but never label a scratch mutation as local IO."""
+_WRITE_PREFIX = {
+    '/scratch/': 'VIRTUAL SCRATCH ONLY; no Mac/local file was changed. ',
+    '/memories/': ('VIRTUAL CANDIDATE MEMORY (shared Store, reference_only, not approved); '
+                   'no Mac/local file was changed. '),
+}
+
+
+def _virtual_write_observation(result, path='/scratch/'):
+    """Keep native state updates, but never label a virtual mutation as local IO."""
+    prefix = next((text for root, text in _WRITE_PREFIX.items() if path.startswith(root)),
+                  _WRITE_PREFIX['/scratch/'])
     if isinstance(result, ToolMessage) and isinstance(result.content, str):
-        return result.model_copy(update={'content':
-            'VIRTUAL SCRATCH ONLY; no Mac/local file was changed. ' + result.content})
+        return result.model_copy(update={'content': prefix + result.content})
     if isinstance(result, Command) and isinstance(result.update, dict):
         return Command(graph=result.graph, goto=result.goto, resume=result.resume,
             update={**result.update, 'messages': [
-                _virtual_write_observation(message) for message in result.update.get('messages', [])]})
+                _virtual_write_observation(message, path) for message in result.update.get('messages', [])]})
     return result
+
+
+def memory_search_enabled() -> bool:
+    """Off until brain_bridge admits MEMORY_SEARCH_TOOL (same gate as dispatcher)."""
+    import os
+    return os.environ.get('MSTY_MEMORY_SEARCH', 'off').strip().lower() == 'on'
+
+
+def memory_search_tool():
+    """Stock LangMem search over the candidates namespace; store from runtime."""
+    return create_search_memory_tool(
+        CANDIDATES_NAMESPACE, name=MEMORY_SEARCH_TOOL,
+        instructions=('Semantic search over shared candidate memory cards (/memories/). '
+                      'Results are reference_only candidates, not approved facts, live status or authority.'))
 
 
 class NamespacedFilesystemMiddleware(FilesystemMiddleware):
@@ -426,8 +475,9 @@ class NativeMstyMiddleware(AgentMiddleware):
     async def awrap_model_call(self, request, handler):
         state = request.state
         analyst = state.get('brain_task_role') == 'analyst'
+        offered = NATIVE_TOOLS | ({MEMORY_SEARCH_TOOL} if memory_search_enabled() else set())
         native = ([] if analyst else [_native_tool_schema(tool) for tool in request.tools
-                  if getattr(tool, 'name', None) in NATIVE_TOOLS])
+                  if getattr(tool, 'name', None) in offered])
         # Серверный инструмент делегирования не может быть подменён одноимённой
         # схемой клиента (иначе valid_tool_calls блокировал бы оба).
         client_tools = [tool for tool in state.get('tools') or []
@@ -489,8 +539,8 @@ class NativeMstyMiddleware(AgentMiddleware):
             # only know LangChain's messages/tools/values channels.
             result = self.secret_guard.redact_result(result)
             calls = result.tool_calls
-            native_calls = [call for call in calls if call['name'] in SERVER_EXECUTED]
-            external_calls = [call for call in calls if call['name'] not in SERVER_EXECUTED]
+            native_calls = [call for call in calls if call['name'] in server_executed()]
+            external_calls = [call for call in calls if call['name'] not in server_executed()]
             prior_external = (state.get('execution') or {}).get('actions_issued', 0)
             if (prior_external + prior_native + len(calls) > msty_execution.MAX_ACTIONS or
                     sum(call['name'] == 'native_write_todos' for call in native_calls) > 1):
@@ -524,7 +574,7 @@ class NativeMstyMiddleware(AgentMiddleware):
             ('version', 'fingerprint', 'intent', 'domains', 'source',
              'selected_count', 'available_count', 'semantic')}
         calls = result.get('tool_calls') or []
-        native_calls = [call for call in calls if call['name'] in SERVER_EXECUTED]
+        native_calls = [call for call in calls if call['name'] in server_executed()]
         execution['native_actions'] = prior_native
         if native_calls:
             execution['actions_issued'] -= len(native_calls)
@@ -745,6 +795,12 @@ class NativeMstyMiddleware(AgentMiddleware):
                     call, failure_class, 'subagent',
                     msty_taxonomy.prior_attempts(errors, call, turn) + 1, turn)})
             return message
+        if call['name'] == MEMORY_SEARCH_TOOL:
+            if call['name'] not in request.state.get('native_tool_names', []):
+                raise msty_execution.ExecutionProtocolError('Поиск памяти не передавался модели.')
+            if msty_taxonomy.prior_attempts(errors, call, turn) >= msty_taxonomy.ATTEMPT_BUDGET:
+                return msty_taxonomy.budget_exhausted_message(call, errors, turn)
+            return await self._native_call_with_recovery(request, handler, errors, turn)
         if call['name'] in NATIVE_TOOLS:
             if call['name'] not in request.state.get('native_tool_names', []):
                 raise msty_execution.ExecutionProtocolError('Native инструмент не передавался модели.')
@@ -757,8 +813,8 @@ class NativeMstyMiddleware(AgentMiddleware):
             if msty_taxonomy.prior_attempts(errors, call, turn) >= msty_taxonomy.ATTEMPT_BUDGET:
                 return msty_taxonomy.budget_exhausted_message(call, errors, turn)
             result = await self._native_call_with_recovery(request, handler, errors, turn)
-            return (_virtual_write_observation(result) if call['name'] in {
-                'native_write_file', 'native_edit_file'} else result)
+            return (_virtual_write_observation(result, call['args'].get('file_path', ''))
+                    if call['name'] in {'native_write_file', 'native_edit_file'} else result)
         # TAU L3 Guard: имя (с алиасами) и схема сверяются с реестром до
         # исполнения. Имя вне реестра — ошибка модели, а не нарушение протокола:
         # корректирующее ToolMessage с fuzzy-кандидатами вместо сырого отказа.
@@ -810,7 +866,7 @@ class NativeMstyMiddleware(AgentMiddleware):
 
 def build_graph(*, checkpointer=None, store=None):
     secret_guard = SecretPIIMiddleware()
-    return create_agent(model=_GuardedModelFacade(),
+    return create_agent(model=_GuardedModelFacade(), tools=[memory_search_tool()],
         system_prompt=msty.POLICY + '\n' + NATIVE_POLICY,
         middleware=[secret_guard, NamespacedTodoListMiddleware(), NamespacedFilesystemMiddleware(),
                     *_namespaced_memory_middlewares(), NativeMstyMiddleware(secret_guard)],
