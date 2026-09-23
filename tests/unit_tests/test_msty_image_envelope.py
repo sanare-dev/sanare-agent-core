@@ -62,7 +62,7 @@ def test_base64_removed_only_from_counting_and_original_sdk_payload_preserved():
     count = asyncio.run(models.count_input('luna', object(), prepared, []))
     assert count == asyncio.run(models.count_input('luna', object(), small, []))
     assert 36000 < count < 50000  # Not base64 chars→tokens.
-    model = ChatOpenAI(model='gpt-5.6-luna', api_key='offline-test-not-a-secret',
+    model = ChatOpenAI(model='gpt-6-luna', api_key='offline-test-not-a-secret',
                        use_responses_api=False, reasoning_effort='none', store=False)
     schema = [{'type': 'function', 'function': {'name': 'read', 'parameters': {'type': 'object'}}}]
     payload = model._get_request_payload(prepared, tools=deepcopy(schema))

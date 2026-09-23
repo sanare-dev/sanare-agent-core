@@ -46,7 +46,7 @@ Brain maintenance and evidence-learning procedures live in progressive skills an
 are read only when applicable; the stable project passport remains in approved
 Memory. Native filesystem/TODO/memory/skills prompts and tool descriptions avoid
 repeating the same scope text. An offline first-turn regression serializes the
-actual system message plus all seven native schemas with `gpt-5.6-luna`'s pinned
+actual system message plus all seven native schemas with `gpt-6-luna`'s explicit `o200k_base`
 tiktoken mapping and requires at most 5,500 raw payload tokens. The 22 September
 2026 measured fixture fell from 11,119 to 4,901 tokens (55.9%). This bound excludes
 Msty project instructions, user history and external MCP schemas; those are added
@@ -344,7 +344,7 @@ Offline coverage: `tests/unit_tests/test_msty_gateway.py`. Deployment and native
 acceptance evidence live in the owning project's change journal, not this source
 increment. Engine, sandboxes and subscription preferences are unchanged.
 
-The `msty` graph now defaults to server profile `luna` (`gpt-5.6-luna`,
+The `msty` graph now defaults to server profile `luna` (`gpt-6-luna` since 2026-09-23,
 reasoning `none`). There is no compulsory prompt rewriter, council or hidden
 second model. Each cloud run performs at most one billed generation; the explicit
 compaction protocol above may require two separately counted runs in one client leg.
@@ -412,7 +412,7 @@ admission limit and 2 MB transport limit remain; memory is not unlimited.
 
 The official MIT `langchain-openai==1.1.11` adapter and existing LangGraph native
 interrupt/resume are reused. Sources: [LangChain adapter](https://github.com/langchain-ai/langchain/tree/master/libs/partners/openai),
-[Luna API](https://developers.openai.com/api/docs/models/gpt-5.6-luna),
+[Luna API](https://developers.openai.com/api/docs/models/gpt-6-luna),
 [DeepSeek thinking configuration](https://api-docs.deepseek.com/guides/thinking_mode/).
 Deployment and live acceptance are recorded separately in the LLM project's
 unified change journal. Offline passing tests alone do not prove deployment,

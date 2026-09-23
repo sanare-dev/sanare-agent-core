@@ -19,7 +19,7 @@ def settings(monkeypatch):
 
 
 @pytest.mark.parametrize('profile,path,selector', [
-    ('luna', '/openai/v1', 'gpt-5.6-luna'),
+    ('luna', '/openai/v1', 'gpt-6-luna'),
     ('deepseek', '/v1', gateway.DEEPSEEK_SELECTOR),
 ])
 def test_fixed_endpoint_key_headers_and_wire(profile, path, selector, monkeypatch):

@@ -14,7 +14,7 @@ from tests.unit_tests.test_msty_task import payload
 PROTOCOL = 'msty-text-delta-v1'
 
 
-def chunks(*texts, reason='stop', model='gpt-5.6-luna'):
+def chunks(*texts, reason='stop', model='gpt-6-luna'):
     return [*[AIMessageChunk(content=t) for t in texts],
             AIMessageChunk(content='', response_metadata={'finish_reason': reason, 'model_name': model},
                            usage_metadata=deepcopy(USAGE))]
@@ -85,7 +85,7 @@ def test_incremental_unicode_reaches_caller_before_provider_finishes(monkeypatch
         final = value(received)['result']
         assert final['content'] == 'Привет 🌍!'
         assert final['usage_metadata'] == USAGE
-        assert final['response_metadata']['model_name'] == 'gpt-5.6-luna'
+        assert final['response_metadata']['model_name'] == 'gpt-6-luna'
         assert seen['options'] == [{'stream_usage': True}]
         assert seen['astream'] == 1 and seen['ainvoke'] == 0
     asyncio.run(asyncio.wait_for(scenario(), 2))
@@ -211,10 +211,10 @@ def test_missing_terminal_empty_and_oversize_stream_are_unknown_not_zero(monkeyp
     ({'prompt_tokens': 11, 'completion_tokens': 3, 'total_tokens': 99}, None),
 ])
 def test_real_sdk_converter_preserves_raw_stream_usage_never_materializes_unknown_zero(raw, expected):
-    model = msty_models.ChatOpenAI(model='gpt-5.6-luna', api_key='offline-test-not-a-secret',
+    model = msty_models.ChatOpenAI(model='gpt-6-luna', api_key='offline-test-not-a-secret',
                                    base_url='https://example.invalid/v1', use_responses_api=False)
     converted = model._convert_chunk_to_generation_chunk(
-        {'id': 'synthetic', 'choices': [], 'model': 'gpt-5.6-luna', 'usage': deepcopy(raw)}, AIMessageChunk, {})
+        {'id': 'synthetic', 'choices': [], 'model': 'gpt-6-luna', 'usage': deepcopy(raw)}, AIMessageChunk, {})
     assert converted.message.response_metadata['token_usage'] == raw
     assert msty_models.checked_usage('luna', converted.message) == expected
 
@@ -276,14 +276,14 @@ def test_real_async_adapter_requests_usage_and_preserves_raw_final_metadata(monk
             for packet in [
                 {'choices': [{'delta': {'role': 'assistant', 'content': 'First '}, 'finish_reason': None}]},
                 {'choices': [{'delta': {'content': 'second'}, 'finish_reason': None}]},
-                {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'model': 'gpt-5.6-luna'},
+                {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'model': 'gpt-6-luna'},
                 {'choices': [], 'usage': deepcopy(raw_usage)}]:
                 yield packet
     class Client:
         async def create(self, **payload):
             sent.append(deepcopy(payload))
             return Response()
-    model = msty_models.ChatOpenAI(model='gpt-5.6-luna', api_key='offline-test-not-a-secret',
+    model = msty_models.ChatOpenAI(model='gpt-6-luna', api_key='offline-test-not-a-secret',
         async_client=Client(), base_url='https://example.invalid/v1', use_responses_api=False, stream_usage=False)
     emitted = []
     monkeypatch.setattr(msty_stream, 'get_stream_writer', lambda: emitted.append)
@@ -292,7 +292,7 @@ def test_real_async_adapter_requests_usage_and_preserves_raw_final_metadata(monk
     assert final.content == 'First second'
     assert final.response_metadata['token_usage'] == raw_usage
     assert final.response_metadata['finish_reason'] == 'stop'
-    assert final.response_metadata['model_name'] == 'gpt-5.6-luna'
+    assert final.response_metadata['model_name'] == 'gpt-6-luna'
     assert msty_models.checked_usage('luna', final)['input_token_details']['cache_read'] == 4
     assert [event['text'] for event in emitted] == ['First ', 'second']
 

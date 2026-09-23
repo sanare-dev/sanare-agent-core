@@ -4,7 +4,7 @@ Uses the official MIT LangChain adapters, not another agent framework:
 https://github.com/langchain-ai/langchain/tree/master/libs/partners/openai
 https://github.com/langchain-ai/langchain/blob/master/libs/partners/openai/LICENSE
 https://docs.langchain.com/oss/python/integrations/chat/openai
-https://developers.openai.com/api/docs/models/gpt-5.6-luna
+https://developers.openai.com/api/docs/models/gpt-6-luna
 https://api-docs.deepseek.com/guides/thinking_mode/
 https://github.com/openai/tiktoken/blob/main/tiktoken/model.py
 https://github.com/openai/tiktoken/blob/main/LICENSE
@@ -81,7 +81,9 @@ class Profile:
 
 DEFAULT_PROFILE = 'luna'
 PROFILES = MappingProxyType({
-    'luna': Profile('openai', 'gpt-5.6-luna', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
+    # gpt-6-luna с 2026-09-23 (решение владельца): вдвое дешевле 5.6 при том же
+    # контексте 1.05M; цена сверена со страницей модели и учётом моста (v4-luna6).
+    'luna': Profile('openai', 'gpt-6-luna', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'deepseek': Profile('deepseek', 'deepseek-flash', 'https://api.deepseek.com/v1', 'DEEPSEEK_API_KEY'),
     'sonnet': Profile('anthropic', 'claude-sonnet-4-6', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
     # Gateway profiles use provider-prefixed BYOK ids. They are retained for
@@ -345,11 +347,12 @@ async def count_input(profile: str, model, messages, tools: list[dict]) -> int:
     payload = _canonical({'messages': counting_wire, 'tools': schemas})
     if profile == 'luna':
         def admission():
-            # Official pinned tiktoken maps gpt-5* to o200k_base. Unknown mapping
-            # raises, never silently substitutes another family's tokenizer.
+            # gpt-6-luna tiktoken ещё не сопоставляет; o200k_base сверен с API
+            # 2026-09-23 (2383 локально против 2389 prompt_tokens, разница —
+            # служебная обёртка сообщения), поверх — запас ×1.25 ниже.
             # Tokenizer assets use tiktoken's hash-verified public cache; prompt
             # content is tokenized locally and never sent to a counting model.
-            encoding = tiktoken.encoding_for_model(PROFILES['luna'].model)
+            encoding = tiktoken.get_encoding('o200k_base')
             tokens = len(encoding.encode(payload, disallowed_special=()))
             return (tokens * 5 + 3) // 4 + 4096 + 128 * len(wire) + 512 * len(schemas) + image_envelope
         try:

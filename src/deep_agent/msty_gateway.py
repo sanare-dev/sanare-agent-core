@@ -45,7 +45,7 @@ def overrides(profile):
         'X-Gateway-Role': profile, 'X-Gateway-Routing-Version': VERSION,
     }}
     if profile == 'luna':
-        result.update(base_url=HOST + '/openai/v1', model='gpt-5.6-luna')
+        result.update(base_url=HOST + '/openai/v1', model='gpt-6-luna')
     elif profile == 'deepseek':
         if os.getenv('MSTY_LLM_GATEWAY_DEEPSEEK_CONFIG_ID') != DEEPSEEK_CONFIG_ID:
             raise GatewayConfigurationError('Проверенная конфигурация DeepSeek Gateway не настроена.')

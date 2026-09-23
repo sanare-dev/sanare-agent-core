@@ -424,7 +424,7 @@ def test_minimal_native_first_payload_stays_below_context_budget(monkeypatch):
         {'role': 'user', 'content': 'OK'},
     ], 'tools': seen['tools']}
     encoded = json.dumps(wire, ensure_ascii=False, sort_keys=True)
-    tokens = len(tiktoken.encoding_for_model('gpt-5.6-luna').encode(encoded))
+    tokens = len(tiktoken.get_encoding('o200k_base').encode(encoded))
     assert tokens <= 5500
 
 
