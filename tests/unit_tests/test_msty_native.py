@@ -462,7 +462,10 @@ def test_real_guarded_native_and_external_read_file_are_distinct(monkeypatch):
         assert len(events) == 1 and len(seen) == 1
         assert first.values['execution']['status'] == 'waiting_native'
         assert not any(message.type == 'tool' for message in first.values['messages'])
-        assert msty_native.NATIVE_TOOLS | {'read_file', 'write_file', 'edit_file'} == msty.tool_names(schemas[0])
+        # На свежем рабочем шаге (classified, intent != direct) модель видит
+        # и серверный инструмент делегирования под-агентам (sub-agents).
+        assert msty_native.NATIVE_TOOLS | {'read_file', 'write_file', 'edit_file',
+            msty_native.msty_subagents.DELEGATE_TOOL} == msty.tool_names(schemas[0])
         assert [tool for tool in schemas[0] if tool['function']['name'] in {
             'read_file', 'write_file', 'edit_file'}] == data['tools']
         assert seen[0][-1].content == data['messages'][0]['content']
