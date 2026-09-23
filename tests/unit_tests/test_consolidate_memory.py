@@ -106,3 +106,19 @@ def test_launchd_template_is_periodic_and_not_run_at_load():
     assert plist['StartInterval'] == 21600 and plist['RunAtLoad'] is False
     assert plist['ProgramArguments'][-1].endswith('tools/consolidate_memory.py')
     assert 'KeepAlive' not in plist
+
+
+def test_recent_conversations_offered_only_in_consolidation_turn():
+    from deep_agent import msty_native, consolidator, msty_tool_routing
+    normal = [{'role': 'user', 'content': 'Привет'}]
+    run = [{'role': 'user', 'content': consolidator.CONSOLIDATION_PROMPT}]
+    assert consolidator.CONSOLIDATION_MARKER not in msty_tool_routing.latest_user_text(normal)
+    assert consolidator.CONSOLIDATION_MARKER in msty_tool_routing.latest_user_text(run)
+
+
+def test_calls_this_turn_counts_only_after_last_owner_message():
+    from deep_agent import msty_native
+    name = msty_native.RECENT_CONVERSATIONS_TOOL
+    call = {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'a', 'name': name, 'args': {}}]}
+    msgs = [{'role': 'user', 'content': 'x'}, call, {'role': 'user', 'content': 'y'}, call, call]
+    assert msty_native._calls_this_turn(msgs, name) == 2

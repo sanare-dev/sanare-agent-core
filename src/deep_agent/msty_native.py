@@ -264,6 +264,19 @@ def memory_search_enabled() -> bool:
     return os.environ.get('MSTY_MEMORY_SEARCH', 'off').strip().lower() == 'on'
 
 
+def _calls_this_turn(messages, name: str) -> int:
+    """Сколько вызовов инструмента name сделано после последнего сообщения владельца."""
+    count = 0
+    for message in reversed(list(messages or ())):
+        role = message.get('role') if isinstance(message, dict) else getattr(message, 'type', None)
+        if role in ('user', 'human'):
+            break
+        calls = message.get('tool_calls') if isinstance(message, dict) else getattr(message, 'tool_calls', None)
+        count += sum(1 for c in calls or () if isinstance(c, dict) and
+                     (c.get('name') or (c.get('function') or {}).get('name')) == name)
+    return count
+
+
 def enabled_optional_tools() -> set:
     """Optional server-executed tools switched on by their operator flags."""
     import os
@@ -487,6 +500,10 @@ class NativeMstyMiddleware(AgentMiddleware):
         state = request.state
         analyst = state.get('brain_task_role') == 'analyst'
         offered = NATIVE_TOOLS | enabled_optional_tools()
+        # Ревью PR #8: чтение чужих тредов — только в прогоне консолидации (маркер
+        # в сообщении владельца/планировщика), не в обычных чатах.
+        if consolidator.CONSOLIDATION_MARKER not in msty_tool_routing.latest_user_text(request.messages):
+            offered = offered - {RECENT_CONVERSATIONS_TOOL}
         native = ([] if analyst else [_native_tool_schema(tool) for tool in request.tools
                   if getattr(tool, 'name', None) in offered])
         # Серверный инструмент делегирования не может быть подменён одноимённой
@@ -809,6 +826,12 @@ class NativeMstyMiddleware(AgentMiddleware):
         if call['name'] in OPTIONAL_TOOL_FLAGS:
             if call['name'] not in request.state.get('native_tool_names', []):
                 raise msty_execution.ExecutionProtocolError('Инструмент памяти не передавался модели.')
+            if call['name'] == RECENT_CONVERSATIONS_TOOL and _calls_this_turn(
+                    request.state.get('messages'), RECENT_CONVERSATIONS_TOOL) > 1:
+                # Один вызов на прогон: сводка уже получена, повтор не читает треды снова.
+                return ToolMessage(content='Сводка диалогов уже получена в этом прогоне; '
+                                   'используй её и запиши карточки в /memories/.',
+                                   name=call['name'], tool_call_id=call['id'], status='error')
             if msty_taxonomy.prior_attempts(errors, call, turn) >= msty_taxonomy.ATTEMPT_BUDGET:
                 return msty_taxonomy.budget_exhausted_message(call, errors, turn)
             return await self._native_call_with_recovery(request, handler, errors, turn)

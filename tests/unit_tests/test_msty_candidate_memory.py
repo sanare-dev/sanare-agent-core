@@ -231,7 +231,10 @@ def test_recent_conversations_offered_and_executed_through_native_harness(monkey
     async def run():
         graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
         config = {'configurable': {'thread_id': 'recent-on'}, 'recursion_limit': 32}
-        state, _ = await invoke(graph, initial(), config)
+        start = initial()
+        # Инструмент выдаётся только в прогоне консолидации (маркер, ревью PR #8).
+        start['messages'] = [{'role': 'user', 'content': consolidator.CONSOLIDATION_PROMPT}]
+        state, _ = await invoke(graph, start, config)
         names = [tool['function']['name'] for tool in seen[0]['state']['tools']]
         assert 'native_recent_conversations' in names
         ticket = state.tasks[0].interrupts[0]

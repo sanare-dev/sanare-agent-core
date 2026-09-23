@@ -756,9 +756,18 @@ candidates zone; approved `/memory/PROJECT.md` and `/skills/` stay read-only.
   updated in the last 8 h, ≤40 000 chars, consolidation threads excluded) and
   writes cards only to `/memories/`. Offered only with
   `MSTY_RECENT_CONVERSATIONS=on`, after `brain_bridge.NATIVE_TOOLS` admits the name.
-  `--dry-run` checks the stop only.
+  `--dry-run` checks the stop only. The tool is offered only in a turn whose owner
+  message carries `CONSOLIDATION_MARKER`, at most one call per run.
+
+  Activation order (owner): 1) bridge admits `native_recent_conversations`
+  (apply with no active Brain runs; the bridge restart interrupts them);
+  2) deployment env `MSTY_RECENT_CONVERSATIONS=on`; 3) one manual run
+  `uv run python tools/consolidate_memory.py`, then check `/memories/` cards and
+  the ledger row; 4) `mkdir -p ~/Library/Logs/SanareBrainConsolidation`,
+  copy the plist to `~/Library/LaunchAgents/` and
+  `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sanare.brain-consolidation.plist`.
 
 deepagents stays 0.4.11: 0.7.18 requires langchain-core>=1.6.4,
 langchain-anthropic>=1.7.3, langsmith>=0.14 and langchain-google-genai, and adds
 no semantic search to `StoreBackend`; the needed route mapping exists in 0.4.11.
-Offline coverage: `tests/unit_tests/test_msty_candidate_memory.py`. Not deployed.
+Offline coverage: `tests/unit_tests/test_msty_candidate_memory.py`, `test_consolidate_memory.py`.
