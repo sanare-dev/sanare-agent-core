@@ -88,6 +88,11 @@ _INSTALL = re.compile(
 _INSTALL_EXCLUDED_DOMAINS = frozenset({"supabase", "pressable", "sites"})
 # Brain меняет себя только через self-improve; «подключи бота к Msty» — не это.
 _SELF_CHANGE = re.compile(r"(?is)\bbrain\b|мозг|себя")
+# Вопрос об установке («Можно ли установить…?», «Какой сервер поставить?») —
+# не поручение: Codex и маршрут изменения не выдаются.
+_QUESTION = re.compile(
+    r"(?is)\?|можно\s+ли|стоит\s+ли|как(?:ой|ую|ие|ое)\b|\bчто\s+(?:лучше\s+)?установ|"
+    r"\bhow\s+(?:to|do|can)\b|\bshould\s+i\b|\bwhich\b|\bcan\s+i\b")
 _INSTALL_TOOLS = frozenset({"msty_codex_start", "msty_codex_status"})
 
 
@@ -481,7 +486,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         chosen.update(name for name in available if name.lower() in lowered)
 
         if (_INSTALL.search(text) and not set(domains) & _INSTALL_EXCLUDED_DOMAINS
-                and not _SELF_CHANGE.search(text)):
+                and not _SELF_CHANGE.search(text) and not _QUESTION.search(text)):
             chosen.update(_INSTALL_TOOLS)
             intent = "mutate"  # установка — изменение; гейты записи применяются
         if _SYSTEM_STATUS.search(text) or _CHECK_SYSTEM.search(text):
@@ -631,9 +636,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     chosen.update(aliases)
     # Инструмент записи, раскрытый через execute_tool, видим только при намерении
     # изменить (native_request_tools при диспетчере — явный выбор модели).
-    if intent != "mutate":
-        requested = {name for name in requested if _access(name) == "read"
-                     or name in _explicit_requests(messages)}
+    # Через execute_tool раскрывается только чтение: запись выдаёт маршрут по
+    # доменам и намерению (ревью PR #3: «установи бота» + execute_tool
+    # apply_migration открывало запись Supabase вне маршрута).
+    explicit = _explicit_requests(messages)
+    requested = {name for name in requested if _access(name) == "read" or name in explicit}
     chosen = (chosen | historical | required | requested) & available.keys()
 
     # `none` blocks new actions, but historical schemas remain for providers

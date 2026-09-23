@@ -131,3 +131,20 @@ def test_request_history_ignored_when_dispatcher_off(monkeypatch):
                {'role': 'tool', 'tool_call_id': 'r1', 'content': 'x'}]
     _, route, _ = routing.select_tools(history, TOOLS)
     assert not {'execute_sql', 'apply_migration'} & set(route['selected_names'])
+
+
+def test_execute_tool_never_exposes_foreign_write_even_on_install():
+    history = [{'role': 'user', 'content': 'Установи бота на Mac'},
+               {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'e1', 'type': 'function',
+                'function': {'name': 'execute_tool', 'arguments': json.dumps({'tool_name': 'apply_migration'})}}]},
+               {'role': 'tool', 'tool_call_id': 'e1', 'content': 'Unknown tool'}]
+    _, route, _ = routing.select_tools(history, TOOLS)
+    assert 'apply_migration' not in route['selected_names']
+
+
+@pytest.mark.parametrize('question', [
+    'Можно ли установить приложение на Mac?', 'Какой сервер установить на Mac?',
+    'How to install the telegram bot package?'])
+def test_install_questions_do_not_get_codex(question):
+    _, route, _ = routing.select_tools([{'role': 'user', 'content': question}], TOOLS)
+    assert 'msty_codex_start' not in route['selected_names']
