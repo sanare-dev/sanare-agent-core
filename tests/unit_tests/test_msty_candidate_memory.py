@@ -39,11 +39,12 @@ def tool_call(identifier, name, **args):
     return AIMessage(content='', tool_calls=[{'id': identifier, 'name': name, 'args': args}])
 
 
-def test_store_index_and_consolidator_registered_in_langgraph_json():
+def test_store_index_and_consolidator_not_registered_until_verified():
+    """2026-09-23: с store.index ревизия не стартовала (core-server gRPC не поднялся
+    за 60 с) — индекс и граф consolidator сняты до отдельной проверки на staging."""
     config = json.loads((ROOT / 'langgraph.json').read_text())
-    index = config['store']['index']
-    assert index == {'embed': 'openai:text-embedding-3-small', 'dims': 1536, 'fields': ['content']}
-    assert config['graphs']['consolidator'] == 'deep_agent.consolidator:make_graph'
+    assert 'store' not in config
+    assert 'consolidator' not in config['graphs']
     assert config['graphs']['msty_native'] == 'deep_agent.msty_native:graph'
 
 
