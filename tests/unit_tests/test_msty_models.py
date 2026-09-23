@@ -24,7 +24,7 @@ def fake_environment(monkeypatch):
 
 
 @pytest.mark.parametrize('profile,model,endpoint', [
-    ('luna', 'gpt-5.6-luna', 'https://api.openai.com/v1'),
+    ('luna', 'gpt-6-luna', 'https://api.openai.com/v1'),
     ('deepseek', 'deepseek-flash', 'https://api.deepseek.com/v1'),
     ('sonnet', 'claude-sonnet-4-6', 'https://api.anthropic.com'),
 ])
@@ -232,10 +232,11 @@ def test_luna_long_text_not_rejected_merely_for_crossing_byte_trigger():
 
 
 def test_unknown_tokenizer_fails_closed_without_family_fallback(monkeypatch):
-    def unknown(model):
-        assert model == 'gpt-5.6-luna'
+    # Токенизатор задан явно (o200k_base); его сбой закрывает допуск без утечки.
+    def unknown(name):
+        assert name == 'o200k_base'
         raise KeyError('SECRET_SENTINEL')
-    monkeypatch.setattr(adapter.tiktoken, 'encoding_for_model', unknown)
+    monkeypatch.setattr(adapter.tiktoken, 'get_encoding', unknown)
     with pytest.raises(adapter.ModelAdapterError) as exc:
         asyncio.run(adapter.count_input('luna', object(), [HumanMessage(content='x')], []))
     assert 'SECRET_SENTINEL' not in str(exc.value)

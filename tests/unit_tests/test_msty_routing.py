@@ -112,7 +112,7 @@ def test_default_luna_one_generation_ignores_client_model_endpoint(monkeypatch):
     assert seen['bound'] == []
     assert result['result']['content'] == 'OK'
     assert result['result']['response_metadata'] == {
-        'model_name': 'gpt-5.6-luna', 'msty_model_name': 'gpt-5.6-luna',
+        'model_name': 'gpt-6-luna', 'msty_model_name': 'gpt-6-luna',
         'msty_model_profile': 'luna', 'msty_model_provider': 'openai'}
     assert result['result']['usage_metadata'] == USAGE
     assert result['execution']['status'] == 'answered'
@@ -231,7 +231,7 @@ def test_role_cannot_be_changed_in_callback_before_next_generation(monkeypatch):
 
 
 @pytest.mark.parametrize('profile,canonical,method', [
-    ('luna', 'gpt-5.6-luna', 'tiktoken-admission-v1'),
+    ('luna', 'gpt-6-luna', 'tiktoken-admission-v1'),
     ('deepseek', 'deepseek-flash', 'conservative-text-v1'),
 ])
 def test_count_receipt_identifies_method_and_model_without_changing_usage(monkeypatch, profile, canonical, method):
@@ -255,7 +255,7 @@ def test_count_receipt_identifies_method_and_model_without_changing_usage(monkey
     assert result['result']['response_metadata']['model_name'] == canonical
 
 
-@pytest.mark.parametrize('profile,canonical', [('luna', 'gpt-5.6-luna'), ('deepseek', 'deepseek-flash')])
+@pytest.mark.parametrize('profile,canonical', [('luna', 'gpt-6-luna'), ('deepseek', 'deepseek-flash')])
 def test_raw_usage_is_preserved_with_canonical_and_provider_identity(monkeypatch, profile, canonical):
     monkeypatch.setenv('MSTY_MODEL_PROFILE', profile)
     provider_model = canonical + '-2026-09-20'
@@ -277,7 +277,7 @@ def test_missing_provider_usage_is_unknown_not_sdk_zero(monkeypatch):
                               usage={'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})])
     result = asyncio.run(msty.graph.ainvoke(initial(tools=[])))['result']
     assert result['usage_metadata'] is None
-    assert result['response_metadata']['model_name'] == 'gpt-5.6-luna'
+    assert result['response_metadata']['model_name'] == 'gpt-6-luna'
     assert 'msty_generation' not in result['response_metadata']
 
 
