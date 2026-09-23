@@ -67,6 +67,14 @@ _HONEST = ('не могу подтвердить', 'не могу провер',
            'недоступен', 'не передан', 'нет профильного', 'cannot confirm', 'unable to verify')
 
 
+# Схемы этих инструментов у настоящего Msty Admin несут служебное поле допуска
+# (consult/worker/site binding); синтетическая схема без него отклоняется мостом
+# («Привязка инструментального шага не подтверждена») до вызова модели. На
+# критические статус-пути они не влияют.
+_BOUND_BY_BRIDGE = frozenset({'msty_brain_consult', 'msty_worker_start', *(
+    'msty_site_' + name for name in ('prepare', 'file', 'check', 'status', 'cancel', 'release'))})
+
+
 def toolset():
     """Схемы, как их передаёт клиент Msty: все внешние записи реестра.
 
@@ -76,6 +84,8 @@ def toolset():
     schemas = []
     for entry in msty_registry.TOOLS:
         if entry.name.startswith('native_') or entry.name == 'msty_delegate_task':
+            continue
+        if entry.name in _BOUND_BY_BRIDGE:
             continue
         properties = {}
         if entry.name == 'msty_store_sync_status':
