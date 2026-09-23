@@ -26,7 +26,7 @@ from langgraph.types import Command, interrupt
 from langmem import create_search_memory_tool
 
 from . import msty, msty_compaction, msty_execution, msty_guard, msty_models, msty_prompts, msty_task, msty_tool_routing
-from . import msty_breaker, msty_registry, msty_subagents, msty_taxonomy
+from . import consolidator, msty_breaker, msty_registry, msty_subagents, msty_taxonomy
 from .msty_native_memory import (
     CANDIDATES_NAMESPACE, backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware,
 )
@@ -41,8 +41,14 @@ NATIVE_TOOLS = frozenset('native_' + name for name in _ORIGINAL_TOOLS)
 # exact name as server-executed before MSTY_MEMORY_SEARCH=on is set; until then
 # the tool is not offered and /memories/ is reachable via native_grep/glob/read.
 MEMORY_SEARCH_TOOL = 'native_search_memory'
+# Read-only, model-free digest of recent Brain threads for the scheduled
+# consolidation run (deep_agent.consolidator). Same gate as search: offered only
+# with MSTY_RECENT_CONVERSATIONS=on after brain_bridge admits the exact name.
+RECENT_CONVERSATIONS_TOOL = consolidator.RECENT_CONVERSATIONS_TOOL
+OPTIONAL_TOOL_FLAGS = {MEMORY_SEARCH_TOOL: 'MSTY_MEMORY_SEARCH',
+                       RECENT_CONVERSATIONS_TOOL: 'MSTY_RECENT_CONVERSATIONS'}
 SERVER_EXECUTED = NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL, msty_tool_routing.REQUEST_TOOL,
-                                  MEMORY_SEARCH_TOOL}
+                                  *OPTIONAL_TOOL_FLAGS}
 
 
 def server_executed() -> frozenset:
@@ -52,11 +58,9 @@ def server_executed() -> frozenset:
     names = set(NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL})
     if msty_tool_routing.dispatcher_enabled():
         names.add(msty_tool_routing.REQUEST_TOOL)
-    if memory_search_enabled():
-        names.add(MEMORY_SEARCH_TOOL)
-    return frozenset(names)
+    return frozenset(names | enabled_optional_tools())
 RESERVED_TOOLS = NATIVE_TOOLS | {'native_execute', 'native_task', 'native_compact_conversation',
-                                 MEMORY_SEARCH_TOOL}
+                                 *OPTIONAL_TOOL_FLAGS}
 VIRTUAL_ROOTS = ('/scratch', '/memory', '/skills', '/memories', '/large_tool_results')
 WRITABLE_ROOTS = ('/scratch/', '/memories/')
 VIRTUAL_FS_SCOPE = (
@@ -258,6 +262,13 @@ def memory_search_enabled() -> bool:
     """Off until brain_bridge admits MEMORY_SEARCH_TOOL (same gate as dispatcher)."""
     import os
     return os.environ.get('MSTY_MEMORY_SEARCH', 'off').strip().lower() == 'on'
+
+
+def enabled_optional_tools() -> set:
+    """Optional server-executed tools switched on by their operator flags."""
+    import os
+    return {name for name, flag in OPTIONAL_TOOL_FLAGS.items()
+            if os.environ.get(flag, 'off').strip().lower() == 'on'}
 
 
 def memory_search_tool():
@@ -475,7 +486,7 @@ class NativeMstyMiddleware(AgentMiddleware):
     async def awrap_model_call(self, request, handler):
         state = request.state
         analyst = state.get('brain_task_role') == 'analyst'
-        offered = NATIVE_TOOLS | ({MEMORY_SEARCH_TOOL} if memory_search_enabled() else set())
+        offered = NATIVE_TOOLS | enabled_optional_tools()
         native = ([] if analyst else [_native_tool_schema(tool) for tool in request.tools
                   if getattr(tool, 'name', None) in offered])
         # Серверный инструмент делегирования не может быть подменён одноимённой
@@ -795,9 +806,9 @@ class NativeMstyMiddleware(AgentMiddleware):
                     call, failure_class, 'subagent',
                     msty_taxonomy.prior_attempts(errors, call, turn) + 1, turn)})
             return message
-        if call['name'] == MEMORY_SEARCH_TOOL:
+        if call['name'] in OPTIONAL_TOOL_FLAGS:
             if call['name'] not in request.state.get('native_tool_names', []):
-                raise msty_execution.ExecutionProtocolError('Поиск памяти не передавался модели.')
+                raise msty_execution.ExecutionProtocolError('Инструмент памяти не передавался модели.')
             if msty_taxonomy.prior_attempts(errors, call, turn) >= msty_taxonomy.ATTEMPT_BUDGET:
                 return msty_taxonomy.budget_exhausted_message(call, errors, turn)
             return await self._native_call_with_recovery(request, handler, errors, turn)
@@ -866,7 +877,7 @@ class NativeMstyMiddleware(AgentMiddleware):
 
 def build_graph(*, checkpointer=None, store=None):
     secret_guard = SecretPIIMiddleware()
-    return create_agent(model=_GuardedModelFacade(), tools=[memory_search_tool()],
+    return create_agent(model=_GuardedModelFacade(), tools=[memory_search_tool(), consolidator.recent_conversations],
         system_prompt=msty.POLICY + '\n' + NATIVE_POLICY,
         middleware=[secret_guard, NamespacedTodoListMiddleware(), NamespacedFilesystemMiddleware(),
                     *_namespaced_memory_middlewares(), NativeMstyMiddleware(secret_guard)],

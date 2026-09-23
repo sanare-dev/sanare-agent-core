@@ -742,14 +742,21 @@ candidates zone; approved `/memory/PROJECT.md` and `/skills/` stay read-only.
   only with `MSTY_MEMORY_SEARCH=on`, after the bridge (`brain_bridge.NATIVE_TOOLS`)
   admits this name as server-executed; until then `native_grep/glob` on `/memories/`
   are the (literal) fallback. Policy block `MSTY_CANDIDATE_MEMORY_V1`.
-- **Consolidation** — graph `consolidator` (official background-consolidation
-  pattern): Luna via `msty_models`, reads up to 10 `msty_native` threads updated in
-  the last 6 h via the in-process SDK client, writes cards only to `/memories/`.
-  Bounded by `ModelCallLimitMiddleware(run_limit=8)`, `ToolCallLimitMiddleware`,
-  input caps, `max_tokens=2048`, recursion limit 40. These calls are not metered by
-  the Brain bridge ledger. Cron is created manually:
-  `uv run python tools/create_consolidation_cron.py --url <deployment>`
-  ([cron jobs](https://docs.langchain.com/langsmith/cron-jobs)).
+- **Consolidation** — Brain itself, through the local bridge (no cloud cron:
+  the emergency stop is a local SQLite flag the cloud cannot read, and cloud-side
+  calls would bypass the bridge ledger). launchd template
+  `tools/launchd/com.sanare.brain-consolidation.plist` (every 6 h, installed by the
+  owner) runs `tools/consolidate_memory.py`: it reads the stop flag with the
+  bridge's own `brain_stop.py` and sends nothing when stopped/unreadable, otherwise
+  one `team.brain` request with the fixed `CONSOLIDATION_PROMPT`
+  (`deep_agent.consolidator`). The bridge checks the stop before every paid stage
+  and meters every stage (reserve → settle, unknown stays reserved; task cap
+  `MSTY_BRAIN_TASK_CAP_USD`, team daily cap). Brain reads recent threads with the
+  read-only, model-free `native_recent_conversations` (≤10 `msty_native` threads
+  updated in the last 8 h, ≤40 000 chars, consolidation threads excluded) and
+  writes cards only to `/memories/`. Offered only with
+  `MSTY_RECENT_CONVERSATIONS=on`, after `brain_bridge.NATIVE_TOOLS` admits the name.
+  `--dry-run` checks the stop only.
 
 deepagents stays 0.4.11: 0.7.18 requires langchain-core>=1.6.4,
 langchain-anthropic>=1.7.3, langsmith>=0.14 and langchain-google-genai, and adds

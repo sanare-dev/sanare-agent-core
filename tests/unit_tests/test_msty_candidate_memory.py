@@ -1,4 +1,4 @@
-"""Candidate memory: writable /memories/, read-only /memory/, Store index, consolidator."""
+"""Candidate memory: writable /memories/, read-only /memory/, Store index, consolidation."""
 import asyncio
 import json
 from pathlib import Path
@@ -173,21 +173,77 @@ def test_consolidator_digest_is_bounded_and_skips_tool_payloads():
     assert len(digest) < consolidator.MAX_CHARS_PER_MESSAGE + 200
 
 
-def test_consolidator_graph_writes_only_candidates_with_bounded_calls():
-    async def scenario():
-        store = InMemoryStore()
-        model = Model(responses=[
-            tool_call('w', 'write_file', file_path='/memories/brain/cons.md', content='card'),
-            tool_call('d', 'write_file', file_path='/memory/PROJECT.md', content='BAD'),
-            AIMessage(content='ok'),
-        ])
-        graph = consolidator.build_graph(model, store=store, checkpointer=InMemorySaver())
-        await graph.ainvoke({'messages': [{'role': 'user', 'content': 'go'}]},
-                            {'configurable': {'thread_id': 'cons'}})
-        assert await store.aget(memory.CANDIDATES_NAMESPACE, '/brain/cons.md') is not None
-        assert await store.aget(memory.NAMESPACE + ('memory',), '/PROJECT.md') is None
-        assert graph.config['recursion_limit'] == consolidator.RECURSION_LIMIT
-    asyncio.run(scenario())
+def test_consolidation_threads_are_excluded_from_digest():
+    from datetime import datetime, timezone
+    since = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    threads = [
+        {'thread_id': 'cons', 'updated_at': '2026-09-23T06:00:00Z', 'values': {'messages': [
+            {'type': 'human', 'content': consolidator.CONSOLIDATION_PROMPT},
+            {'type': 'ai', 'content': 'нет новых фактов'}]}},
+        {'thread_id': 'work', 'updated_at': '2026-09-23T06:00:00Z', 'values': {'messages': [
+            {'type': 'human', 'content': 'почини сайт'}, {'type': 'ai', 'content': 'готово'}]}},
+    ]
+    digest = consolidator.format_threads(threads, since)
+    assert 'thread cons' not in digest and 'thread work' in digest
+    assert consolidator.CONSOLIDATION_MARKER in consolidator.CONSOLIDATION_PROMPT
+    assert consolidator.RECENT_CONVERSATIONS_TOOL in consolidator.CONSOLIDATION_PROMPT
+
+
+def test_recent_conversations_tool_is_read_only_bounded_search(monkeypatch):
+    calls = []
+
+    class Threads:
+        async def search(self, **kwargs):
+            calls.append(kwargs)
+            return [{'thread_id': 't1', 'updated_at': '2999-01-01T00:00:00Z',
+                     'values': {'messages': [{'type': 'human', 'content': 'hello'}]}}]
+
+    monkeypatch.setattr(consolidator, 'get_client', lambda: SimpleNamespace(threads=Threads()))
+    tool = consolidator.recent_conversations
+    assert tool.name == 'native_recent_conversations'
+    assert tool.tool_call_schema.model_json_schema().get('properties', {}) == {}
+    digest = asyncio.run(tool.ainvoke({}))
+    assert 'thread t1' in digest and 'human: hello' in digest
+    assert calls == [{'metadata': {'graph_id': 'msty_native'}, 'sort_by': 'updated_at',
+                      'sort_order': 'desc', 'limit': consolidator.MAX_THREADS,
+                      'select': ['thread_id', 'updated_at', 'values']}]
+
+
+def test_recent_conversations_gated_until_bridge_admits_it(monkeypatch):
+    name = msty_native.RECENT_CONVERSATIONS_TOOL
+    assert name in msty_native.SERVER_EXECUTED and name in msty_native.RESERVED_TOOLS
+    monkeypatch.delenv('MSTY_RECENT_CONVERSATIONS', raising=False)
+    assert name not in msty_native.server_executed()
+    monkeypatch.setenv('MSTY_RECENT_CONVERSATIONS', 'on')
+    assert name in msty_native.server_executed()
+
+
+def test_recent_conversations_offered_and_executed_through_native_harness(monkeypatch):
+    from langgraph.types import Command
+    from tests.unit_tests.test_msty_native import answer, call, initial, invoke, scripted
+    monkeypatch.setenv('MSTY_RECENT_CONVERSATIONS', 'on')
+
+    monkeypatch.setattr(consolidator, 'get_client', lambda: SimpleNamespace(threads=SimpleNamespace(
+        search=lambda **kw: _async([{'thread_id': 'x', 'updated_at': '2999-01-01T00:00:00Z',
+                                      'values': {'messages': [{'type': 'ai', 'content': 'DIGEST'}]}}]))))
+    seen = scripted(monkeypatch, [answer('', [call('native_recent_conversations', {}, 'r')]), answer()])
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'recent-on'}, 'recursion_limit': 32}
+        state, _ = await invoke(graph, initial(), config)
+        names = [tool['function']['name'] for tool in seen[0]['state']['tools']]
+        assert 'native_recent_conversations' in names
+        ticket = state.tasks[0].interrupts[0]
+        state, _ = await invoke(graph, Command(resume={ticket.id: {
+            **ticket.value, 'type': 'msty_native_resume'}}), config)
+        tools = [m for m in state.values['messages'] if m.type == 'tool']
+        assert tools and 'ai: DIGEST' in tools[0].content
+    asyncio.run(run())
+
+
+async def _async(value):
+    return value
 
 
 def test_full_native_harness_writes_candidate_card_into_store(monkeypatch):

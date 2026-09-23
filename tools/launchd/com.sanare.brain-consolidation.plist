@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template, installed only by the owner (see README "Consolidation").
+     Every 6 h: tools/consolidate_memory.py -> team.brain via the local bridge.
+     Emergency stop and cost are enforced by the bridge; the script also skips
+     the request when the stop flag is set or unreadable. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sanare.brain-consolidation</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>--project</string>
+    <string>/Users/vb/Documents/Kimi/Workspaces/MSTY/sanare-agent-core</string>
+    <string>python</string>
+    <string>/Users/vb/Documents/Kimi/Workspaces/MSTY/sanare-agent-core/tools/consolidate_memory.py</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/vb/Library/Logs/SanareBrainConsolidation/run.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/vb/Library/Logs/SanareBrainConsolidation/error.log</string>
+</dict>
+</plist>
