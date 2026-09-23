@@ -60,7 +60,8 @@ _INVALID_ARGS_TEXT = re.compile(
     r'не\s+прош[её]л\s+валидац|наруша\w+\s+схем')
 _TRANSIENT_TEXT = re.compile(
     r'(?is)time[ds]? ?out|тайм-?аут|\b429\b|\b5\d\d\b|rate\s*limit|temporarily unavailable|'
-    r'connection (?:refused|reset|aborted)|временно недоступ|превышено время ожидания')
+    r'connection (?:refused|reset|aborted)|временно недоступ|превышено время ожидания|'
+    r'upstream\s+connect\s+error|no\s+healthy\s+upstream|ECONN(?:REFUSED|RESET)')
 _DETERMINISTIC_TEXT = re.compile(
     r'(?is)\b40[0134]\b|\b422\b|permission denied|\bforbidden\b|\bbad request\b|'
     r'отказано в доступе|недопустим\w+\s+запрос')
@@ -77,7 +78,7 @@ _ERROR_ENVELOPE = re.compile(
     r'(?is)^\W{0,3}(?:error\s*[:=\-—]|error\s+(?:executing|calling|while|in|during)\b|'
     r'tau_class=|mcp\s+error|tool\s+(?:execution\s+)?(?:failed|error)\b|failed\s+to\b|'
     r'exception\s*[:\-]|traceback\b|unknown\s+tool\b|no\s+such\s+tool\b|request\s+failed|'
-    r'http\s+(?:error\s+)?[45]\d\d\b|ошибка\s*[:\-—]|ошибка\s+(?:выполнения|вызова|при)\b|'
+    r'http\s+(?:error\s+)?[45]\d\d\b(?!\s+count)|ошибка\s*[:\-—]|ошибка\s+(?:выполнения|вызова|при)\b|'
     r'сбой\s*[:\-—]|не\s+удалось(?!\s+(?:найти|обнаружить)\s+(?:ни\s+)?(?:ошиб|сбо|проблем))\b|'
     r'инструмент\s+\S+\s+не\s+(?:существует|найден))')
 # Отказ, объявленный фразой В НАЧАЛЕ ответа (не в середине строки лога).
@@ -85,6 +86,14 @@ _FIRST_LINE_FAILURE = re.compile(
     r'(?is)^\W{0,3}(?:tool\s+\S+\s+(?:failed|errored)\b|'
     r'(?:the\s+)?service\s+is\s+temporarily\s+unavailable|'
     r'(?:при\s+\S+\s+)?(?:произошла|возникла)\s+ошибка\b)')
+# Ответ прокси/шлюза вместо результата: статус-строка HTTP или HTML-страница
+# ошибки в самом начале, типовые сообщения Envoy/Node/Cloudflare.
+_PROXY_FAILURE = re.compile(
+    r'(?is)^\W{0,3}(?:(?:HTTP/\d(?:\.\d)?\s+|status:\s*)[45]\d\d\b|'
+    r'<(?:!doctype\s+html|html)[^>]*>.{0,300}?\b[45]\d\d\s+(?:bad\s+gateway|service\s+unavailable|'
+    r'gateway\s+time-?out|internal\s+server\s+error|not\s+found|forbidden)|'
+    r'upstream\s+connect\s+error|no\s+healthy\s+upstream|connect\s+ECONNREFUSED|'
+    r'error\s+code:\s*5\d\d)')
 # Счётчики вида «Jobs timed out: 0», «HTTP 503 count: 0» — данные.
 _ZERO_COUNTER = re.compile(r'(?is)(?:count|errors?|failures?|timed\s+out|out)\s*[:=]\s*0\b')
 _ENVELOPE_HEAD = 600
@@ -162,11 +171,13 @@ def classify_tool_text(content) -> str | None:
     if head is None:
         head = stripped[:_ENVELOPE_HEAD]
         short = len(stripped) <= _SHORT_RESULT and '\n' not in stripped
-        if short and _ZERO_COUNTER.search(stripped) and not stripped.lower().startswith(
-                ('error', 'tau_class=', 'mcp error')):
-            return None  # «HTTP 503 count: 0» — счётчик, не отказ
+        # Нулевой счётчик («HTTP 503 count: 0») гасит только строгую сигнатуру
+        # короткого ответа; явный конверт ошибки («Failed to fetch …: 503 …
+        # (retry count: 0)») остаётся отказом.
         if not (_ERROR_ENVELOPE.search(head) or _FIRST_LINE_FAILURE.search(head) or
-                short and _STRICT_SIGNATURE.search(stripped)):
+                _PROXY_FAILURE.search(head) or
+                short and _STRICT_SIGNATURE.search(stripped)
+                and not _ZERO_COUNTER.search(stripped)):
             return None
     if _UNKNOWN_TOOL_TEXT.search(head):
         return UNKNOWN_TOOL

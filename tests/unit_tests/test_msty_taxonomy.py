@@ -151,3 +151,19 @@ def test_classify_envelopes_and_data_after_review(content, expected):
 ])
 def test_successful_data_is_not_a_failure_round2(content):
     assert msty_taxonomy.classify_tool_text(content) is None
+
+
+@pytest.mark.parametrize('content,expected', [
+    ('Failed to fetch https://api.x/v1: 503 Service Unavailable (retry count: 0)', 'transient'),
+    ('Request failed: timeout (retry_count=0)', 'transient'),
+    ('HTTP 502 Bad Gateway (errors: 0 retried)', 'transient'),
+    ('HTTP/1.1 503 Service Unavailable\nContent-Type: text/html', 'transient'),
+    ('<html><body><h1>503 Service Unavailable</h1>\nNo server is available', 'transient'),
+    ('<html>\n<head><title>502 Bad Gateway</title></head>\n<body>nginx</body></html>', 'transient'),
+    ('upstream connect error or disconnect/reset before headers', 'transient'),
+    ('connect ECONNREFUSED 127.0.0.1:5432', 'transient'),
+    ('HTTP 503 count: 0', None),
+    ('2026-09-23 HTTP 503 in logs\nok', None),
+])
+def test_proxy_failures_and_counters_round3(content, expected):
+    assert msty_taxonomy.classify_tool_text(content) == expected

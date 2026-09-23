@@ -37,8 +37,22 @@ _connections: dict[str, dict] = {}
 
 
 def open_remaining(connection: str) -> float | None:
-    """Секунды до закрытия контура, если он открыт; None — вызовы допустимы."""
-    return admit(connection)[0]
+    """Чистое чтение: секунды до закрытия контура или None. Пробу не занимает;
+    для допуска вызова использовать admit()."""
+    try:
+        with _lock:
+            state = _connections.get(connection)
+            if not state:
+                return None
+            now = time.monotonic()
+            remaining = state.get('open_until', 0.0) - now
+            if remaining > 0:
+                return remaining
+            if state.get('probe_until', 0.0) > now:
+                return state['probe_until'] - now
+            return None
+    except Exception:
+        return None
 
 
 def admit(connection: str) -> tuple[float | None, int]:

@@ -179,7 +179,8 @@ def test_diagnosis_with_advice_is_still_a_claim(text):
 
 
 @pytest.mark.parametrize('text', [
-    'Когда cron не работает, бот пишет в лог.',
+    # «Когда …» больше не исключается (ревью 3: «Когда я проверил статус,
+    # синхронизация не работает» — мнимая проверка).
     'Убедитесь, что вебхук не сломан.',
     'Проверьте, что сервис не отключён и ключ не отсутствует.',
     'Ключ API не отсутствует.',
@@ -197,3 +198,18 @@ def test_status_tool_that_could_not_read_is_not_evidence():
               {'role': 'tool', 'tool_call_id': 's1',
                'content': '{"state": "unavailable", "code": "vercel_logs_failed"}'}]
     assert msty_evidence.successful_status_reads({'messages': unread}) == []
+
+
+@pytest.mark.parametrize('text', [
+    'Когда я проверил статус, синхронизация не работает.',
+    'Убедитесь, что токен задан — сейчас интеграция не работает.',
+    'If you look at the logs, the cron is not working.',
+])
+def test_pseudo_checked_diagnoses_are_claims_round3(text):
+    assert msty_evidence.has_negative_claim(text)
+
+
+def test_failed_state_is_evidence_not_unread():
+    read = [dict(STATUS_HISTORY[0]), STATUS_HISTORY[1],
+            {'role': 'tool', 'tool_call_id': 's1', 'content': '{"state": "failed", "last_run": 1}'}]
+    assert msty_evidence.successful_status_reads({'messages': read}) == ['msty_store_sync_status']

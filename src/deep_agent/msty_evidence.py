@@ -68,9 +68,9 @@ _SUBJECT = re.compile(
 # прошлое исправленное состояние, желаемое поведение. Совет в конце диагноза
 # («Интеграция не работает — проверьте токен») диагноз не отменяет.
 _CONDITIONAL_START = re.compile(
-    r'(?is)^\W*(?:(?:если|в\s+случае|когда|when|if|in\s+case)\b'
-    r'(?!\s+(?:you\s+ask|коротко|честно|кратко|по\s+сути))|'
-    r'(?:убедитесь|проверьте|make\s+sure|check|ensure)\b[^.!?]{0,40}\b(?:что|that)\b)')
+    r'(?is)^\W*(?:(?:если|в\s+случае|if|in\s+case)\b'
+    r'(?!\s+(?:you\s+(?:ask|look|check)|коротко|честно|кратко|по\s+сути))|'
+    r'(?:убедитесь|проверьте|make\s+sure|check|ensure)\b[^.!?—–]{0,40}\b(?:что|that)\b(?![^.!?]*[—–]))')
 _NOT_A_DIAGNOSIS = re.compile(
     r'(?is)(?:^|\W)(?:nothing\s+is\s+(?:missing|broken)|ничего\s+не\s+(?:отсутствует|сломано)|'
     r'не\s+отсутству\w*|исправлен\w*|fixed|был\w*\s+сломан|was\s+broken|'
@@ -138,7 +138,9 @@ def _current_turn(messages) -> list:
     return messages
 
 
-_UNREAD_STATES = frozenset(('unavailable', 'rejected', 'error', 'failed', 'unknown', 'denied'))
+# Только «не смог прочитать». state=failed/error — данные о системе (сбой
+# синхронизации), это как раз доказательство негативного диагноза.
+_UNREAD_STATES = frozenset(('unavailable', 'rejected', 'denied'))
 
 
 def _unread_state(text: str) -> bool:
