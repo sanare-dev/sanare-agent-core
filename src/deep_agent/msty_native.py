@@ -33,7 +33,7 @@ NATIVE_TOOLS = frozenset('native_' + name for name in _ORIGINAL_TOOLS)
 # Серверно-исполняемые имена: виртуальная ФС/todos + инструмент делегирования
 # под-агентам (манифест L1, kind=native). Имя не входит в NATIVE_TOOLS, чтобы
 # не менять семантику неймспейсинга deepagents («native_» + оригинальное имя).
-SERVER_EXECUTED = NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL}
+SERVER_EXECUTED = NATIVE_TOOLS | {msty_subagents.DELEGATE_TOOL, msty_tool_routing.REQUEST_TOOL}
 RESERVED_TOOLS = NATIVE_TOOLS | {'native_execute', 'native_task', 'native_compact_conversation'}
 VIRTUAL_ROOTS = ('/scratch', '/memory', '/skills', '/large_tool_results')
 VIRTUAL_FS_SCOPE = (
@@ -432,7 +432,8 @@ class NativeMstyMiddleware(AgentMiddleware):
         # схемой клиента (иначе valid_tool_calls блокировал бы оба).
         client_tools = [tool for tool in state.get('tools') or []
                         if not (isinstance(tool, dict) and isinstance(tool.get('function'), dict)
-                                and tool['function'].get('name') == msty_subagents.DELEGATE_TOOL)]
+                                and tool['function'].get('name') in (
+                                    msty_subagents.DELEGATE_TOOL, msty_tool_routing.REQUEST_TOOL))]
         # Роутер синхронный (семантический слой считает эмбеддинг): вне event loop.
         external, tool_route, route_prompt = await asyncio.to_thread(
             msty_tool_routing.select_tools, request.messages, client_tools,
@@ -444,6 +445,17 @@ class NativeMstyMiddleware(AgentMiddleware):
             # continuation-шаги его не несут: контекст не раздувается, а
             # делегирование — решение при постановке, не при продолжении.
             native.append(msty_subagents.delegate_schema())
+        # Диспетчер: каталог невыданных схем + инструмент их подключения. Модель
+        # сама решает, что ей нужно, вместо ответа «нет инструментов».
+        catalog = ('' if analyst or not tool_route.get('catalog')
+                   or not msty_tool_routing.dispatcher_enabled() else
+                   msty_tool_routing.catalog_prompt(client_tools, tool_route.get('selected_names', [])))
+        if catalog and state.get('tool_choice') not in ('none',) and not (
+                isinstance(state.get('tool_choice'), dict)
+                and state['tool_choice'].get('type') == 'none'):
+            native.append(msty_tool_routing.request_tools_schema())
+        else:
+            catalog = ''
         messages = convert_to_openai_messages(request.messages)
         # Свёртка TAU-событий с ToolMessage (ошибки Guard/исполнения, успешные
         # evidence-чтения) в состояние графа до шага модели: protocol_state и
@@ -467,6 +479,8 @@ class NativeMstyMiddleware(AgentMiddleware):
             # WHICH, so the model stops reporting a tool as missing when it has it.
             system += '\n\n' + msty.tool_availability_context(protocol_state['tools'])
             system += '\n\n' + route_prompt
+            if catalog:
+                system += '\n\n' + catalog
         prior_native = _native_actions(state)
 
         def filter_result(result):
@@ -691,6 +705,21 @@ class NativeMstyMiddleware(AgentMiddleware):
         errors = request.state.get('tau_errors') or []
         # Бюджет попыток — в пределах хода владельца, не всего треда.
         turn = msty_taxonomy.turn_of(request.state.get('messages'))
+        if call['name'] == msty_tool_routing.REQUEST_TOOL:
+            if call['name'] not in request.state.get('native_tool_names', []):
+                raise msty_execution.ExecutionProtocolError('Инструмент подключения не передавался модели.')
+            available = set(msty.tool_names(request.state.get('tools') or []))
+            names = [item for item in (call.get('args') or {}).get('names') or []
+                     if isinstance(item, str)][:msty_tool_routing.MAX_REQUESTED]
+            enabled = [name for name in names if name in available]
+            missing = [name for name in names if name not in available]
+            text = ('Подключено: ' + (', '.join(enabled) or 'ничего') +
+                    '. Эти инструменты доступны со следующего шага; вызывай их напрямую.')
+            if missing:
+                text += (' Нет в тулсете владельца: ' + ', '.join(missing) +
+                         ' — выбери из MSTY_TOOL_CATALOG_V1 или используй msty_codex_start.')
+            return ToolMessage(content=text, name=call['name'], tool_call_id=call['id'],
+                               status='success' if enabled else 'error')
         if call['name'] == msty_subagents.DELEGATE_TOOL:
             # Sub-agents: серверное исполнение, НЕ клиентское. Имя сверено с
             # выданным на шаге списком, аргументы — со статической схемой

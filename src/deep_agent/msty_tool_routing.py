@@ -66,7 +66,32 @@ _SYSTEM_STATUS = re.compile(
     r"(?:систем|контур|сервис|инфраструктур|всего\s+контур|всей\s+систем)|"
     r"is\s+everything\s+(?:ok|okay|fine|working|up)\s*[?.!]|system\s+(?:status|health|overview))"
 )
-_SYSTEM_STATUS_TOOLS = frozenset({"msty_system_overview", "msty_admin_health"})
+_SYSTEM_STATUS_TOOLS = frozenset({"msty_system_overview", "msty_admin_health",
+                                  "msty_admin_system_map"})
+# «Проверь систему», «посмотри всю систему», «check the system» — тоже обзор.
+_CHECK_SYSTEM = re.compile(
+    r"(?is)(?:провер\w*|посмотр\w*|глянь|check|inspect)\s+(?:вс[юе]\s+|мою\s+|нашу\s+|the\s+)?"
+    r"(?:систем|контур|инфраструктур|system)")
+
+# Диспетчер инструментов (живой дефект 2026-09-23: 116 переданных схем, модели
+# выдано 4, ответ «нет инструментов»). Модель получает каталог всех переданных
+# схем и серверный инструмент подключения; запрошенное становится видимым со
+# следующего шага этого же хода.
+REQUEST_TOOL = "native_request_tools"
+# «Установи / разверни / запусти бота» на Mac владельца: узкого коннектора нет,
+# исполнитель — одна Codex job (терминал, файлы, браузер), не отказ.
+_INSTALL = re.compile(r"(?is)(?:установ(?!лен|к)|инсталл|разверн|развёрт|install|set\s*up|запусти\s+бот)")
+_INSTALL_TOOLS = frozenset({"msty_codex_start", "msty_codex_status"})
+
+
+def dispatcher_enabled() -> bool:
+    """Каталог + native_request_tools. Требует моста, допускающего это имя в
+    серверном native-исполнении (brain_bridge NATIVE_TOOLS); до его выкладки
+    выключено, иначе батч с этим вызовом падал бы на чеке моста."""
+    import os
+    return os.environ.get("MSTY_TOOL_DISPATCHER", "off").strip().lower() == "on"
+MAX_REQUESTED = 20
+_PASSTHROUGH_SUFFIX = "execute_tool"
 _BROWSER_INTERACTION = re.compile(
     r"(?is)(?:клик|нажм|заполни|введи|выбери|загрузи\s+файл|click|fill|type|select|upload)"
 )
@@ -306,10 +331,93 @@ def _route_prompt(route: dict) -> str:
     return prompt + (" " + " ".join(hints) if hints else "")
 
 
+def _current_turn(messages: list[Any]) -> list[Any]:
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "type", None)
+        if role in {"user", "human"}:
+            return messages[index + 1:]
+    return list(messages)
+
+
+def _call_args(call: dict) -> dict:
+    args = call.get("args")
+    if args is None and isinstance(call.get("function"), dict):
+        raw = call["function"].get("arguments")
+        try:
+            import json
+            args = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            args = None
+    return args if isinstance(args, dict) else {}
+
+
+def requested_names(messages: list[Any], available: set[str]) -> set[str]:
+    """Имена, которые модель сама подключила в текущем ходе.
+
+    Источники: вызовы native_request_tools (names) и passthrough execute_tool,
+    чей tool_name — прямой инструмент этого тулсета (исходный дефект
+    2026-09-22: нативное имя через Pressable execute_tool → «Unknown tool»).
+    """
+    found: set[str] = set()
+    for message in _current_turn(messages):
+        calls = message.get("tool_calls") if isinstance(message, dict) else getattr(message, "tool_calls", None)
+        for call in calls or []:
+            if not isinstance(call, dict):
+                continue
+            name = call.get("name") or (call.get("function") or {}).get("name") or ""
+            args = _call_args(call)
+            if name == REQUEST_TOOL:
+                names = args.get("names")
+                if isinstance(names, list):
+                    found.update(item for item in names[:MAX_REQUESTED] if isinstance(item, str))
+            elif name.endswith(_PASSTHROUGH_SUFFIX) and isinstance(args.get("tool_name"), str):
+                target = args["tool_name"]
+                found.update(item for item in available
+                             if item == target or item.endswith("_" + target))
+    return found & available
+
+
+def catalog_prompt(tools: list[dict], selected: list[str], limit: int = 160) -> str:
+    """Каталог переданных, но не выданных на шаге схем: имя — короткое назначение."""
+    lines = []
+    for tool in tools:
+        name = _tool_name(tool)
+        if not name or name in selected:
+            continue
+        entry = msty_registry.find(name)
+        description = (entry.description if entry is not None else
+                       " ".join(str((tool.get("function") or {}).get("description") or "").split()))
+        lines.append(f"- {name}: {description[:90]}")
+        if len(lines) >= limit:
+            break
+    if not lines:
+        return ""
+    return ("MSTY_TOOL_CATALOG_V1: у тебя ЕСТЬ и другие инструменты владельца, не показанные "
+            "на этом шаге. Если для задачи нужен любой из них — вызови native_request_tools "
+            "с их точными именами (до 20), и они станут доступны на следующем шаге. "
+            "Никогда не отвечай «нет инструментов», не проверив этот каталог. "
+            "Для широкой работы на Mac (найти, установить, запустить) есть msty_codex_start, "
+            "карта системы — msty_admin_system_map.\n" + "\n".join(lines))
+
+
+def request_tools_schema() -> dict:
+    return {"type": "function", "function": {
+        "name": REQUEST_TOOL,
+        "description": ("Подключить инструменты владельца из MSTY_TOOL_CATALOG_V1 по точным "
+                        "именам; они станут видимы со следующего шага этого хода."),
+        "parameters": {"type": "object", "properties": {
+            "names": {"type": "array", "items": {"type": "string"},
+                      "minItems": 1, "maxItems": MAX_REQUESTED},
+            "reason": {"type": "string", "description": "Зачем нужны эти инструменты."}},
+            "required": ["names"], "additionalProperties": False}}}
+
+
 def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | None = None,
                  tool_choice: Any = None) -> tuple[list[dict], dict, str]:
     """Return provider-visible schemas, a serializable route and its short prompt."""
     available = {_tool_name(tool): tool for tool in tools if _tool_name(tool)}
+    requested = requested_names(messages, set(available))
     text = latest_user_text(messages)
     fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     semantic: dict | None = None  # диагностика слоя L2; только свежая классификация
@@ -342,7 +450,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         lowered = text.lower()
         chosen.update(name for name in available if name.lower() in lowered)
 
-        if _SYSTEM_STATUS.search(text):
+        if _INSTALL.search(text):
+            chosen.update(_INSTALL_TOOLS)
+            if intent == "direct":
+                intent = "read"
+        if _SYSTEM_STATUS.search(text) or _CHECK_SYSTEM.search(text):
             chosen.update(_SYSTEM_STATUS_TOOLS)
             if intent == "direct":
                 intent = "read"
@@ -487,14 +599,14 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         if any(name == canonical or name.endswith("_" + canonical) for canonical in chosen)
     }
     chosen.update(aliases)
-    chosen = (chosen | historical | required) & available.keys()
+    chosen = (chosen | historical | required | requested) & available.keys()
 
     # `none` blocks new actions, but historical schemas remain for providers
     # that require definitions alongside earlier tool_use/tool_result blocks.
     if tool_choice == "none" or (isinstance(tool_choice, dict) and tool_choice.get("type") == "none"):
         chosen = historical
 
-    protected = historical | required
+    protected = historical | required | requested
     ordered = [name for name in available if name in chosen]
     if len(ordered) > MAX_SELECTED_TOOLS:
         keep = [name for name in ordered if name in protected]
@@ -516,6 +628,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         "selected_names": ordered,
         "selected_count": len(ordered),
         "available_count": len(available),
+        "requested": sorted(requested),
+        # Каталог не нужен объяснению («что такое vault») и короткой реплике
+        # («привет», «спасибо»); любой вопрос о системе/данных его получает.
+        "catalog": bool(intent != "direct" or requested or (
+            not _EXPLAIN_ONLY.search(text) and ("?" in text or len(text) > 25))),
         # Наблюдаемость слоя L2: какие инструменты добавлены семантикой, с какими
         # скорами; 'skipped' — continuation/direct маршрут без вызова слоя.
         "semantic": semantic if semantic is not None else {"status": "skipped"},
