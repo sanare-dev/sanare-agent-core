@@ -13,6 +13,8 @@ import hashlib
 import re
 from typing import Any
 
+from . import msty_registry
+
 
 ROUTE_VERSION = 2
 MAX_SELECTED_TOOLS = 28
@@ -97,65 +99,34 @@ _DOMAIN_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"(?is)(?:интернет|web\b|веб|url\b|ссылк|онлайн|search\s+web|browse)")),
 )
 
-_CORE_READ = {
-    "msty_admin_memory_search", "msty_admin_route_request", "msty_project_resolve",
-}
-_TASK = {"msty_task_plan", "msty_task_verify", "msty_project_verify_result"}
-_SITE = {
-    "msty_site_prepare", "msty_site_status", "msty_site_file", "msty_site_patch",
-    "msty_site_check", "msty_site_release", "msty_site_cancel", "msty_vercel_runtime_logs",
-}
-_PRESSABLE = {"discover_tools", "describe_tool", "execute_tool"}
-# Store-sync status is a native Brain read, not a Pressable operation. Without
-# this projection a commerce sync question exposed only execute_tool, the model
-# passed the native name through it, got "Unknown tool" and declared a false
-# outage (defect: live canary 2026-09-22 on team.brain).
-_STORE_SYNC_STATUS = frozenset({
-    "msty_store_sync_status", "msty_system_overview", "msty_admin_health",
-})
-_STORE_SYNC = re.compile(
-    r"(?is)(?:синхронизац|sync[-_ ]?status|store[-_ ]?sync|"
-    r"не\s+приходят?\s+заказы|не\s+обновляются?\s+товары|свежесть\s+данных)")
-_SUPABASE_READ = {
-    "search_docs", "list_projects", "get_project", "list_tables", "list_migrations",
-    "get_advisors", "query_logs", "get_project_url", "execute_sql",
-}
-_SUPABASE_WRITE = {
-    "apply_migration", "deploy_edge_function", "create_branch", "delete_branch", "merge_branch",
-    "rebase_branch", "reset_branch", "create_project", "pause_project", "restore_project",
-}
-_BROWSER_READ = {
-    "browser_navigate", "browser_snapshot", "browser_console_messages",
-    "browser_network_requests", "browser_take_screenshot", "browser_wait_for",
-}
-_BROWSER_WRITE = {
-    "browser_click", "browser_file_upload", "browser_fill_form", "browser_press_key",
-    "browser_select_option", "browser_type",
-}
-_FILES_READ = {
-    "get_file_info", "list_directory", "read_file", "read_multiple_files",
-    "read_text_file", "search_files",
-}
-_FILES_WRITE = {"create_directory", "edit_file", "move_file", "write_file"}
-_WEB = {"fetch", "msty_web_fetch"}
-_BRAIN_READ = {
-    "msty_admin_health", "msty_admin_keys_health", "msty_admin_last_repair",
-    "msty_admin_system_map", "msty_system_overview", "msty_store_sync_status",
-    "msty_brain_lessons", "msty_self_skills", "msty_selfimprove_status",
-}
-_BRAIN_WRITE = {
-    "msty_admin_plan_repair", "msty_admin_apply_repair", "msty_selfimprove_prepare",
-    "msty_selfimprove_file", "msty_selfimprove_patch", "msty_selfimprove_check",
-    "msty_selfimprove_release", "msty_worker_start", "msty_worker_status",
-    "msty_worker_cancel", "msty_brain_job", "msty_brain_verify", "msty_brain_consult",
-}
-_CODEX = {"msty_codex_start", "msty_codex_status", "msty_codex_cancel"}
-_SELFIMPROVE = {
-    "msty_selfimprove_status", "msty_selfimprove_file", "msty_selfimprove_patch",
-    "msty_selfimprove_check", "msty_selfimprove_release",
-}
-_WORKER = {"msty_worker_status", "msty_worker_cancel"}
-_BRAIN_JOB = {"msty_brain_job", "msty_brain_verify"}
+# Наборы инструментов ниже ВЫВОДЯТСЯ из манифеста TAU L1 (msty_registry), который
+# является единым источником истины об именах, доменах, алиасах и лексических
+# гардах. Здесь остаётся только политика выбора, не перечни имён.
+_CORE_READ = msty_registry.group('core_read')
+_TASK = msty_registry.group('task')
+_SITE = msty_registry.group('site')
+_PRESSABLE = msty_registry.group('pressable')
+# Статусные чтения Brain и их лексический гард живут в манифесте (поля
+# lexical_triggers записей). Проекция при commerce-лексике ниже вызывает
+# msty_registry.lexical_projection — это перенос семантики 5c63fae как есть
+# (дефект 2026-09-22: только execute_tool → «Unknown tool» → ложный отказ).
+_STORE_SYNC_STATUS = frozenset(
+    entry.name for entry in msty_registry.TOOLS
+    if msty_registry.TRIGGER_STORE_SYNC in entry.lexical_triggers)
+_STORE_SYNC = re.compile(msty_registry.TRIGGER_STORE_SYNC)
+_SUPABASE_READ = msty_registry.group('supabase_read')
+_SUPABASE_WRITE = msty_registry.group('supabase_write')
+_BROWSER_READ = msty_registry.group('browser_read')
+_BROWSER_WRITE = msty_registry.group('browser_write')
+_FILES_READ = msty_registry.group('files_read')
+_FILES_WRITE = msty_registry.group('files_write')
+_WEB = msty_registry.group('web')
+_BRAIN_READ = msty_registry.group('brain_read')
+_BRAIN_WRITE = msty_registry.group('brain_write')
+_CODEX = msty_registry.group('codex')
+_SELFIMPROVE = msty_registry.group('selfimprove')
+_WORKER = msty_registry.group('worker')
+_BRAIN_JOB = msty_registry.group('brain_job')
 
 # Every executor hands back an id of the form "<prefix>-<32 hex>" and the policy
 # tells the model to resume long work by that id. Such a turn usually carries no
@@ -170,25 +141,11 @@ _JOB_BUNDLES: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
     (re.compile(r"(?i)\bworker-[0-9a-f]{8,32}\b"), frozenset(_WORKER)),
     (re.compile(r"(?i)\bbrain-[0-9a-f]{8,32}\b"), frozenset(_BRAIN_JOB)),
 )
-_KNOWN_ONLY = {
-    # Installed connector operations that are intentionally not in a default
-    # route. They remain selectable by exact name but never leak in through a
-    # generic lexical match such as "project" or "file".
-    "list_organizations", "get_organization", "list_extensions", "get_publishable_keys",
-    "get_edge_function", "list_edge_functions", "list_branches",
-    "generate_typescript_types", "get_cost", "confirm_cost",
-    "browser_close", "browser_drag", "browser_drop", "browser_emulate_media",
-    "browser_evaluate", "browser_find", "browser_handle_dialog", "browser_hover",
-    "browser_navigate_back", "browser_resize", "browser_run_code_unsafe", "browser_tabs",
-    "directory_tree", "list_allowed_directories", "list_directory_with_sizes",
-    "read_media_file", "msty_image_read", "msty_project_create", "msty_project_read",
-    "msty_projects_list", "msty_brain_verify",
-}
-_KNOWN = set().union(
-    _CORE_READ, _TASK, _SITE, _PRESSABLE, _SUPABASE_READ, _SUPABASE_WRITE,
-    _BROWSER_READ, _BROWSER_WRITE, _FILES_READ, _FILES_WRITE, _WEB,
-    _BRAIN_READ, _BRAIN_WRITE, _CODEX, _KNOWN_ONLY,
-)
+# Установленные операции коннекторов, сознательно не входящие в маршрут по
+# умолчанию (группа known_only манифеста): выбираются точным именем, но не
+# протекают в выбор через широкое лексическое совпадение вроде "project"/"file".
+_KNOWN_ONLY = msty_registry.group('known_only')
+_KNOWN = msty_registry.routed_names()
 # Which tools survive the MAX_SELECTED_TOOLS cap must not depend on the order
 # Msty happens to send its schemas in: the same request would otherwise get a
 # working toolset or a crippled one at random. Rank by what the step needs
@@ -395,8 +352,12 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                         chosen.update(_FILES_WRITE)
             if "pressable" in domains:
                 chosen.update(_PRESSABLE | {"msty_project_resolve"})
-            if "commerce" in domains and _STORE_SYNC.search(text):
-                chosen.update(_STORE_SYNC_STATUS & available.keys())
+            # Лексические гарды манифеста (перенос 5c63fae без изменения
+            # поведения): запись проецируется, когда её lexical_trigger совпал с
+            # текстом и её домены пересекаются с маршрутом. Для статусной тройки
+            # это ровно прежнее правило «commerce в доменах + sync-лексика»:
+            # в brain-маршруте эти инструменты и так входят в _BRAIN_READ.
+            chosen.update(msty_registry.lexical_projection(set(domains), text))
             if "supabase" in domains:
                 chosen.update(_SUPABASE_READ)
                 if intent == "mutate":
