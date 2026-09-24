@@ -22,6 +22,15 @@
 отрицанием отрицания или историей исправления. Доказательство принимается
 только из ТЕКУЩЕГО хода владельца (после последнего его сообщения): одно
 статус-чтение в прошлом ходе больше не разрешает любой негатив навсегда.
+
+Область (24.09.2026, brain-desk: «Архитектор отморозился»): Gate применяется
+только к вопросам о состоянии системы и сервисов — когда начало последнего
+сообщения владельца спрашивает о статусе/сбое («работает ли», «проверь
+синхронизацию», «почему не обновляются») или в этом ходе модель вызывала
+профильное статус-чтение. Планирование, брифы, разборы очереди и тексты
+Gate не трогает: там упоминание «отсутствует»/«нет данных» — не диагноз
+инфраструктуры, а оговорка-приставка сбивала ответ («Не могу подтвердить
+негативный вывод…» над утренним брифом и планом Архитектора).
 """
 from __future__ import annotations
 
@@ -101,6 +110,56 @@ def has_negative_claim(text: str) -> bool:
             continue
         return True
     return False
+
+
+# Вопрос о состоянии системы: статус, сбой, «работает ли», проверка сервиса.
+# Ищется только в начале сообщения владельца (STATUS_HEAD символов): длинные
+# поручения и брифы несут данные ниже («статус», «ошибка» в выгрузке), это не
+# их вопрос.
+STATUS_HEAD = 400
+_STATUS_INTENT = re.compile(
+    r'(?is)(?:статус|состояни|как\s+там|работа\w*\s+ли|не\s+работа|почему\s+не\b|'
+    r'сломал|сломан|упал|падает|лежит|сбо[йия]|ошибк|здоров|жив\w*\s+ли|'
+    r'доступ\w*\s+ли|настроен|подключ[её]н|не\s+обновля|обновля\w*\s+ли|'
+    r'синхрониз|\bsync|провер(?:ь|ьте|ить|им)\b|диагност|почин|'
+    r'\bhealth|\bstatus\b|is\s+\w+\s+(?:up|down|running|working)|not\s+working|'
+    r'\bbroken\b|\bdown\b|failing|\bcheck\b)')
+
+
+def _owner_text(messages) -> str:
+    """Текст последнего сообщения владельца (user/human)."""
+    for message in reversed(list(messages or ())):
+        role = (message.get('role') if isinstance(message, dict)
+                else getattr(message, 'type', None))
+        if role in ('user', 'human'):
+            return _text(message.get('content') if isinstance(message, dict)
+                         else message.content)
+    return ''
+
+
+def is_status_question(text: str) -> bool:
+    """Начало сообщения спрашивает о состоянии системы/сервиса."""
+    return bool(_STATUS_INTENT.search((text or '')[:STATUS_HEAD]))
+
+
+def _status_tool_called(state) -> bool:
+    """В текущем ходе модель вызывала профильное статус-чтение (любой исход)."""
+    messages = state.get('messages') or ()
+    names = _call_names(messages)
+    for message in _tool_messages(_current_turn(messages)):
+        name = (message.get('name') if isinstance(message, dict) else getattr(message, 'name', None))
+        call_id = (message.get('tool_call_id') if isinstance(message, dict)
+                   else getattr(message, 'tool_call_id', None))
+        entry = msty_registry.find(name or names.get(call_id) or '')
+        if entry is not None and entry.evidence_class == 'status_read':
+            return True
+    return False
+
+
+def in_scope(state) -> bool:
+    """Gate касается только диагноза состояния системы, не планов и текстов."""
+    return (is_status_question(_owner_text(state.get('messages') or ()))
+            or _status_tool_called(state))
 
 
 def _call_names(messages) -> dict[str, str]:
@@ -234,6 +293,8 @@ def gate_final_answer(state: dict, result):
         return result, None
     if not negative_markers():
         return result, None
+    if not in_scope(state):
+        return result, None  # план, бриф, текст — не диагноз системы
     text = _text(result.content)
     if not text.strip() or not has_negative_claim(text):
         return result, None
