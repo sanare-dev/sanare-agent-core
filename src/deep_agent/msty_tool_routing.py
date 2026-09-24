@@ -101,7 +101,12 @@ def dispatcher_enabled() -> bool:
     серверном native-исполнении (brain_bridge NATIVE_TOOLS); до его выкладки
     выключено, иначе батч с этим вызовом падал бы на чеке моста."""
     import os
-    return os.environ.get("MSTY_TOOL_DISPATCHER", "off").strip().lower() == "on"
+    # On by default since 24.09: the bridge allows native_request_tools
+    # (brain_bridge NATIVE_TOOLS), and keyword routing alone kept hiding the
+    # owner's tools («нет инструмента» whenever the words did not match). The
+    # model now sees the catalog of every schema it was not given and asks for
+    # what it needs. MSTY_TOOL_DISPATCHER=off switches it back.
+    return os.environ.get("MSTY_TOOL_DISPATCHER", "on").strip().lower() != "off"
 MAX_REQUESTED = 20
 _PASSTHROUGH_SUFFIX = "execute_tool"
 _BROWSER_INTERACTION = re.compile(
