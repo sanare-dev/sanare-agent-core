@@ -649,6 +649,13 @@ unchanged: it only projects old tool results and keeps long tool chains cheap.
 A larger admitted input is billed as such (Luna doubles input price above
 272K); cross-turn chat compaction stays in the bridge.
 
+Capability attestation (24.09.2026 incident): every `context_budget_check`
+(accepted or rejected, including the compaction stage) carries
+`window_admission: true`. The bridge sends a binding above 180,000 only after
+it has seen this attestation (or an attested window limit equal to its
+binding); until then it keeps 180,000 without an owner-visible error, so a
+bridge flag switched on before this graph is live cannot break answers.
+
 ## Context admission — 20 September 2026
 
 The local bridge limits transport to 2 MB after bounded directory-tree previews;

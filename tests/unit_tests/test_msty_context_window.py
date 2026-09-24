@@ -52,7 +52,8 @@ def test_overflow_of_bound_window_never_generates(monkeypatch):
     result = asyncio.run(msty.graph.ainvoke(bound()))
     assert not seen['requests']
     check = result['context_budget_check']
-    assert check == {'version': 1, 'status': 'rejected', 'input_tokens': 936001, 'limit': 936000}
+    assert check == {'version': 1, 'status': 'rejected', 'input_tokens': 936001, 'limit': 936000,
+                     'window_admission': True}
     assert '936000' in result['result']['content']
     assert result['result']['usage_metadata']['total_tokens'] == 0
 
@@ -85,3 +86,15 @@ def test_binding_with_extra_field_is_rejected(monkeypatch):
     result = asyncio.run(msty.graph.ainvoke(state))
     assert not seen['requests']
     assert result['execution']['status'] == 'blocked'
+
+
+def test_every_attestation_declares_window_admission(monkeypatch):
+    # The bridge sends a window binding only after this attestation (incident
+    # 2026-09-24): accepted and rejected checks both carry it.
+    seen = install(monkeypatch, ['OK'], [100])
+    accepted = asyncio.run(msty.graph.ainvoke(initial()))['context_budget_check']
+    assert accepted['window_admission'] is True and accepted['limit'] == 180000
+    seen = install(monkeypatch, [], [936001])
+    rejected = asyncio.run(msty.graph.ainvoke(bound()))['context_budget_check']
+    assert not seen['requests']
+    assert rejected['window_admission'] is True and rejected['status'] == 'rejected'

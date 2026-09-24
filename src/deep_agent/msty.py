@@ -254,7 +254,7 @@ def rejected_context_budget(explanation: str, input_tokens: int | None = None, *
         'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})
     return publish_result(result, {
         'version': 1, 'status': 'rejected', 'input_tokens': input_tokens,
-        'limit': msty_execution.input_limit(state)})
+        'limit': msty_execution.input_limit(state), 'window_admission': True})
 
 
 async def _respond_step(state: State, *, native_system_prompt: str | None = None,
@@ -342,7 +342,8 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                 'инструментов не сокращались; нужно уменьшить выбранные вложения '
                 'или разделить задачу.', tokens, state=state)
         budget_check = {'version': 1, 'status': 'accepted', 'input_tokens': tokens,
-                        'limit': limit, 'method': msty_models.count_method(profile, full_messages),
+                        'limit': limit, 'window_admission': True,
+                        'method': msty_models.count_method(profile, full_messages),
                         'model_profile': profile}
     choice = state.get("tool_choice") or "auto"
     tools_disabled = choice == 'none' or (isinstance(choice, dict) and choice.get('type') == 'none')
@@ -478,7 +479,8 @@ async def _compact_step(state, profile, output_limit, policy, plan):
         return rejected_context_budget('Не удалось проверить вход сводки; исходники сохранены без обрезки.',
                                        state=state)
     budget_check = {'version': 1, 'status': 'accepted', 'input_tokens': tokens,
-                    'limit': msty_execution.input_limit(state), 'method': msty_models.count_method(profile, messages),
+                    'limit': msty_execution.input_limit(state), 'window_admission': True,
+                    'method': msty_models.count_method(profile, messages),
                     'model_profile': profile}
     raw = await model.ainvoke(messages)
     try:
