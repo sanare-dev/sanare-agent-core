@@ -28,7 +28,7 @@ MAX_SELECTED_TOOLS = 28
 _CONTINUATION_VERB = re.compile(
     r"(?is)\b(?:да+|ok|ок(?:ей)?|продолж\w*|сдела\w*|делай(?:те)?|доделыв\w*|доделай|"
     r"исправ\w*|почин\w*|чини|фикс\w*|правь|перенастра\w*|довед\w*|доводи|заверш\w*|"
-    r"впер[её]д|дальше)\b"
+    r"впер[её]д|дальше|реша\w*|решай(?:те)?)\b"
 )
 MAX_CONTINUATION_CHARS = 64
 _INCIDENT = re.compile(
@@ -214,6 +214,10 @@ _KNOWN = msty_registry.routed_names()
 # the client supplies these schemas they are Brain's own instruments for every
 # task turn and are never truncated away.
 _ORG_TOOLS = frozenset({"org_structure", "delegate", "delegate_many", "review"})
+# Brain Desk window (owner 24.09): «нет инструмента» is a task — the web read
+# and the connector finder are always at hand for a working turn, whatever
+# the words («решай проблему» routed to route_request + system_map only).
+_WINDOW_TOOLS = frozenset({"connector_search", "connector_propose"})
 # Which tools survive the MAX_SELECTED_TOOLS cap must not depend on the order
 # Msty happens to send its schemas in: the same request would otherwise get a
 # working toolset or a crippled one at random. Rank by what the step needs
@@ -498,6 +502,9 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         domains = [item for item in prior_route.get("domains", []) if isinstance(item, str)]
         chosen = {item for item in prior_route.get("selected_names", []) if item in available}
         source = "continued"
+        if _from_brain_desk(messages):
+            chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
+            chosen.discard("msty_project_resolve")
     else:
         domains = _domains(text)
         intent = _intent(text, domains)
@@ -537,6 +544,9 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
 
         if intent != "direct":
             chosen.update(_ORG_TOOLS & available.keys())
+            if _from_brain_desk(messages):
+                chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
+                chosen.discard("msty_project_resolve")
             # The generic task contract verifies explicit local artifact files.
             # Service-specific executors (site, Pressable, Supabase and Brain
             # self-improvement) have their own receipts and verification. Giving

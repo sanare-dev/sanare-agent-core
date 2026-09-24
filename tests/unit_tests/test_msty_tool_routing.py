@@ -397,3 +397,17 @@ def test_window_project_is_not_resolved_in_msty_registry():
     # Without the window mark (Msty itself) the resolver stays.
     names_msty, _, _ = route("Собери товары и цены Amazon для Sanare Lab UK")
     assert "msty_project_resolve" in names_msty
+
+
+def test_window_working_turn_always_has_web_and_connector_finder():
+    tools = TOOLS + [schema("connector_search"), schema("connector_propose")]
+    for text in ("решай проблему", "подключись к серверу Amazon и разверни бота"):
+        selected, value, _ = routing.select_tools(
+            [DESK_SYSTEM, {"role": "user", "content": text}], tools)
+        names = {tool["function"]["name"] for tool in selected}
+        assert {"connector_search", "connector_propose"} <= names, text
+        assert {"fetch", "msty_web_fetch"} & names, text
+        assert "msty_project_resolve" not in names, text
+    # Msty (no window mark) keeps its narrow routing.
+    selected, _, _ = routing.select_tools([{"role": "user", "content": "решай проблему"}], tools)
+    assert "connector_search" not in {tool["function"]["name"] for tool in selected}
