@@ -167,3 +167,105 @@ def test_successful_data_is_not_a_failure_round2(content):
 ])
 def test_proxy_failures_and_counters_round3(content, expected):
     assert msty_taxonomy.classify_tool_text(content) == expected
+
+
+# --- Окно Brain Desk (brain-desk #309) ------------------------------------------
+
+# Живой инцидент: Supabase list_tables с угаданным project_id из 19 символов.
+ZOD_INCIDENT = ('Ошибка инструмента: {"error":{"name":"ZodError","message":"[\\n  {\\n    '
+                '\\"origin\\": \\"string\\",\\n    \\"code\\": \\"too_small\\",\\n    '
+                '\\"minimum\\": 20,\\n    \\"inclusive\\": true,\\n    \\"exact\\": true,\\n    '
+                '\\"path\\": [],\\n    \\"message\\": \\"ref must be exactly 20 characters long\\"\\n  '
+                '}\\n]"}}')
+TAG = '\n\n[Brain Desk · самовосстановление] Класс: '
+
+
+def test_live_zod_incident_is_invalid_args_not_success():
+    # Раньше «Ошибка инструмента:» не узнавалась — отказ засчитывался успехом.
+    assert msty_taxonomy.classify_tool_text(ZOD_INCIDENT) == 'invalid_args'
+    tagged = (ZOD_INCIDENT + TAG + 'validation (неверный аргумент). Аргументы отклонены '
+              'инструментом. Исправь их по схеме и повтори вызов один раз, до ответа владельцу. '
+              'Вызови list_projects и возьми project_id оттуда.'
+              '\nУрок: Supabase: не угадывать project_id — сначала list_projects')
+    assert msty_taxonomy.classify_tool_text(tagged) == 'invalid_args'
+    # Тот же текст частями MCP.
+    assert msty_taxonomy.classify_tool_text([{'type': 'text', 'text': tagged}]) == 'invalid_args'
+    annotated = msty_taxonomy.annotate_failure(tagged, 'invalid_args', 'list_tables')
+    assert annotated.startswith('tau_class=invalid_args.')
+    assert 'инструмента списка' in annotated and 'ref must be exactly' in annotated
+
+
+@pytest.mark.parametrize('content', [
+    '[{"schema":"public","name":"inbox_events","rows":12}]',
+    '{"projects":[{"id":"abcdefghijklmnopqrst","name":"sanare-tax"}]}',
+    'Tables: inbox_events, tax_obligations',
+    # Тег в середине прочитанного журнала — данные, не объявление окна.
+    'Журнал окна:' + TAG + 'validation (неверный аргумент). x\n\nследующая запись: ok',
+])
+def test_successful_client_results_stay_success(content):
+    assert msty_taxonomy.classify_tool_text(content) is None
+
+
+@pytest.mark.parametrize('window,body,expected', [
+    ('validation', 'Ошибка инструмента: expected string, received number', 'invalid_args'),
+    ('not_found', 'Инструмент отказал: 404 Not Found', 'invalid_args'),
+    ('not_found', 'Ошибка инструмента: relation "public.x" does not exist', 'invalid_args'),
+    ('not_found', 'Инструмент supabase_x не найден среди включённых серверов Brain Desk; '
+                  'ничего не выполнено.', 'unknown_tool'),
+    ('auth', 'Ошибка инструмента: 401 Unauthorized', 'needs_owner'),
+    ('not_connected', 'Инструмент отказал: MCP-сервер: не подключён', 'needs_owner'),
+    ('transient', 'Ошибка инструмента: 503 Service Unavailable', 'transient'),
+    ('permission', 'Отказано Brain Desk: приватная папка. Ничего не выполнено; '
+                   'не пытайся обойти другим путём.', 'policy_refusal'),
+    ('validation', 'Отклонено Brain Desk до вызова: project_id не из list_projects.', 'invalid_args'),
+    # Потерянный исход важнее класса транспорта: запись могла выполниться.
+    ('not_connected', 'Результат неизвестен (MCP-сервер: процесс завершился (1)); действие '
+                      'могло выполниться — не повторяй его без проверки.', 'unknown_state'),
+    # Нераспознанный окном класс — по сигнатуре текста.
+    ('unknown', 'Ошибка инструмента: something odd', 'deterministic'),
+])
+def test_window_recovery_class_is_authoritative(window, body, expected):
+    content = body + TAG + window + ' (подпись). Подсказка окна.'
+    assert msty_taxonomy.classify_tool_text(content) == expected
+
+
+@pytest.mark.parametrize('content,expected', [
+    # Окно без блока самовосстановления (до brain-desk #313).
+    (ZOD_INCIDENT, 'invalid_args'),
+    ('Инструмент отказал: MCP error -32602: Invalid params', 'invalid_args'),
+    ('Ошибка инструмента: 503 Service Unavailable', 'transient'),
+    ('Ошибка инструмента: relation does not exist', 'deterministic'),
+    ('Результат неизвестен (timeout); действие могло выполниться — не повторяй его без проверки.',
+     'unknown_state'),
+    ('Отказано Brain Desk: только чтение. Ничего не выполнено; не пытайся обойти другим путём.',
+     'policy_refusal'),
+    ('Инструмент supabase_apply_migration запрещён владельцем (уровень риска «запрет»); '
+     'ничего не выполнено. Не пытайся обойти другим путём.', 'policy_refusal'),
+    ('Отклонено Brain Desk до вызова: project_id не из list_projects.', 'invalid_args'),
+])
+def test_client_envelopes_without_recovery_block(content, expected):
+    assert msty_taxonomy.classify_tool_text(content) == expected
+
+
+def test_policy_refusal_and_needs_owner_hints_forbid_bypass_and_retry():
+    refusal = msty_taxonomy.POLICY_HINT['policy_refusal']
+    assert 'не обходи' in refusal and 'не повторяй' in refusal
+    owner = msty_taxonomy.POLICY_HINT['needs_owner']
+    assert 'Переподключить' in owner and 'пробел' in owner and 'не повторяй' in owner
+    assert {'needs_owner', 'policy_refusal'} <= msty_taxonomy.CLASSES
+
+
+def test_recovery_note_names_tool_class_policy_and_budget():
+    call = {'name': 'list_tables', 'args': {'project_id': 'x' * 19}, 'id': 'c1'}
+    first = msty_taxonomy.error_entry(call, 'invalid_args', 'external', 1, 1)
+    note = msty_taxonomy.recovery_note([first])
+    assert note.startswith('TOOL_ERROR_RECOVERY_NOTE.')
+    assert 'list_tables: tau_class=invalid_args' in note and 'до ответа владельцу' in note
+    assert 'не повторяй' in note
+    second = msty_taxonomy.error_entry(call, 'invalid_args', 'external', 2, 1)
+    assert 'бюджет попыток исчерпан' in msty_taxonomy.recovery_note([second])
+    # Временный сбой вызова вне манифеста — неизвестный исход, как в annotate_failure.
+    lost = msty_taxonomy.error_entry({'name': 'no_such_write', 'args': {}}, 'transient', 'external', 1)
+    assert 'tau_class=unknown_state' in msty_taxonomy.recovery_note([lost])
+    assert msty_taxonomy.recovery_note([]) == ''
+    assert msty_taxonomy.recovery_note([{'tool': 'x', 'class': 'bogus'}, 'junk']) == ''

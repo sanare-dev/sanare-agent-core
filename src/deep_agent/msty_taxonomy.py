@@ -9,11 +9,19 @@
 | transient        | timeout, 429, 5xx, обрыв соединения    | retry ×2 с backoff+jitter, ТОЛЬКО идемпотентные |
 | deterministic    | 400/401/403/404/422, отказ бизнес-логики | не повторять; смена инструмента |
 | unknown_state    | ответ потерян, эффект неизвестен       | freeze + сверка, не слепой retry |
+| needs_owner      | нет входа / сервер не подключён (Brain Desk auth, not_connected) | не повторять; карточка «Переподключить», пробел в ответе |
+| policy_refusal   | отказ прав/политики владельца или Brain Desk | не повторять и не обходить; спросить владельца |
 
 Исполнение внешних MCP-инструментов живёт за коннектором клиента Msty: в графе
 нет их HTTP-статусов, поэтому класс внешнего отказа определяется по сигнатуре
 текста результата. Это эвристика аннотации и учёта — протокольные проверки
 (допуск, проверенные наблюдения) она не подменяет.
+
+Окно Brain Desk исполняет MCP на клиенте и сообщает отказ текстом с
+префиксами «Ошибка инструмента:», «Инструмент отказал:», «Результат
+неизвестен (…)», «Отклонено/Отказано Brain Desk…», а с brain-desk #309 —
+завершающим блоком «[Brain Desk · самовосстановление] Класс: <класс>». Этот
+блок — самый надёжный сигнал: класс окна переводится в класс TAU напрямую.
 
 Бюджет восстановления: суммарно 2 попытки на один и тот же вызов (имя + каноничный
 дайджест аргументов); дальше — честный дегрейд с перечнем проверенного, а не
@@ -34,7 +42,13 @@ INVALID_ARGS = 'invalid_args'
 TRANSIENT = 'transient'
 DETERMINISTIC = 'deterministic'
 UNKNOWN_STATE = 'unknown_state'
-CLASSES = frozenset((UNKNOWN_TOOL, INVALID_ARGS, TRANSIENT, DETERMINISTIC, UNKNOWN_STATE))
+# Отдельные классы, а не deterministic: подсказка deterministic «смени
+# инструмент» для них вредна — отказ прав нельзя обходить другим путём, а
+# потерянный вход чинит только владелец (карточка «Переподключить»).
+NEEDS_OWNER = 'needs_owner'
+POLICY_REFUSAL = 'policy_refusal'
+CLASSES = frozenset((UNKNOWN_TOOL, INVALID_ARGS, TRANSIENT, DETERMINISTIC, UNKNOWN_STATE,
+                     NEEDS_OWNER, POLICY_REFUSAL))
 
 # Суммарный бюджет попыток на один вызов (исходная + один повтор).
 ATTEMPT_BUDGET = 2
@@ -46,18 +60,27 @@ TRANSIENT_RETRIES = 2
 POLICY_HINT = {
     UNKNOWN_TOOL: ('имя относится к другому коннектору или не существует; вызови '
                    'инструмент напрямую по его собственной схеме из реестра, не через execute_tool'),
-    INVALID_ARGS: 'исправь аргументы по схеме и повтори вызов один раз',
+    INVALID_ARGS: ('исправь аргументы по схеме и повтори вызов один раз до ответа владельцу; '
+                   'идентификаторы не угадывай — возьми точное значение из инструмента списка'),
     TRANSIENT: 'временный сбой; допустим один повтор того же вызова без изменений',
     DETERMINISTIC: 'повтор без изменения условий бесполезен; смени инструмент или зафиксируй блокер',
     UNKNOWN_STATE: ('исход неизвестен; сначала сверь состояние read-only вызовом, '
                     'не повторяй побочный эффект вслепую'),
+    NEEDS_OWNER: ('нет входа или подключения к источнику; не повторяй вызов и не подменяй '
+                  'источник; скажи владельцу о карточке «Переподключить» и назови пробел в ответе'),
+    POLICY_REFUSAL: ('отказ прав или политики (владелец, Brain Desk, только чтение); не повторяй '
+                     'и не обходи другим инструментом; если действие нужно — попроси владельца'),
 }
 
 _UNKNOWN_TOOL_TEXT = re.compile(
     r'(?is)\bunknown tool\b|инструмент\s+\S+\s+не\s+(?:существует|найден)|no such tool')
 _INVALID_ARGS_TEXT = re.compile(
     r'(?is)invalid (?:argument|parameter|args)|validation error|schema violation|'
-    r'не\s+прош[её]л\s+валидац|наруша\w+\s+схем')
+    r'не\s+прош[её]л\s+валидац|наруша\w+\s+схем|'
+    # ZodError MCP-серверов (Supabase: «ref must be exactly 20 characters long»),
+    # JSON-RPC -32602 Invalid params.
+    r'\bZodError\b|\\?"code\\?"\s*:\s*\\?"(?:too_small|too_big|invalid_type|invalid_string|invalid_enum_value)|'
+    r'must\s+be\s+exactly\b|\binvalid\s+params\b|-32602\b')
 _TRANSIENT_TEXT = re.compile(
     r'(?is)time[ds]? ?out|тайм-?аут|\b429\b|\b5\d\d\b|rate\s*limit|temporarily unavailable|'
     r'connection (?:refused|reset|aborted)|временно недоступ|превышено время ожидания|'
@@ -94,6 +117,32 @@ _PROXY_FAILURE = re.compile(
     r'gateway\s+time-?out|internal\s+server\s+error|not\s+found|forbidden)|'
     r'upstream\s+connect\s+error|no\s+healthy\s+upstream|connect\s+ECONNREFUSED|'
     r'error\s+code:\s*5\d\d)')
+# Конверты окна Brain Desk (src/lib/server/mcp/pool.ts): isError результата,
+# JSON-RPC отказ, потерянный исход, отказ до вызова. Только в начале текста.
+_CLIENT_ENVELOPE = re.compile(
+    r'(?is)^\W{0,3}(?:ошибка\s+инструмента\s*:|инструмент\s+отказал\s*:|'
+    r'результат\s+неизвестен\b|отклонено\s+brain\s+desk\b|отказано\s+brain\s+desk\b|'
+    r'инструмент\s+\S+\s+запрещ[её]н\s+владельцем)')
+# Исход неизвестен (обрыв, таймаут окна): действие могло выполниться.
+_CLIENT_UNKNOWN_STATE = re.compile(r'(?is)^\W{0,3}результат\s+неизвестен\b')
+# Отказ прав/политики окна: «Отказано Brain Desk», запрет владельца.
+_CLIENT_REFUSAL = re.compile(
+    r'(?is)^\W{0,3}(?:отказано\s+brain\s+desk\b|инструмент\s+\S+\s+запрещ[её]н\s+владельцем)|'
+    r'требует\s+подтверждения\s+владельца')
+# Предпроверка идентификатора окном (brain-desk #309): id не из инструмента списка.
+_CLIENT_PRECHECK = re.compile(r'(?is)^\W{0,3}отклонено\s+brain\s+desk\s+до\s+вызова\b')
+# Блок самовосстановления окна (brain-desk #309) — последний абзац результата:
+# «\n\n[Brain Desk · самовосстановление] Класс: validation (…). подсказка[\nУрок: …]».
+_RECOVERY_TAG = re.compile(r'(?:^|\n\n)\[Brain Desk · самовосстановление\] Класс: ([a-z_]+)\b')
+#: Класс окна → класс TAU. not_found уточняется ниже (инструмент или объект).
+WINDOW_CLASS = {
+    'validation': INVALID_ARGS,
+    'not_found': INVALID_ARGS,
+    'auth': NEEDS_OWNER,
+    'not_connected': NEEDS_OWNER,
+    'transient': TRANSIENT,
+    'permission': POLICY_REFUSAL,
+}
 # Счётчики вида «Jobs timed out: 0», «HTTP 503 count: 0» — данные.
 _ZERO_COUNTER = re.compile(r'(?is)(?:count|errors?|failures?|timed\s+out|out)\s*[:=]\s*0\b')
 _ENVELOPE_HEAD = 600
@@ -155,6 +204,11 @@ def classify_tool_text(content) -> str | None:
     if not isinstance(content, str) or not content.strip():
         return None
     stripped = content.strip()
+    window = _window_class(stripped)
+    if window is not None:
+        return window
+    if _CLIENT_ENVELOPE.search(stripped[:_ENVELOPE_HEAD]):
+        return _client_class(stripped)
     head = None
     if stripped[:1] == '{' or stripped[:2] in ('[{', '["', '[]'):
         try:
@@ -179,6 +233,11 @@ def classify_tool_text(content) -> str | None:
                 short and _STRICT_SIGNATURE.search(stripped)
                 and not _ZERO_COUNTER.search(stripped)):
             return None
+    return _signature_class(head)
+
+
+def _signature_class(head: str) -> str:
+    """Класс отказа по сигнатуре текста, уже признанного ошибкой."""
     if _UNKNOWN_TOOL_TEXT.search(head):
         return UNKNOWN_TOOL
     if _INVALID_ARGS_TEXT.search(head):
@@ -190,6 +249,40 @@ def classify_tool_text(content) -> str | None:
     # Явная ошибка без распознанной сигнатуры: исход известен (отказ), повтор
     # без изменения условий бесполезен.
     return DETERMINISTIC
+
+
+def _client_class(text: str) -> str:
+    """Класс отказа, объявленного конвертом окна Brain Desk (без блока класса)."""
+    if _CLIENT_UNKNOWN_STATE.search(text):
+        return UNKNOWN_STATE
+    if _CLIENT_REFUSAL.search(text[:_ENVELOPE_HEAD]):
+        return POLICY_REFUSAL
+    if _CLIENT_PRECHECK.search(text):
+        return INVALID_ARGS
+    return _signature_class(text[:_ENVELOPE_HEAD])
+
+
+def _window_class(text: str) -> str | None:
+    """Класс из завершающего блока самовосстановления окна; None — блока нет.
+
+    Блок принимается только последним абзацем результата: строка с тем же
+    тегом в середине прочитанного файла или журнала — данные, не объявление.
+    """
+    match = None
+    for match in _RECOVERY_TAG.finditer(text):
+        pass
+    if match is None or '\n\n' in text[match.end():]:
+        return None
+    window = match.group(1)
+    # Потерянный исход важнее класса транспорта: запись могла выполниться.
+    if _CLIENT_UNKNOWN_STATE.search(text) and window != 'permission':
+        return UNKNOWN_STATE
+    if window == 'not_found' and _UNKNOWN_TOOL_TEXT.search(text[:match.start()]):
+        return UNKNOWN_TOOL
+    if window in WINDOW_CLASS:
+        return WINDOW_CLASS[window]
+    # «unknown» и будущие классы окна: ошибка объявлена, класс — по сигнатуре.
+    return _signature_class(text[:min(match.start(), _ENVELOPE_HEAD)])
 
 
 # Имена типов исключений, которые заведомо являются временными сбоями транспорта.
@@ -290,14 +383,51 @@ def budget_exhausted_message(call: dict, errors, turn: int | None = None) -> Too
         name=call.get('name'), tool_call_id=call.get('id') or 'unknown', status='error')
 
 
+def effective_class(failure_class: str, name: str | None = None) -> str:
+    """Для не-идемпотентного вызова (write или неизвестный) временный сбой — это
+    неизвестный исход: подсказка «повтори» могла бы продублировать эффект."""
+    if failure_class == TRANSIENT and name is not None and not is_idempotent(name):
+        return UNKNOWN_STATE
+    return failure_class
+
+
+#: Предел строк корректирующей заметки (один шаг — не больше нескольких вызовов).
+NOTE_LIMIT = 5
+
+
+def recovery_note(failures) -> str:
+    """Короткая system-заметка следующему шагу модели об отказах прошлого шага.
+
+    По образцу LangGraph ToolNode (handle_tool_errors: «Error: … Please fix your
+    mistakes.») и вербальной рефлексии Reflexion: модель видит класс и политику
+    отказа до того, как напишет ответ владельцу. '' — отказов не было.
+    """
+    lines = []
+    for entry in failures or ():
+        if not isinstance(entry, dict):
+            continue
+        tool, failure_class = entry.get('tool'), entry.get('class')
+        if not isinstance(tool, str) or failure_class not in POLICY_HINT:
+            continue
+        failure_class = effective_class(failure_class, tool)
+        attempt = entry.get('attempt')
+        policy = ('бюджет попыток исчерпан: не повторяй, доложи владельцу проверенное и точный блокер'
+                  if type(attempt) is int and attempt >= ATTEMPT_BUDGET else POLICY_HINT[failure_class])
+        lines.append(f'- {tool[:80]}: tau_class={failure_class}; {policy}.')
+    if not lines:
+        return ''
+    return ('TOOL_ERROR_RECOVERY_NOTE. Прошлый вызов инструмента отказал:\n'
+            + '\n'.join(lines[:NOTE_LIMIT])
+            + '\nСледуй политике класса до ответа владельцу; одинаковый вызов без изменений не повторяй.')
+
+
 def annotate_failure(content: str, failure_class: str, name: str | None = None) -> str:
     """Класс и детерминированная политика поверх текста отказа внешнего вызова.
 
     Для не-идемпотентного вызова (write или неизвестный) временный сбой — это
     неизвестный исход: подсказка «повтори» могла бы продублировать эффект.
     """
-    if failure_class == TRANSIENT and name is not None and not is_idempotent(name):
-        failure_class = UNKNOWN_STATE
+    failure_class = effective_class(failure_class, name)
     hint = POLICY_HINT.get(failure_class)
     if not hint:
         return content
