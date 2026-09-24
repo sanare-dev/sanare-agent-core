@@ -17,11 +17,21 @@
 выбираются. Длинные сводки до 30 тысяч символов допускаются только как
 кандидаты на проверку.
 
+Четвёртый источник — поле `chat_message.context_summary` из **закрытого снимка**
+SQLite Open WebUI. Импортёр читает только это поле и идентификаторы сообщений;
+`content`, `output` и таблица `chat` не читаются. Путь к снимку передаётся явно
+через `--openwebui-db`. Живую базу с незавершёнными WAL-записями не использовать:
+режим SQLite `immutable` намеренно читает только согласованный снимок.
+Проверенные локальные снимки за 17–20 сентября содержали 0 заполненных
+`context_summary`; это адаптер для будущих сводок, а не заявление об уже
+импортированных чатах Open WebUI.
+
 ```sh
 python3 tools/import_compactions.py --dry-run
 python3 tools/import_compactions.py
 python3 tools/import_compactions.py --source kimi --dry-run
 python3 tools/import_compactions.py --source claude --dry-run
+python3 tools/import_compactions.py --source openwebui --openwebui-db /путь/к/снимку/webui.db --dry-run
 python3 -m unittest discover -s tools -p 'test_import_compactions.py'
 ```
 
@@ -38,8 +48,8 @@ SHA-256 от `(source_kind, thread_id, compaction_id, source_sha256)`; повт�
 текст выжимки, и она не записывается в `/memories/` либо Engram. Этот предел
 сохраняет правило «сырые чаты остаются на месте» и не делает новую базу
 источником истины. Последующая поставка должна добавить контролируемое
-принятие кандидата с квитанцией и затем адаптеры Msty, Codex и
-Open WebUI. В проверенных локальных Codex JSONL сжатие хранится в
+принятие кандидата с квитанцией и затем адаптеры Msty и Codex.
+В проверенных локальных Codex JSONL сжатие хранится в
 `encrypted_content`, а не в доступной текстовой выжимке; нельзя выдавать его
 за готовый импорт. Рабочие `.db` Msty содержат knowledge stacks, а не
 таблицу чатов. Отдельный `Backups/automatic-context-*.sqlite` содержит

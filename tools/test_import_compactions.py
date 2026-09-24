@@ -2,10 +2,11 @@
 
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
-from import_compactions import extract_candidates, stage, stage_claude, stage_kimi
+from import_compactions import extract_candidates, stage, stage_claude, stage_kimi, stage_openwebui
 
 
 THREAD_ID = "11111111-2222-4333-8444-555555555555"
@@ -163,6 +164,49 @@ class ImportCompactionsTests(unittest.TestCase):
         }) + "\n")
         (root / "linked").symlink_to(outside, target_is_directory=True)
         self.assertEqual(stage_claude(root, self.pending)["candidates"], 0)
+
+    def test_openwebui_stages_only_saved_context_summary(self):
+        database = self.root / "webui.db"
+        message_id = "msg_" + "a" * 69
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TABLE chat_message (id TEXT, chat_id TEXT, updated_at INTEGER, "
+                "context_summary TEXT, content TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO chat_message VALUES (?, ?, ?, ?, ?)",
+                (message_id, THREAD_ID, 1790200000, "Выжимка контекста.", "Сырая переписка"),
+            )
+            connection.execute(
+                "INSERT INTO chat_message VALUES (?, ?, ?, ?, ?)",
+                ("33333333-4444-4555-8666-777777777777", THREAD_ID,
+                 1790200000, None, "Другое сообщение"),
+            )
+        self.assertEqual(stage_openwebui(database, self.pending)["new"], 1)
+        payload = json.loads(next(self.pending.glob("*.json")).read_text())
+        self.assertEqual(payload["source_kind"], "openwebui")
+        self.assertEqual(payload["summary"], "Выжимка контекста.")
+        self.assertNotIn("Сырая переписка", json.dumps(payload))
+        self.assertEqual(stage_openwebui(database, self.pending)["existing"], 1)
+
+    def test_openwebui_skips_sensitive_and_old_schema(self):
+        database = self.root / "webui.db"
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TABLE chat_message (id TEXT, chat_id TEXT, updated_at INTEGER, "
+                "context_summary TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO chat_message VALUES (?, ?, ?, ?)",
+                ("22222222-3333-4444-8555-666666666666", THREAD_ID,
+                 1790200000, "password = hidden-value"),
+            )
+        self.assertEqual(stage_openwebui(database, self.pending)["candidates"], 0)
+        database.unlink()
+        with sqlite3.connect(database) as connection:
+            connection.execute("CREATE TABLE chat_message (id TEXT, content TEXT)")
+        self.assertEqual(stage_openwebui(database, self.pending)["candidates"], 0)
+        self.assertEqual(list(self.pending.glob("*.json")), [])
 
 
 if __name__ == "__main__":

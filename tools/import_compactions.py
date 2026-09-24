@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import stat
 
 
@@ -22,6 +23,7 @@ DEFAULT_KIMI = (Path.home() / "Library/Application Support/kimi-desktop/daimon-s
 DEFAULT_CLAUDE = Path.home() / ".claude/projects"
 DEFAULT_PENDING = Path.home() / "Library/Application Support/SanareOrchestrator/owner-inbox/pending"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+OPENWEBUI_MESSAGE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 SENSITIVE = re.compile(
     r"(?:-----BEGIN [A-Z ]+PRIVATE KEY-----|\b(?:api[_ -]?key|password|passwd|secret|token)\s*[:=]\s*\S+|"
     r"\bBearer\s+[A-Za-z0-9._~+/-]{12,}|\bsk-[A-Za-z0-9_-]{16,}|"
@@ -305,15 +307,68 @@ def stage_claude(root: Path, pending: Path, *, dry_run: bool = False) -> dict[st
     return counts
 
 
+def stage_openwebui(database: Path, pending: Path, *, dry_run: bool = False) -> dict[str, int]:
+    """Stage only saved context summaries from an Open WebUI SQLite snapshot."""
+    counts = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
+    if database.is_symlink() or not database.is_file():
+        return counts
+    _prepare_pending(pending, dry_run)
+    try:
+        # Immutable mode reads a consistent, closed snapshot and never writes
+        # SQLite sidecar files into the source directory.
+        connection = sqlite3.connect(database.as_uri() + "?mode=ro&immutable=1", uri=True)
+        with connection:
+            rows = connection.execute(
+                "SELECT id, chat_id, updated_at, context_summary "
+                "FROM chat_message WHERE context_summary IS NOT NULL"
+            )
+            counts["files"] = 1
+            for message_id, chat_id, timestamp, summary in rows:
+                if (not isinstance(message_id, str) or not OPENWEBUI_MESSAGE_ID.fullmatch(message_id) or
+                        not isinstance(chat_id, str) or not UUID.fullmatch(chat_id) or
+                        not isinstance(summary, str) or not summary.strip() or
+                        len(summary) > MAX_SUMMARY_CHARS or SENSITIVE.search(summary) or
+                        not isinstance(timestamp, int) or timestamp < 1_500_000_000):
+                    continue
+                try:
+                    observed_at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+                except (ValueError, OverflowError, OSError):
+                    continue
+                candidate = Candidate(
+                    schema=1,
+                    status="pending_review",
+                    source_kind="openwebui",
+                    source=f"openwebui://chat/{chat_id}#message={message_id}",
+                    thread_id=chat_id,
+                    compaction_id=message_id,
+                    source_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+                    observed_at=observed_at,
+                    summary=summary,
+                )
+                _stage_candidate(candidate, pending, counts, dry_run)
+    except sqlite3.Error:
+        # The source may be an older Open WebUI schema or a broken snapshot.
+        # Never fall back to raw chat text.
+        return counts
+    finally:
+        if "connection" in locals():
+            connection.close()
+    return counts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--threads", type=Path, default=DEFAULT_THREADS)
     parser.add_argument("--kimi-root", type=Path, default=DEFAULT_KIMI)
     parser.add_argument("--claude-root", type=Path, default=DEFAULT_CLAUDE)
+    parser.add_argument("--openwebui-db", type=Path,
+                        help="closed Open WebUI SQLite snapshot with chat_message.context_summary")
     parser.add_argument("--pending", type=Path, default=DEFAULT_PENDING)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--source", choices=("all", "braindesk", "kimi", "claude"), default="all")
+    parser.add_argument("--source", choices=("all", "braindesk", "kimi", "claude", "openwebui"), default="all")
     options = parser.parse_args()
+    if options.source == "openwebui" and options.openwebui_db is None:
+        parser.error("--source openwebui requires --openwebui-db")
     result = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
     for source, run in (("braindesk", lambda: stage(options.threads, options.pending, dry_run=options.dry_run)),
                         ("kimi", lambda: stage_kimi(options.kimi_root, options.pending, dry_run=options.dry_run)),
@@ -322,6 +377,10 @@ def main() -> int:
             counts = run()
             for key, value in counts.items():
                 result[key] += value
+    if options.openwebui_db is not None and options.source in ("all", "openwebui"):
+        counts = stage_openwebui(options.openwebui_db, options.pending, dry_run=options.dry_run)
+        for key, value in counts.items():
+            result[key] += value
     result["at"] = datetime.now(timezone.utc).isoformat()
     print(json.dumps(result, sort_keys=True))
     return 0
