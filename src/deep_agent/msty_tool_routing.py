@@ -28,7 +28,7 @@ MAX_SELECTED_TOOLS = 28
 _CONTINUATION_VERB = re.compile(
     r"(?is)\b(?:да+|ok|ок(?:ей)?|продолж\w*|сдела\w*|делай(?:те)?|доделыв\w*|доделай|"
     r"исправ\w*|почин\w*|чини|фикс\w*|правь|перенастра\w*|довед\w*|доводи|заверш\w*|"
-    r"впер[её]д|дальше|реша\w*|решай(?:те)?)\b"
+    r"впер[её]д|дальше|реша\w*|решай(?:те)?|реши(?:те|ть)?)\b"
 )
 MAX_CONTINUATION_CHARS = 64
 _INCIDENT = re.compile(
@@ -218,6 +218,31 @@ _ORG_TOOLS = frozenset({"org_structure", "delegate", "delegate_many", "review"})
 # and the connector finder are always at hand for a working turn, whatever
 # the words («решай проблему» routed to route_request + system_map only).
 _WINDOW_TOOLS = frozenset({"connector_search", "connector_propose"})
+# Remote Windows servers over the window's SSH connector (ssh-mcp, brain-desk
+# #343): live 24.09 «подключись и реши вопрос» about Crin-Barbu got no SSH
+# schemas — the router had no remote domain, and the owner's short follow-up
+# carried no server word. The thread's recent turns count too.
+_SSH_TOOLS = frozenset({
+    "list-connections", "list-sessions", "open-session", "close-session",
+    "read-session-output", "read-command", "run-command", "privileged-command",
+    "signal-process", "sftp-upload", "sftp-download", "sftp-list",
+    "sftp-upload-file", "sftp-download-file"})
+_REMOTE = re.compile(
+    r"(?is)(?:\bssh\b|сервер|server|windows|винд|rdp|powershell|удал[её]нн\w*\s+(?:рабоч|доступ|машин)|"
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b|crin|sanare-uk|подкл\w*\s+к\s+сервер)")
+
+
+def _recent_user_text(messages: list[Any], turns: int = 4) -> str:
+    """The latest few owner turns: a short «сделай» continues their subject."""
+    texts: list[str] = []
+    for message in reversed(messages):
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "type", None)
+        if role in ("user", "human"):
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+            texts.append(_content_text(content))
+            if len(texts) >= turns:
+                break
+    return "\n".join(texts)
 # Which tools survive the MAX_SELECTED_TOOLS cap must not depend on the order
 # Msty happens to send its schemas in: the same request would otherwise get a
 # working toolset or a crippled one at random. Rank by what the step needs
@@ -505,6 +530,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         if _from_brain_desk(messages):
             chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
             chosen.discard("msty_project_resolve")
+            if _REMOTE.search(_recent_user_text(messages)):
+                chosen.update(_SSH_TOOLS & available.keys())
     else:
         domains = _domains(text)
         intent = _intent(text, domains)
@@ -542,11 +569,18 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
             if intent == "direct":
                 intent = "read"
 
+        # A server thread in the window is work even when the owner's words are
+        # short or misspelt («подклбчи и сдеай»).
+        if (intent == "direct" and _from_brain_desk(messages)
+                and _REMOTE.search(_recent_user_text(messages))):
+            intent = "read"
         if intent != "direct":
             chosen.update(_ORG_TOOLS & available.keys())
             if _from_brain_desk(messages):
                 chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
                 chosen.discard("msty_project_resolve")
+                if _REMOTE.search(_recent_user_text(messages)):
+                    chosen.update(_SSH_TOOLS & available.keys())
             # The generic task contract verifies explicit local artifact files.
             # Service-specific executors (site, Pressable, Supabase and Brain
             # self-improvement) have their own receipts and verification. Giving
