@@ -7,11 +7,16 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def root_tests():
+    """Standalone offline regressions kept outside the shared unit_tests tree."""
+    return sorted(ROOT.glob('tests/test_*.py'))
+
 def fingerprint():
     # Dependency locks, executable release/eval helpers, fixtures and active
     # instructions affect the release too. Never recurse into .env, .git or venv.
     paths = sorted(set([
         *ROOT.glob('src/**/*.py'), *ROOT.glob('tests/unit_tests/**/*.py'),
+        *root_tests(),
         *ROOT.glob('tools/**/*.py'), *ROOT.glob('tools/**/*.json'),
         *ROOT.glob('tools/**/*.md'), *ROOT.glob('.github/workflows/*.yml'),
         ROOT/'langgraph.json', ROOT/'pyproject.toml', ROOT/'uv.lock',
@@ -25,7 +30,8 @@ def fingerprint():
 
 def main():
     before = fingerprint()
-    result = subprocess.run([sys.executable, '-m', 'pytest', '-q', 'tests/unit_tests'], cwd=ROOT)
+    result = subprocess.run([sys.executable, '-m', 'pytest', '-q', 'tests/unit_tests',
+                             *(str(path.relative_to(ROOT)) for path in root_tests())], cwd=ROOT)
     after = fingerprint()
     passed = result.returncode == 0 and before == after
     print(json.dumps({'passed': passed, 'source_sha256': after,

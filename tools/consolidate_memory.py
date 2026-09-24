@@ -16,13 +16,14 @@ MSTY_RECENT_CONVERSATIONS=on and the bridge admitting native_recent_conversation
 
     uv run python tools/consolidate_memory.py [--dry-run]
 
-Prints one JSON line; never prints the API key or the answer beyond 300 chars.
+Prints one JSON line with status and usage, never the API key or answer text.
 """
 import argparse
 import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import time
 import urllib.error
@@ -83,8 +84,18 @@ def summarize(response: dict, seconds: float) -> dict:
     choice = (response.get('choices') or [{}])[0]
     return {'status': 'completed', 'seconds': round(seconds, 1),
             'finish_reason': choice.get('finish_reason'), 'usage': response.get('usage'),
-            'usage_stages': response.get('sanare_usage_stages'),
-            'answer': ((choice.get('message') or {}).get('content') or '')[:300]}
+            'usage_stages': response.get('sanare_usage_stages')}
+
+
+def protect_log_stream(stream) -> None:
+    """Keep launchd log files private even when created with a permissive umask."""
+    try:
+        fd = stream.fileno()
+        mode = os.fstat(fd).st_mode
+    except (AttributeError, OSError, ValueError):
+        return  # Test capture streams may have no file descriptor.
+    if stat.S_ISREG(mode):
+        os.fchmod(fd, 0o600)  # Abort before any output if permissions cannot be secured.
 
 
 def run(dry_run: bool = False, brain_stop=None, sender=send, key_reader=bridge_key) -> dict:
@@ -106,6 +117,8 @@ def run(dry_run: bool = False, brain_stop=None, sender=send, key_reader=bridge_k
 
 
 def main() -> int:
+    protect_log_stream(sys.stdout)
+    protect_log_stream(sys.stderr)
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--dry-run', action='store_true', help='check stop only, send nothing')
     result = run(parser.parse_args().dry_run)
