@@ -22,7 +22,7 @@ REGISTRY_FIELDS = {
 
 
 def _present(value: object) -> bool:
-    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _date(value: object) -> datetime | None:
@@ -42,7 +42,7 @@ def audit_registry(path: Path, cutoff: datetime) -> dict[str, object]:
     if not path.is_file():
         return {"state": "unavailable", "reason": "source_missing"}
     try:
-        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        uri = f"{path.resolve().as_uri()}?mode=ro"
         with closing(sqlite3.connect(uri, uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             tables = {
@@ -111,7 +111,8 @@ def audit_documents(path: Path) -> dict[str, object]:
         ):
             if not _present(item.get(key)):
                 counts[output_key] += 1
-        if item.get("status") in {"inventory_only", "existing_unreviewed"}:
+        status = item.get("status")
+        if isinstance(status, str) and status in {"inventory_only", "existing_unreviewed"}:
             counts["inventory_or_unreviewed"] += 1
     return {"state": "observed", "counts": counts}
 

@@ -89,3 +89,19 @@ def test_schema_mismatch_is_unknown(tmp_path: Path) -> None:
     )
     assert report["registry"]["reason"] == "schema_mismatch"
     assert report["documents"]["reason"] == "schema_mismatch"
+
+
+def test_malformed_document_field_is_counted_without_crashing(tmp_path: Path) -> None:
+    documents = tmp_path / "documents.json"
+    documents.write_text(
+        json.dumps({"documents": [{"path": "entry", "status": []}]}), encoding="utf-8"
+    )
+    report = build_report(
+        tmp_path / "missing.sqlite",
+        documents,
+        as_of=datetime(2026, 9, 24, tzinfo=timezone.utc),
+        max_age_days=30,
+    )
+    assert report["documents"]["counts"]["inventory_or_unreviewed"] == 0
+    assert report["documents"]["counts"]["missing_status"] == 1
+    assert report["documents"]["counts"]["missing_hash"] == 1
