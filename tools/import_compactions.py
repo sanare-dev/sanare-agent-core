@@ -19,6 +19,7 @@ import stat
 DEFAULT_THREADS = Path.home() / "Library/Application Support/BrainDesk/threads"
 DEFAULT_KIMI = (Path.home() / "Library/Application Support/kimi-desktop/daimon-share/daimon/"
                 "runtime/kimi-code/home/sessions")
+DEFAULT_CLAUDE = Path.home() / ".claude/projects"
 DEFAULT_PENDING = Path.home() / "Library/Application Support/SanareOrchestrator/owner-inbox/pending"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SENSITIVE = re.compile(
@@ -166,11 +167,8 @@ def stage(threads: Path, pending: Path, *, dry_run: bool = False) -> dict[str, i
     return counts
 
 
-def extract_kimi_candidates(path: Path, root: Path) -> list[Candidate]:
-    if path.name != "wire.jsonl":
-        return []
+def _read_jsonl_lines(path: Path) -> list[bytes]:
     try:
-        relative = path.relative_to(root)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as input_file:
             metadata = os.fstat(input_file.fileno())
@@ -179,12 +177,21 @@ def extract_kimi_candidates(path: Path, root: Path) -> list[Candidate]:
             raw = input_file.read(MAX_THREAD_BYTES + 1)
         if len(raw) > MAX_THREAD_BYTES:
             return []
-        lines = raw.splitlines()
-    except (OSError, ValueError):
+        return raw.splitlines()
+    except OSError:
+        return []
+
+
+def extract_kimi_candidates(path: Path, root: Path) -> list[Candidate]:
+    if path.name != "wire.jsonl":
+        return []
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
         return []
     session_id = hashlib.sha256(str(relative.parent).encode("utf-8")).hexdigest()
     found: list[Candidate] = []
-    for ordinal, raw_line in enumerate(lines, start=1):
+    for ordinal, raw_line in enumerate(_read_jsonl_lines(path), start=1):
         if len(raw_line) > 1_000_000 or b'"context.apply_compaction"' not in raw_line:
             continue
         try:
@@ -229,17 +236,75 @@ def stage_kimi(root: Path, pending: Path, *, dry_run: bool = False) -> dict[str,
     return counts
 
 
+def extract_claude_candidates(path: Path, root: Path) -> list[Candidate]:
+    if path.suffix != ".jsonl" or path.parent.parent != root:
+        return []
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return []
+    session_id = hashlib.sha256(str(relative).encode("utf-8")).hexdigest()
+    found: list[Candidate] = []
+    for ordinal, raw_line in enumerate(_read_jsonl_lines(path), start=1):
+        if len(raw_line) > 1_000_000 or b'"isCompactSummary"' not in raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except (UnicodeError, json.JSONDecodeError):
+            continue
+        if (not isinstance(event, dict) or event.get("type") != "user" or
+                event.get("isCompactSummary") is not True):
+            continue
+        message = event.get("message")
+        summary = message.get("content") if isinstance(message, dict) else None
+        observed_at = event.get("timestamp")
+        if (not isinstance(summary, str) or not summary.strip() or
+                len(summary) > 30_000 or SENSITIVE.search(summary) or
+                not isinstance(observed_at, str)):
+            continue
+        try:
+            datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        found.append(Candidate(
+            schema=1,
+            status="pending_review",
+            source_kind="claude",
+            source=f"claude://{relative.as_posix()}#compaction={ordinal}",
+            thread_id=session_id,
+            compaction_id=str(ordinal),
+            source_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+            observed_at=observed_at,
+            summary=summary,
+        ))
+    return found
+
+
+def stage_claude(root: Path, pending: Path, *, dry_run: bool = False) -> dict[str, int]:
+    counts = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
+    if not root.is_dir() or root.is_symlink():
+        return counts
+    _prepare_pending(pending, dry_run)
+    for path in root.glob("*/*.jsonl"):
+        counts["files"] += 1
+        for candidate in extract_claude_candidates(path, root):
+            _stage_candidate(candidate, pending, counts, dry_run)
+    return counts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--threads", type=Path, default=DEFAULT_THREADS)
     parser.add_argument("--kimi-root", type=Path, default=DEFAULT_KIMI)
+    parser.add_argument("--claude-root", type=Path, default=DEFAULT_CLAUDE)
     parser.add_argument("--pending", type=Path, default=DEFAULT_PENDING)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--source", choices=("all", "braindesk", "kimi"), default="all")
+    parser.add_argument("--source", choices=("all", "braindesk", "kimi", "claude"), default="all")
     options = parser.parse_args()
     result = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
     for source, run in (("braindesk", lambda: stage(options.threads, options.pending, dry_run=options.dry_run)),
-                        ("kimi", lambda: stage_kimi(options.kimi_root, options.pending, dry_run=options.dry_run))):
+                        ("kimi", lambda: stage_kimi(options.kimi_root, options.pending, dry_run=options.dry_run)),
+                        ("claude", lambda: stage_claude(options.claude_root, options.pending, dry_run=options.dry_run))):
         if options.source in ("all", source):
             counts = run()
             for key, value in counts.items():

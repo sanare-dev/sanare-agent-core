@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from import_compactions import extract_candidates, stage, stage_kimi
+from import_compactions import extract_candidates, stage, stage_claude, stage_kimi
 
 
 THREAD_ID = "11111111-2222-4333-8444-555555555555"
@@ -122,6 +122,34 @@ class ImportCompactionsTests(unittest.TestCase):
         wire.unlink()
         wire.symlink_to(self.write_thread(thread("Чужой файл.")))
         self.assertEqual(stage_kimi(root, self.pending)["candidates"], 0)
+
+    def test_claude_stages_only_marked_compaction(self):
+        root = self.root / "claude" / "projects"
+        session = root / "project-1" / "session.jsonl"
+        session.parent.mkdir(parents=True)
+        events = [
+            {"type": "user", "message": {"content": "Сырая реплика"}},
+            {"type": "system", "subtype": "compact_boundary"},
+            {"type": "user", "isCompactSummary": True,
+             "message": {"content": "Выжимка: принято решение."},
+             "timestamp": "2026-09-24T01:00:00Z"},
+        ]
+        session.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+        self.assertEqual(stage_claude(root, self.pending)["new"], 1)
+        payload = json.loads(next(self.pending.glob("*.json")).read_text())
+        self.assertEqual(payload["source_kind"], "claude")
+        self.assertEqual(payload["summary"], "Выжимка: принято решение.")
+        self.assertNotIn("Сырая реплика", json.dumps(payload))
+        self.assertEqual(stage_claude(root, self.pending)["existing"], 1)
+
+    def test_claude_skips_unmarked_and_sensitive_compaction(self):
+        root = self.root / "claude" / "projects"
+        session = root / "project-1" / "session.jsonl"
+        session.parent.mkdir(parents=True)
+        session.write_text(json.dumps({"type": "user", "isCompactSummary": True,
+                                       "message": {"content": "owner@example.com"},
+                                       "timestamp": "2026-09-24T01:00:00Z"}) + "\n")
+        self.assertEqual(stage_claude(root, self.pending)["candidates"], 0)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# Входящие Brain: локальные выжимки Brain Desk и Kimi (#72)
+# Входящие Brain: локальные выжимки Brain Desk, Kimi и Claude (#72)
 
 Первый источник для общего входящего потока — уже созданные мостом выжимки
 длинных чатов (#49). `import_compactions.py` выполняется **только на Mac**:
@@ -12,10 +12,16 @@
 попадают. Полная переписка и вложения остаются на месте. В stdout идут только
 счётчики. Модели и внешние API не вызываются.
 
+Третий источник — помеченные `isCompactSummary: true` сводки Claude Code
+в `~/.claude/projects/*/*.jsonl`. Записи подагентов и обычные сообщения не
+выбираются. Длинные сводки до 30 тысяч символов допускаются только как
+кандидаты на проверку.
+
 ```sh
 python3 tools/import_compactions.py --dry-run
 python3 tools/import_compactions.py
 python3 tools/import_compactions.py --source kimi --dry-run
+python3 tools/import_compactions.py --source claude --dry-run
 python3 -m unittest discover -s tools -p 'test_import_compactions.py'
 ```
 
@@ -32,7 +38,7 @@ SHA-256 от `(source_kind, thread_id, compaction_id, source_sha256)`; повт�
 текст выжимки, и она не записывается в `/memories/` либо Engram. Этот предел
 сохраняет правило «сырые чаты остаются на месте» и не делает новую базу
 источником истины. Последующая поставка должна добавить контролируемое
-принятие кандидата с квитанцией и затем адаптеры Msty, Codex, Claude и
+принятие кандидата с квитанцией и затем адаптеры Msty, Codex и
 Open WebUI. В проверенных локальных Codex JSONL сжатие хранится в
 `encrypted_content`, а не в доступной текстовой выжимке; нельзя выдавать его
 за готовый импорт. У Msty найденные `.db` содержат knowledge stacks, а не
