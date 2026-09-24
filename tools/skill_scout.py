@@ -12,8 +12,10 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -23,7 +25,7 @@ from urllib.request import Request, urlopen
 API_BASE = "https://api.github.com"
 SOURCES = (
     ("anthropics/skills", "skills/"),
-    ("openai/skills", "skills/"),
+    ("openai/skills", "skills/.curated/"),
     ("openclaw/agent-skills", "skills/"),
     ("NousResearch/hermes-agent", "skills/"),
 )
@@ -83,7 +85,8 @@ class SourceSnapshot:
 
 def _safe_text(value: object, limit: int = 180) -> str:
     text = value if isinstance(value, str) else ""
-    return re.sub(r"[\x00-\x1f\x7f]", " ", text).strip()[:limit]
+    text = "".join(" " if unicodedata.category(char) in {"Cc", "Cf"} else char for char in text)
+    return text.strip()[:limit]
 
 
 def _frontmatter(markdown: str) -> tuple[str, str]:
@@ -106,7 +109,7 @@ def _contents(client: GitHubClient, repo: str, path: str, commit: str) -> str:
     if response.get("encoding") != "base64" or not isinstance(response.get("content"), str):
         raise ScoutError("SKILL.md content unavailable")
     try:
-        raw = base64.b64decode(response["content"], validate=False)
+        raw = base64.b64decode("".join(response["content"].split()), validate=True)
         if len(raw) > MAX_SKILL_BYTES:
             raise ScoutError("SKILL.md exceeds size limit")
         return raw.decode("utf-8")
@@ -155,7 +158,7 @@ def scout(client: GitHubClient, *, per_source: int = 5, max_cards: int = 20) -> 
         try:
             snapshot = _source(client, repo, root)
             paths = [path for path in snapshot.paths if path.endswith("/SKILL.md")
-                     and not any(part.startswith(".") for part in path.split("/"))]
+                     and not any(part.startswith(".") for part in path[len(root):].split("/"))]
             ranked = sorted(paths, key=lambda path: (-len(_matches(path)), path))
             sources.append({"repo": repo, "commit": snapshot.commit,
                             "pushed_at": snapshot.pushed_at, "skills_found": len(paths)})
@@ -177,7 +180,8 @@ def scout(client: GitHubClient, *, per_source: int = 5, max_cards: int = 20) -> 
                     "task": task_matches[0], "name": name or path.split("/")[-2],
                     "description": description or "Описание в frontmatter недоступно",
                     "source": repo, "path": path, "commit": snapshot.commit,
-                    "url": f"https://github.com/{repo}/blob/{snapshot.commit}/{path}",
+                    "repo_pushed_at": snapshot.pushed_at,
+                    "url": f"https://github.com/{repo}/blob/{snapshot.commit}/{quote(path, safe='/')}",
                     "license": "needs_per_skill_review" if local_license else snapshot.repo_license,
                     "license_scope": "skill_file" if local_license else "repository_only",
                     "risk": "Есть scripts; нужен просмотр кода" if has_scripts else
@@ -194,19 +198,21 @@ def scout(client: GitHubClient, *, per_source: int = 5, max_cards: int = 20) -> 
 
 
 def markdown_report(result: dict[str, Any]) -> str:
+    def safe(value: object) -> str:
+        return re.sub(r"([\\|\[\]()])", r"\\\1", str(value)).replace("\n", " ")
+
     rows = ["# Кандидаты навыков Brain", "",
             "Только публичные метаданные; навыки не установлены и не запускались.", "",
-            "| Задача владельца | Навык | Источник | Лицензия | Риск и тест |",
-            "| --- | --- | --- | --- | --- |"]
+            "| Задача владельца | Навык | Источник | Обновлено | Лицензия | Риск и тест |",
+            "| --- | --- | --- | --- | --- | --- |"]
     for card in result["candidates"]:
-        safe = lambda value: str(value).replace("|", "\\|").replace("\n", " ")
         rows.append(f"| {safe(card['task'])} | [{safe(card['name'])}]({card['url']}) | "
-                    f"{safe(card['source'])}@{card['commit'][:8]} | {safe(card['license'])} "
+                    f"{safe(card['source'])}@{card['commit'][:8]} | {safe(card['repo_pushed_at'])} | {safe(card['license'])} "
                     f"({safe(card['license_scope'])}) | {safe(card['risk'])}; тест не запускался |")
     if result["errors"]:
         rows.extend(["", "## Неполные источники", ""])
         for error in result["errors"]:
-            rows.append(f"- {error['source']}: {error['error']}")
+            rows.append(f"- {safe(error['source'])}: {safe(error['error'])}")
     return "\n".join(rows) + "\n"
 
 
@@ -214,10 +220,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     parser.add_argument("--per-source", type=int, default=5)
+    parser.add_argument("--from-json", type=Path, help="render an existing report without network access")
     args = parser.parse_args(argv)
     if not 1 <= args.per_source <= 10:
         parser.error("--per-source must be 1..10")
-    result = scout(GitHubClient(os.environ.get("GITHUB_TOKEN")), per_source=args.per_source)
+    if args.from_json:
+        if args.from_json.stat().st_size > 1_000_000:
+            parser.error("report exceeds size limit")
+        result = json.loads(args.from_json.read_text())
+        if not isinstance(result, dict) or result.get("schema") != 1:
+            parser.error("invalid report schema")
+    else:
+        result = scout(GitHubClient(os.environ.get("GITHUB_TOKEN")), per_source=args.per_source)
     print(markdown_report(result) if args.format == "markdown" else
           json.dumps(result, ensure_ascii=False, indent=2))
     return 2 if result["errors"] else 0
