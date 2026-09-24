@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from import_compactions import extract_candidates, stage
+from import_compactions import extract_candidates, stage, stage_kimi
 
 
 THREAD_ID = "11111111-2222-4333-8444-555555555555"
@@ -93,6 +93,35 @@ class ImportCompactionsTests(unittest.TestCase):
         with path.open("ab") as output:
             output.truncate(64 * 1024 * 1024 + 1)
         self.assertEqual(extract_candidates(path), [])
+
+    def test_kimi_stages_only_existing_compaction_summary(self):
+        root = self.root / "kimi" / "sessions"
+        wire = root / "conversation-1" / "agents" / "main" / "wire.jsonl"
+        wire.parent.mkdir(parents=True)
+        events = [
+            {"type": "turn.prompt", "input": "Полная переписка не копируется"},
+            {"type": "context.apply_compaction", "summary": "Вывод: проект принят.",
+             "contextSummary": "Другой текст", "time": 1790200000000},
+        ]
+        wire.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+        self.assertEqual(stage_kimi(root, self.pending)["new"], 1)
+        payload = json.loads(next(self.pending.glob("*.json")).read_text())
+        self.assertEqual(payload["source_kind"], "kimi")
+        self.assertEqual(payload["summary"], "Вывод: проект принят.")
+        self.assertIn("conversation-1/agents/main/wire.jsonl", payload["source"])
+        self.assertEqual(stage_kimi(root, self.pending)["existing"], 1)
+        self.assertNotIn("Полная переписка", json.dumps(payload))
+
+    def test_kimi_skips_sensitive_and_symlinked_wire(self):
+        root = self.root / "kimi" / "sessions"
+        wire = root / "conversation-1" / "agents" / "main" / "wire.jsonl"
+        wire.parent.mkdir(parents=True)
+        wire.write_text(json.dumps({"type": "context.apply_compaction",
+                                   "summary": "password = hidden-value", "time": 1790200000000}) + "\n")
+        self.assertEqual(stage_kimi(root, self.pending)["candidates"], 0)
+        wire.unlink()
+        wire.symlink_to(self.write_thread(thread("Чужой файл.")))
+        self.assertEqual(stage_kimi(root, self.pending)["candidates"], 0)
 
 
 if __name__ == "__main__":

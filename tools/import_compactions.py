@@ -17,6 +17,8 @@ import stat
 
 
 DEFAULT_THREADS = Path.home() / "Library/Application Support/BrainDesk/threads"
+DEFAULT_KIMI = (Path.home() / "Library/Application Support/kimi-desktop/daimon-share/daimon/"
+                "runtime/kimi-code/home/sessions")
 DEFAULT_PENDING = Path.home() / "Library/Application Support/SanareOrchestrator/owner-inbox/pending"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SENSITIVE = re.compile(
@@ -34,6 +36,7 @@ MAX_SUMMARY_CHARS = 12_000
 class Candidate:
     schema: int
     status: str
+    source_kind: str
     source: str
     thread_id: str
     compaction_id: str
@@ -71,6 +74,7 @@ def _candidate(thread: dict, message: dict) -> Candidate | None:
     return Candidate(
         schema=1,
         status="pending_review",
+        source_kind="braindesk",
         source=f"braindesk://thread/{thread_id}#compaction={compaction_id}",
         thread_id=thread_id,
         compaction_id=compaction_id,
@@ -117,49 +121,129 @@ def extract_candidates(path: Path) -> list[Candidate]:
 
 
 def candidate_name(candidate: Candidate) -> str:
-    key = f"{candidate.thread_id}\0{candidate.compaction_id}\0{candidate.source_sha256}"
+    key = f"{candidate.source_kind}\0{candidate.thread_id}\0{candidate.compaction_id}\0{candidate.source_sha256}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json"
+
+
+def _prepare_pending(pending: Path, dry_run: bool) -> None:
+    if dry_run:
+        return
+    pending.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if pending.is_symlink():
+        raise OSError("pending directory is a symlink")
+    pending.chmod(0o700)
+
+
+def _stage_candidate(candidate: Candidate, pending: Path, counts: dict[str, int], dry_run: bool) -> None:
+    counts["candidates"] += 1
+    target = pending / candidate_name(candidate)
+    if target.exists():
+        counts["existing"] += 1
+        return
+    if dry_run:
+        counts["new"] += 1
+        return
+    payload = json.dumps(asdict(candidate), ensure_ascii=False, indent=2) + "\n"
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        counts["existing"] += 1
+        return
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write(payload)
+    counts["new"] += 1
 
 
 def stage(threads: Path, pending: Path, *, dry_run: bool = False) -> dict[str, int]:
     counts = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
     if not threads.is_dir():
         return counts
-    if not dry_run:
-        pending.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if pending.is_symlink():
-            raise OSError("pending directory is a symlink")
-        pending.chmod(0o700)
+    _prepare_pending(pending, dry_run)
     for path in threads.iterdir():
         counts["files"] += 1
         for candidate in extract_candidates(path):
-            counts["candidates"] += 1
-            target = pending / candidate_name(candidate)
-            if target.exists():
-                counts["existing"] += 1
-                continue
-            if dry_run:
-                counts["new"] += 1
-                continue
-            payload = json.dumps(asdict(candidate), ensure_ascii=False, indent=2) + "\n"
-            try:
-                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError:
-                counts["existing"] += 1
-                continue
-            with os.fdopen(fd, "w", encoding="utf-8") as output:
-                output.write(payload)
-            counts["new"] += 1
+            _stage_candidate(candidate, pending, counts, dry_run)
+    return counts
+
+
+def extract_kimi_candidates(path: Path, root: Path) -> list[Candidate]:
+    if path.name != "wire.jsonl":
+        return []
+    try:
+        relative = path.relative_to(root)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as input_file:
+            metadata = os.fstat(input_file.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_THREAD_BYTES:
+                return []
+            raw = input_file.read(MAX_THREAD_BYTES + 1)
+        if len(raw) > MAX_THREAD_BYTES:
+            return []
+        lines = raw.splitlines()
+    except (OSError, ValueError):
+        return []
+    session_id = hashlib.sha256(str(relative.parent).encode("utf-8")).hexdigest()
+    found: list[Candidate] = []
+    for ordinal, raw_line in enumerate(lines, start=1):
+        if len(raw_line) > 1_000_000 or b'"context.apply_compaction"' not in raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except (UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "context.apply_compaction":
+            continue
+        summary = event.get("summary")
+        timestamp = event.get("time")
+        if (not isinstance(summary, str) or not summary.strip() or
+                len(summary) > MAX_SUMMARY_CHARS or SENSITIVE.search(summary) or
+                not isinstance(timestamp, int) or timestamp < 1_500_000_000_000):
+            continue
+        try:
+            observed_at = datetime.fromtimestamp(timestamp / 1000, timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            continue
+        found.append(Candidate(
+            schema=1,
+            status="pending_review",
+            source_kind="kimi",
+            source=f"kimi://{relative.as_posix()}#compaction={ordinal}",
+            thread_id=session_id,
+            compaction_id=str(ordinal),
+            source_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+            observed_at=observed_at,
+            summary=summary,
+        ))
+    return found
+
+
+def stage_kimi(root: Path, pending: Path, *, dry_run: bool = False) -> dict[str, int]:
+    counts = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
+    if not root.is_dir() or root.is_symlink():
+        return counts
+    _prepare_pending(pending, dry_run)
+    for path in root.rglob("wire.jsonl"):
+        counts["files"] += 1
+        for candidate in extract_kimi_candidates(path, root):
+            _stage_candidate(candidate, pending, counts, dry_run)
     return counts
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--threads", type=Path, default=DEFAULT_THREADS)
+    parser.add_argument("--kimi-root", type=Path, default=DEFAULT_KIMI)
     parser.add_argument("--pending", type=Path, default=DEFAULT_PENDING)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--source", choices=("all", "braindesk", "kimi"), default="all")
     options = parser.parse_args()
-    result = stage(options.threads, options.pending, dry_run=options.dry_run)
+    result = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
+    for source, run in (("braindesk", lambda: stage(options.threads, options.pending, dry_run=options.dry_run)),
+                        ("kimi", lambda: stage_kimi(options.kimi_root, options.pending, dry_run=options.dry_run))):
+        if options.source in ("all", source):
+            counts = run()
+            for key, value in counts.items():
+                result[key] += value
     result["at"] = datetime.now(timezone.utc).isoformat()
     print(json.dumps(result, sort_keys=True))
     return 0
