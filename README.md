@@ -656,6 +656,31 @@ it has seen this attestation (or an attested window limit equal to its
 binding); until then it keeps 180,000 without an owner-visible error, so a
 bridge flag switched on before this graph is live cannot break answers.
 
+## Tool error recovery — 24 September 2026 (brain-desk #309)
+
+Brain Desk executes MCP calls in the window and returns failures as text:
+`Ошибка инструмента: …` (isError), `Инструмент отказал: …` (JSON-RPC error),
+`Результат неизвестен (…)`, `Отклонено/Отказано Brain Desk …`, and — with
+brain-desk #313 — a final paragraph `[Brain Desk · самовосстановление] Класс: X`.
+`msty_taxonomy.classify_tool_text` used to miss these prefixes, so a Supabase
+ZodError (`ref must be exactly 20 characters long` for a guessed project_id)
+counted as success and no TAU policy fired. Now the window class is taken as
+the most reliable signal (validation/not_found → `invalid_args`, or
+`unknown_tool` for a missing tool; transient → `transient`; auth/not_connected
+→ `needs_owner`; permission → `policy_refusal`; a lost outcome → `unknown_state`);
+without the block the envelope prefixes and signatures (ZodError, `-32602`) are
+classified. `needs_owner` and `policy_refusal` are separate from `deterministic`
+because its hint «смени инструмент» would invite bypassing a refusal.
+
+The next model step after a failed call gets a short system note
+`TOOL_ERROR_RECOVERY_NOTE` (tool, class, policy; budget exhausted after 2
+attempts), after LangGraph ToolNode `handle_tool_errors` and Reflexion. Policy
+block `TOOL_ERROR_RECOVERY_V1` (fix and retry before answering, never guess ids,
+call `list_projects` when a remembered id is rejected, reconnect card for
+auth/not_connected, follow «Урок Brain Desk») ships whenever external tools are
+on the wire; it is not an ALWAYS block because the minimal always-loaded prefix
+is capped at 5,500 tokens. Offline tests only; live behaviour is not proven.
+
 ## Context admission — 20 September 2026
 
 The local bridge limits transport to 2 MB after bounded directory-tree previews;

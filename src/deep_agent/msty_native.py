@@ -447,6 +447,18 @@ def _tau_events(messages):
                 yield event
 
 
+def _latest_failures(messages):
+    """Отказы TAU последнего шага: ToolMessage в хвосте истории после ответа модели."""
+    failures = []
+    for message in reversed(messages or ()):
+        if not isinstance(message, ToolMessage):
+            break
+        event = (message.additional_kwargs or {}).get('tau_event')
+        if isinstance(event, dict) and event.get('kind') == 'failure':
+            failures.append(event)
+    return failures[::-1]
+
+
 def _fold_tau(existing, events, kind):
     """Добавить новые события одного типа без повторов по tool_call_id."""
     merged = list(existing or [])
@@ -585,13 +597,18 @@ class NativeMstyMiddleware(AgentMiddleware):
             # static policy first, then append the per-step context, so only the
             # approved policy text is ever a candidate for removal.
             system = msty_prompts.select_policy(
-                system, tool_route, msty.tool_names(protocol_state['tools']))
+                system, tool_route, msty.tool_names(protocol_state['tools']),
+                external_names=msty.tool_names(external))
             # The route prompt says how MANY external tools are visible; this says
             # WHICH, so the model stops reporting a tool as missing when it has it.
             system += '\n\n' + msty.tool_availability_context(protocol_state['tools'])
             system += '\n\n' + route_prompt
             if catalog:
                 system += '\n\n' + catalog
+            # Отказ инструмента на прошлом шаге: класс и политика — до ответа владельцу.
+            note = msty_taxonomy.recovery_note(_latest_failures(request.messages))
+            if note:
+                system += '\n\n' + note
         prior_native = _native_actions(state)
 
         def filter_result(result):

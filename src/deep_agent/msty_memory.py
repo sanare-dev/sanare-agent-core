@@ -60,7 +60,8 @@ amazon_financial_transactions_received, amazon_vcs_rows_received, tax_obligation
 Cross-domain control plane: sanaredev, project_id jthcrehexaatuollcuzg.
 Это стабильный паспорт маршрутизации, поэтому ради определения сайта, репозитория,
 проекта Supabase или известных таблиц не вызывай resolver, memory search,
-list_organizations, list_projects или list_tables. Текущие строки, схема, статусы,
+list_organizations, list_projects или list_tables (если инструмент отклонил
+project_id — вызови list_projects). Текущие строки, схема, статусы,
 commit и deployment не входят в паспорт: для них выполняй один узкий live-запрос
 к уже известному project_id, а перед записью повторно проверяй точную цель.
 
