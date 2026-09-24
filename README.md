@@ -791,3 +791,42 @@ deepagents stays 0.4.11: 0.7.18 requires langchain-core>=1.6.4,
 langchain-anthropic>=1.7.3, langsmith>=0.14 and langchain-google-genai, and adds
 no semantic search to `StoreBackend`; the needed route mapping exists in 0.4.11.
 Offline coverage: `tests/unit_tests/test_msty_candidate_memory.py`, `test_consolidate_memory.py`.
+
+## Swarm (msty-swarm-v1) — 24 September 2026, off by default
+
+Owner request (brain-desk #142): like Kimi Agent Swarm, the lead may split a
+complex divisible task into 2–5 subtasks, each with its own prompt, role and
+cheap executor, run them in parallel and synthesize the result itself.
+Patterns taken: LangGraph `Send` map-reduce (fan-out + `operator.add` reducer),
+deepagents `task` context isolation (only the result goes up), OpenAI Agents SDK
+agents-as-tools (the manager stays in charge), Anthropic's multi-agent research
+(briefs with goal/format/boundaries; effort scaled to complexity; ~15× tokens,
+so single-agent by default). Kimi PARL is RL training of the orchestrator; it is
+not reproduced — our lead decides by instruction.
+
+Native `task` stays disabled (its hidden model calls bypass the bridge ledger).
+Instead `native_swarm` (`msty_swarm.py`) reuses the checkpointed native batch:
+
+1. Offered only when the bridge sets `swarm_protocol=msty-swarm-v1` (lead role,
+   once per owner turn; clients cannot shadow the name).
+2. The batch's `msty_native_continue` interrupt carries a `swarm` descriptor
+   (ids, titles, roles, profiles `deepseek|luna`, `max_tokens` 256–2048 — no
+   prompt text). An invalid plan gets no descriptor and a guard reply, no call.
+3. The bridge reserves one ledger row per subtask (analyst binding of that
+   profile, correlation `swarm_id`/`subtask`, stage `swarm`), checks the swarm
+   cap (`BRAIN_SWARM_CAP_USD`, default $0.50), task cap and stop, and resumes
+   with `swarm_admission` (all subtasks, or rejected with a reason). Missing or
+   foreign admission is a protocol error; rejection lets the lead continue alone.
+4. ToolNode runs a `Send` subgraph: one generation per executor, no tools,
+   75 s timeout, `max_concurrency=5`. Executors never raise (a failed branch
+   would drop the super-step); failures, timeouts and length cut-offs become
+   statuses. Custom `swarm_event` stream events carry measured usage and model
+   identity so the bridge settles each row; no answer text is streamed.
+5. The ToolMessage reports `complete|partial|failed`; a partial swarm carries an
+   explicit instruction not to present it as complete.
+
+Gemini Flash is a bridge-local lane and is not available to the cloud graph.
+Offline coverage: `tests/unit_tests/test_msty_swarm.py` (real Send/ToolNode/
+checkpoint, mocked models). Activation order: deploy this graph, then the
+bridge's `BRAIN_SWARM_ENABLED=1`, then the Brain Desk toggle (brain-desk
+`docs/swarm.md`). Tests are not evidence of deployment or answer quality.

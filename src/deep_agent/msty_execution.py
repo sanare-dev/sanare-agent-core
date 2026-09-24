@@ -168,7 +168,9 @@ def validate_resume(state, resume):
     permitted = {'messages', 'tools', 'tool_choice', 'max_tokens', 'result',
                  'context_budget', 'context_budget_check', 'execution_protocol', 'brain_task_role',
                  'execution_task_id', 'task_budget_binding', 'compaction_protocol', 'text_stream_protocol',
-                 'consult_profile', 'lead_profile'}
+                 'consult_profile', 'lead_profile',
+                 # Рой только предлагает инструмент; допуск всегда даёт мост.
+                 'swarm_protocol'}
     if not isinstance(incoming, dict) or set(incoming) - permitted:
         raise ExecutionProtocolError('Некорректные поля продолжения Msty.')
     if incoming.get('execution_protocol') != PROTOCOL or incoming.get('result') != {}:
