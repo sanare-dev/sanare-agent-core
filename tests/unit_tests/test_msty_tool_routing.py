@@ -441,3 +441,25 @@ def test_window_skill_request_gets_skill_and_source_tools():
     names = {tool["function"]["name"] for tool in selected}
     assert {"skills_find_ready", "skills_save", "search_repositories", "fetch"} <= names
     assert len(names) <= routing.MAX_SELECTED_TOOLS
+
+
+def test_window_skill_catalog_gets_skills_get_on_a_plain_task():
+    # brain-desk #367: the window lists skills (id, name, «когда применять»)
+    # in its system message; a plain task without the word «навык» must still
+    # let the model open the fitting skill with skills_get.
+    extra = ["skills_list", "skills_get", "skills_find_ready", "skills_save"]
+    tools = TOOLS + [schema(n) for n in extra]
+    catalog = {"role": "system", "content": DESK_SYSTEM["content"] + "\n\n[Brain Desk · каталог навыков] …\n"
+               "- msty:taxes-compliance — taxes-compliance: Налоги и сроки."}
+    text = "У моей UK Ltd прибыль £120 000. Посчитай корпоративный налог и сроки CT600."
+    selected, _, _ = routing.select_tools([catalog, {"role": "user", "content": text}], tools)
+    names = {tool["function"]["name"] for tool in selected}
+    assert "skills_get" in names
+    assert "skills_save" not in names  # writes stay on the intent routes
+    # No catalog in the window's system message — no extra schema.
+    selected, _, _ = routing.select_tools([DESK_SYSTEM, {"role": "user", "content": text}], tools)
+    assert "skills_get" not in {tool["function"]["name"] for tool in selected}
+    # Msty without the window mark: the catalog mark alone does nothing.
+    foreign = {"role": "system", "content": "[Brain Desk · каталог навыков] …"}
+    selected, _, _ = routing.select_tools([foreign, {"role": "user", "content": text}], tools)
+    assert "skills_get" not in {tool["function"]["name"] for tool in selected}
