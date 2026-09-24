@@ -249,6 +249,24 @@ _SKILL_WORDS = re.compile(
     r"(?is)(?:навык|скил|скилл|skill|базу?\s+знани|научись|изучи|загрузи\s+себе|набей)")
 
 
+# Brain Desk's skill catalog (brain-desk #367, progressive disclosure as in
+# Anthropic Agent Skills): the window puts only id, name and «когда
+# применять» of every skill into its system message, and the model opens a
+# body with skills_get. Without that schema the catalog is useless — live
+# 24.09 «посчитай корпоративный налог UK Ltd» got Supabase docs search.
+_SKILL_CATALOG_MARK = "[Brain Desk · каталог навыков]"
+_SKILL_OPEN = frozenset({"skills_get"})
+
+
+def _has_skill_catalog(messages: list[Any]) -> bool:
+    for message in messages[:3]:
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "type", None)
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+        if role == "system" and _SKILL_CATALOG_MARK in _content_text(content):
+            return True
+    return False
+
+
 def _recent_user_text(messages: list[Any], turns: int = 4) -> str:
     """The latest few owner turns: a short «сделай» continues their subject."""
     texts: list[str] = []
@@ -717,6 +735,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                 semantic_names = {hit['name'] for hit in semantic['hits']}
                 chosen.update(semantic_names)
 
+    # The window's skill catalog is in context: the model can open a skill.
+    skill_open = (_SKILL_OPEN & available.keys()
+                  if _from_brain_desk(messages) and _has_skill_catalog(messages) else set())
+    chosen.update(skill_open)
+
     historical_calls = _historical_tool_names(messages)
     historical = historical_calls & available.keys()
     # If a native virtual-file attempt was rejected, surface the corresponding
@@ -752,7 +775,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     if tool_choice == "none" or (isinstance(tool_choice, dict) and tool_choice.get("type") == "none"):
         chosen = historical
 
-    protected = historical | required | requested | (_ORG_TOOLS & chosen)
+    protected = historical | required | requested | (_ORG_TOOLS & chosen) | (skill_open & chosen)
     ordered = [name for name in available if name in chosen]
     if len(ordered) > MAX_SELECTED_TOOLS:
         keep = [name for name in ordered if name in protected]
