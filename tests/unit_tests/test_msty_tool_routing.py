@@ -338,3 +338,36 @@ def test_non_system_questions_do_not_get_status_tools(question):
              for name in ('msty_system_overview', 'msty_admin_health')]
     _, route, _ = routing.select_tools([{"role": "user", "content": question}], tools)
     assert not {'msty_system_overview', 'msty_admin_health'} & set(route['selected_names'])
+
+
+ORG = ["org_structure", "delegate", "delegate_many", "review"]
+
+
+def test_brain_desk_org_tools_are_brains_own_for_task_turns():
+    """brain-desk #297: Brain delegates to departments; never cut away."""
+    tools = TOOLS + [schema(name) for name in ORG]
+    selected, value, _ = routing.select_tools(
+        [{"role": "user", "content": "Разбери задачу #237 и предложи план исправления"}], tools)
+    names = [tool["function"]["name"] for tool in selected]
+    assert set(ORG) <= set(names)
+    assert len(names) <= routing.MAX_SELECTED_TOOLS
+    # A broad mutation that fills the limit still keeps them.
+    selected, _, _ = routing.select_tools(
+        [{"role": "user", "content": "Исправь сайт app.sanaredev.com, базу supabase, файлы репозитория и проверь в браузере"}],
+        tools)
+    assert set(ORG) <= {tool["function"]["name"] for tool in selected}
+    # Small talk gets no tools at all, as before.
+    selected, value, _ = routing.select_tools(
+        [{"role": "user", "content": "Объясни кратко, что такое LangGraph."}], tools)
+    assert selected == [] and value["intent"] == "direct"
+    # Without the client's schemas nothing is invented.
+    names, _, _ = route("Разбери задачу #237 и предложи план исправления")
+    assert not set(ORG) & names
+
+
+def test_nas_structure_question_gets_file_reads():
+    """brain-desk #296: NAS is read through the file server."""
+    names, value, _ = route("Проверь структуру хранилища NAS, как в библиотеке: какие разделы?")
+    assert "files" in value["domains"]
+    assert {"list_directory", "read_text_file"} <= names
+    assert not ({"write_file", "edit_file", "move_file"} & names)
