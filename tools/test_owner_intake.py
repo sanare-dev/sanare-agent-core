@@ -5,7 +5,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from deep_agent.owner_intake import IntakeError, validate  # noqa: E402
+from deep_agent.owner_intake import IntakeError, preflight_source, validate  # noqa: E402
 
 
 SOURCE = "Компания Example Ltd работает в Лиссабоне. Документы хранятся локально."
@@ -50,9 +50,18 @@ class OwnerIntakeTests(unittest.TestCase):
 
     def test_sensitive_input_and_reference_rejected(self):
         with self.assertRaisesRegex(IntakeError, "source_sensitive"):
-            validate("api_key = hidden-value", "braindesk://thread/example", {"items": []})
+            preflight_source("api_key = hidden-value", "braindesk://thread/example")
         with self.assertRaisesRegex(IntakeError, "source_ref_invalid"):
-            validate(SOURCE, "https://example.com/?token=hidden", {"items": []})
+            preflight_source(SOURCE, "https://example.com/?token=hidden")
+        with self.assertRaisesRegex(IntakeError, "source_sensitive"):
+            validate("api_key = hidden-value", "braindesk://thread/example", {"items": []})
+
+    def test_preflight_is_stable_and_rejects_invalid_unicode(self):
+        reference, digest = preflight_source(SOURCE, " braindesk://thread/example ")
+        self.assertEqual(reference, "braindesk://thread/example")
+        self.assertEqual(digest, validate(SOURCE, reference, {"items": []})["source_sha256"])
+        with self.assertRaisesRegex(IntakeError, "source_invalid_encoding"):
+            preflight_source("broken\ud800", reference)
 
     def test_caps_shape_and_duplicate_rejected(self):
         proposal = item("Компания Example Ltd работает в Лиссабоне.")
@@ -64,6 +73,8 @@ class OwnerIntakeTests(unittest.TestCase):
             validate(SOURCE, "braindesk://thread/example", {"items": [proposal, proposal]})
         with self.assertRaisesRegex(IntakeError, "item_invalid"):
             validate(SOURCE, "braindesk://thread/example", {"items": [{**proposal, "action": "write"}]})
+        with self.assertRaisesRegex(IntakeError, "title_invalid"):
+            validate(SOURCE, "braindesk://thread/example", {"items": [{**proposal, "title": "\ud800"}]})
 
 
 if __name__ == "__main__":

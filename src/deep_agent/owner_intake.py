@@ -29,19 +29,27 @@ class IntakeError(ValueError):
 def _text(value: object, *, max_chars: int, code: str) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > max_chars:
         raise IntakeError(code)
-    return value.strip()
+    value = value.strip()
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise IntakeError(code) from None
+    return value
 
 
-def validate(source_text: str, source_ref: str, model_output: object) -> dict:
-    """Return stable pending candidates grounded in exact source spans.
+def preflight_source(source_text: str, source_ref: str) -> tuple[str, str]:
+    """Reject unsafe input before a caller sends any text to a model.
 
-    The caller must redact or reject sensitive input before a model call. This
-    validator rejects it too, including model-added credentials. No candidate
-    is an instruction or permission to mutate the owner's systems.
+    Returns the normalized source reference and source SHA-256. The heuristic
+    check is conservative and cannot replace a full privacy review.
     """
     if not isinstance(source_text, str) or not source_text.strip():
         raise IntakeError("source_empty")
-    if len(source_text.encode("utf-8")) > MAX_INPUT_BYTES:
+    try:
+        encoded = source_text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise IntakeError("source_invalid_encoding") from None
+    if len(encoded) > MAX_INPUT_BYTES:
         raise IntakeError("source_too_large")
     if SENSITIVE.search(source_text):
         raise IntakeError("source_sensitive")
@@ -49,13 +57,23 @@ def validate(source_text: str, source_ref: str, model_output: object) -> dict:
     if (any(ord(char) < 32 for char in reference) or "?" in reference or
             SENSITIVE.search(reference)):
         raise IntakeError("source_ref_invalid")
+    return reference, hashlib.sha256(encoded).hexdigest()
+
+
+def validate(source_text: str, source_ref: str, model_output: object) -> dict:
+    """Return stable pending candidates grounded in exact source spans.
+
+    The caller must run preflight_source before a model call. This validator
+    rechecks it after the call and rejects model-added credentials. No
+    candidate is permission to mutate the owner's systems.
+    """
+    reference, source_hash = preflight_source(source_text, source_ref)
     if not isinstance(model_output, dict) or set(model_output) != {"items"}:
         raise IntakeError("output_invalid")
     items = model_output["items"]
     if not isinstance(items, list) or len(items) > MAX_ITEMS:
         raise IntakeError("items_invalid")
 
-    source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
     proposals = []
     seen: set[tuple[str, int, int]] = set()
     for item in items:
