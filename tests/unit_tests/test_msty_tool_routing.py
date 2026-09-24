@@ -411,3 +411,21 @@ def test_window_working_turn_always_has_web_and_connector_finder():
     # Msty (no window mark) keeps its narrow routing.
     selected, _, _ = routing.select_tools([{"role": "user", "content": "решай проблему"}], tools)
     assert "connector_search" not in {tool["function"]["name"] for tool in selected}
+
+
+SSH = ["list-connections", "read-command", "run-command", "sftp-list", "open-session"]
+
+
+def test_window_server_thread_gets_ssh_tools_even_on_short_follow_up():
+    tools = TOOLS + [schema(n) for n in SSH] + [schema("connector_search"), schema("connector_propose")]
+    messages = [DESK_SYSTEM,
+                {"role": "user", "content": "Сервер Crin-Barbu 188.227.57.24, порт 2222, Administrator — проверь hostname"},
+                {"role": "assistant", "content": "SSH-инструментов нет."},
+                {"role": "user", "content": "подклбчи и сдеай реши вопрос"}]
+    selected, _, _ = routing.select_tools(messages, tools)
+    names = {tool["function"]["name"] for tool in selected}
+    assert {"run-command", "read-command", "list-connections"} <= names
+    assert len(names) <= routing.MAX_SELECTED_TOOLS
+    # Msty without the window mark: no SSH projection.
+    selected, _, _ = routing.select_tools(messages[1:], tools)
+    assert "run-command" not in {tool["function"]["name"] for tool in selected}
