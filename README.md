@@ -618,6 +618,26 @@ generic creation to zero; do not charge it twice. Tests exercise that real SDK
 conversion using synthetic usage only. Live cache hits and any measured benefit
 belong in the deployment receipt, not inferred from unit tests.
 
+## Window-sized admission — 24 September 2026 (brain-desk #145)
+
+180,000 input tokens was the admission threshold of the Sonnet-200K era, not
+the window of the current leads (Luna `gpt-6-luna` 1,050,000; DeepSeek Flash
+1,000,000). A bound task now carries its admission limit in
+`task_budget_binding.input_limit`, pinned by the bridge together with the budget
+reserve for exactly that input. The graph accepts it only within
+`msty_execution.window_input_limit(profile)` = window − min(64K, 10%) (Luna
+986,000; DeepSeek 936,000; 200K models 180,000) and never below 180,000; the
+`context_budget_check.limit` it returns equals the bound limit, so the bridge
+can verify the same number. Requests without a binding keep 180,000.
+
+Deploy order: this graph first — it still admits the old bridge's 180,000
+binding — then enable the bridge's window limits and reload it. An old graph
+rejects a bridge binding above 180,000 before generation (no model call).
+Native tool-bundle compaction (`msty_compaction.TRIGGER_TOKENS` = 120,000) is
+unchanged: it only projects old tool results and keeps long tool chains cheap.
+A larger admitted input is billed as such (Luna doubles input price above
+272K); cross-turn chat compaction stays in the bridge.
+
 ## Context admission — 20 September 2026
 
 The local bridge limits transport to 2 MB after bounded directory-tree previews;
