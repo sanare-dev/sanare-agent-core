@@ -232,6 +232,18 @@ _REMOTE = re.compile(
     r"\b(?:\d{1,3}\.){3}\d{1,3}\b|crin|sanare-uk|подкл\w*\s+к\s+сервер)")
 
 
+# Skills of the window (brain-desk skills MCP) and the verified sources to
+# build them from: live 24.09 «ищи и загрузи себе скилы по налогам UK» got
+# connector_search + search_docs + fetch only — no skills_find_ready /
+# skills_save, no GitHub search — and Brain answered «нет навыков».
+_SKILL_TOOLS = frozenset({
+    "skills_list", "skills_get", "skills_find_ready", "skills_save", "skills_schedule_refresh",
+    "search_repositories", "search_code", "get_file_contents",
+    "fetch", "msty_web_fetch", "browser_navigate", "browser_snapshot"})
+_SKILL_WORDS = re.compile(
+    r"(?is)(?:навык|скил|скилл|skill|базу?\s+знани|научись|изучи|загрузи\s+себе|набей)")
+
+
 def _recent_user_text(messages: list[Any], turns: int = 4) -> str:
     """The latest few owner turns: a short «сделай» continues their subject."""
     texts: list[str] = []
@@ -532,6 +544,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
             chosen.discard("msty_project_resolve")
             if _REMOTE.search(_recent_user_text(messages)):
                 chosen.update(_SSH_TOOLS & available.keys())
+            if _SKILL_WORDS.search(_recent_user_text(messages)):
+                chosen.update(_SKILL_TOOLS & available.keys())
     else:
         domains = _domains(text)
         intent = _intent(text, domains)
@@ -572,7 +586,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         # A server thread in the window is work even when the owner's words are
         # short or misspelt («подклбчи и сдеай»).
         if (intent == "direct" and _from_brain_desk(messages)
-                and _REMOTE.search(_recent_user_text(messages))):
+                and (_REMOTE.search(_recent_user_text(messages))
+                     or _SKILL_WORDS.search(_recent_user_text(messages)))):
             intent = "read"
         if intent != "direct":
             chosen.update(_ORG_TOOLS & available.keys())
@@ -581,6 +596,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                 chosen.discard("msty_project_resolve")
                 if _REMOTE.search(_recent_user_text(messages)):
                     chosen.update(_SSH_TOOLS & available.keys())
+                if _SKILL_WORDS.search(_recent_user_text(messages)):
+                    chosen.update(_SKILL_TOOLS & available.keys())
             # The generic task contract verifies explicit local artifact files.
             # Service-specific executors (site, Pressable, Supabase and Brain
             # self-improvement) have their own receipts and verification. Giving
