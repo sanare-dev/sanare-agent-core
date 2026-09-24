@@ -5,6 +5,7 @@ are supplied by Agent Server. A tool result is a client observation, not a signe
 execution receipt or proof that the user's business task has been completed.
 """
 from copy import deepcopy
+from types import MappingProxyType
 import hashlib
 import json
 import uuid
@@ -22,6 +23,32 @@ PRICING_VERSION = '2026-09-23-brain-model-profiles-v4-luna6'
 # Profiles a budget binding may pin: admitted lead profiles (Luna/DeepSeek/Sol)
 # plus the server-allowlisted analyst set. The bridge pins one profile per task.
 BINDING_PROFILES = frozenset(('luna', 'deepseek', 'astra', 'sol', 'opus', 'fable'))
+# Context admission (2026-09-24, brain-desk #145). 180000 was the Sonnet-200K era
+# safety threshold, not the window of today's leads (Luna 1.05M, DeepSeek 1M).
+# The bridge pins the per-task admission limit in the budget binding and reserves
+# the budget for exactly that input; the graph admits it only up to the pinned
+# profile's own window minus an output/counting reserve. 180000 stays valid so a
+# bridge that has not been reloaded yet keeps working (deploy graph first).
+LEGACY_INPUT_LIMIT = 180000
+CONTEXT_WINDOWS = MappingProxyType({
+    'luna': 1_050_000, 'deepseek': 1_000_000, 'astra': 1_050_000, 'sol': 1_050_000,
+    'opus': 200_000, 'fable': 200_000, 'sonnet': 200_000})
+
+
+def window_input_limit(profile):
+    """Largest admissible input: window minus min(64K, 10%) for output and count variance."""
+    window = CONTEXT_WINDOWS[profile]
+    return max(LEGACY_INPUT_LIMIT, window - min(64_000, window // 10))
+
+
+def input_limit(state):
+    """Admission limit of this request: the bound task's, else the legacy one."""
+    binding = state.get('task_budget_binding') if isinstance(state, dict) else None
+    if isinstance(binding, dict) and binding.get('profile') in CONTEXT_WINDOWS:
+        value = binding.get('input_limit')
+        if type(value) is int and LEGACY_INPUT_LIMIT <= value <= window_input_limit(binding['profile']):
+            return value
+    return LEGACY_INPUT_LIMIT
 
 
 class ExecutionProtocolError(ValueError):
@@ -65,10 +92,12 @@ def validate_binding(state, profile, output_limit):
     if state.get('execution_task_id') is None and binding is None:
         return
     expected = {'version': 1, 'pricing_version': PRICING_VERSION,
-                'profile': profile, 'input_limit': 180000, 'output_limit': output_limit}
+                'profile': profile, 'output_limit': output_limit}
     if (state.get('execution_task_id') is None or profile not in BINDING_PROFILES or
-            not isinstance(binding, dict) or binding != expected or
-            any(type(binding.get(k)) is not int for k in ('version', 'input_limit', 'output_limit'))):
+            not isinstance(binding, dict) or set(binding) != {*expected, 'input_limit'} or
+            any(binding[key] != value for key, value in expected.items()) or
+            any(type(binding.get(k)) is not int for k in ('version', 'input_limit', 'output_limit')) or
+            not LEGACY_INPUT_LIMIT <= binding['input_limit'] <= window_input_limit(profile)):
         raise ExecutionProtocolError('Модель и лимиты не совпадают с бюджетом задачи; генерация не запущена.')
 
 

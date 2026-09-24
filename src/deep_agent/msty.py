@@ -20,7 +20,8 @@ from . import msty_execution, msty_models, msty_compaction, msty_task, msty_stre
 from .msty_prompts import ANALYST_POLICY, POLICY
 
 COUNT_TRIGGER_BYTES = 200000
-INPUT_TOKEN_LIMIT = 180000
+# Default/legacy admission; a bound task uses msty_execution.input_limit(state).
+INPUT_TOKEN_LIMIT = msty_execution.LEGACY_INPUT_LIMIT
 CONTEXT_BUDGET_PROTOCOL = 'anthropic-count-v1'
 MODEL_BUDGET_PROTOCOL = 'msty-model-count-v1'
 COUNT_TIMEOUT_SECONDS = 20.0
@@ -247,13 +248,13 @@ def publish_result(result: AIMessage, budget_check: dict | None):
     return {'result': message, 'context_budget_check': budget_check}
 
 
-def rejected_context_budget(explanation: str, input_tokens: int | None = None):
+def rejected_context_budget(explanation: str, input_tokens: int | None = None, *, state=None):
     """A local blocker is not generated inference and does not consume its tokens."""
     result = AIMessage(content=explanation, response_metadata={'msty_generation': 'not_started'}, usage_metadata={
         'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})
     return publish_result(result, {
         'version': 1, 'status': 'rejected', 'input_tokens': input_tokens,
-        'limit': INPUT_TOKEN_LIMIT})
+        'limit': msty_execution.input_limit(state)})
 
 
 async def _respond_step(state: State, *, native_system_prompt: str | None = None,
@@ -262,7 +263,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     try:
         incremental = msty_stream.enabled(state)
     except ValueError as error:
-        return rejected_context_budget(str(error))
+        return rejected_context_budget(str(error), state=state)
     try:
         compaction_enabled = msty_compaction.enabled(state)
         if compaction_enabled and not msty_execution.enabled(state):
@@ -296,7 +297,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                          else msty_models.prepare_messages(profile, full_messages, tools))
     except (msty_models.ModelAdapterError, msty_models.msty_gateway.GatewayConfigurationError,
             msty_execution.ExecutionProtocolError) as error:
-        return rejected_context_budget(str(error))
+        return rejected_context_budget(str(error), state=state)
     # Byte size is only the preflight trigger, never a tokenizer estimate.
     # Count the exact complete messages and schemas used for generation below.
     input_bytes = len(json.dumps({'messages': [m.model_dump(mode='json') for m in full_messages],
@@ -306,7 +307,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     if protocol not in (None, CONTEXT_BUDGET_PROTOCOL, MODEL_BUDGET_PROTOCOL):
         return rejected_context_budget(
             'Генерация не запущена: неподдерживаемая версия проверки контекста. '
-            'Сообщения и инструкции не сокращались.')
+            'Сообщения и инструкции не сокращались.', state=state)
     if protocol is not None or state.get('task_budget_binding') is not None or input_bytes > COUNT_TRIGGER_BYTES:
         try:
             if profile == 'sonnet':
@@ -321,26 +322,27 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
                 raise ValueError('Invalid token count')
         except msty_models.ModelAdapterError as error:
-            return rejected_context_budget(str(error))
+            return rejected_context_budget(str(error), state=state)
         except Exception:
             # Provider exceptions may contain prompts, headers or credentials;
             # keep raw details out of both the user result and our own logs.
             return rejected_context_budget(
                 'Генерация не запущена: проверка размера контекста не завершилась. '
-                'Контекст сохранён без обрезки; требуется восстановить проверку его размера.')
+                'Контекст сохранён без обрезки; требуется восстановить проверку его размера.', state=state)
         if (compaction_enabled and not state.get('compaction_skip_once') and
                 tokens >= msty_compaction.TRIGGER_TOKENS):
             plan = msty_compaction.make_plan(state)
             if plan is not None:
                 return await _compact_step(state, profile, output_limit, policy, plan)
-        if tokens > INPUT_TOKEN_LIMIT:
+        limit = msty_execution.input_limit(state)
+        if tokens > limit:
             return rejected_context_budget(
                 f'Генерация не запущена: входной контекст превышает безопасный лимит '
-                f'{INPUT_TOKEN_LIMIT} токенов. Сообщения, инструкции и результаты '
+                f'{limit} токенов. Сообщения, инструкции и результаты '
                 'инструментов не сокращались; нужно уменьшить выбранные вложения '
-                'или разделить задачу.', tokens)
+                'или разделить задачу.', tokens, state=state)
         budget_check = {'version': 1, 'status': 'accepted', 'input_tokens': tokens,
-                        'limit': INPUT_TOKEN_LIMIT, 'method': msty_models.count_method(profile, full_messages),
+                        'limit': limit, 'method': msty_models.count_method(profile, full_messages),
                         'model_profile': profile}
     choice = state.get("tool_choice") or "auto"
     tools_disabled = choice == 'none' or (isinstance(choice, dict) and choice.get('type') == 'none')
@@ -348,7 +350,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         try:
             model = msty_models.bind_tools(profile, model, tools, choice)
         except msty_models.ModelAdapterError as error:
-            return rejected_context_budget(str(error))
+            return rejected_context_budget(str(error), state=state)
     elif tools:
         if tools_disabled:
             # Keep the schemas required by historical tool_use/tool_result
@@ -468,13 +470,15 @@ async def _compact_step(state, profile, output_limit, policy, plan):
             msty_compaction.summary_messages(state, plan))]
         messages = msty_models.prepare_messages(profile, messages, [])
         tokens = await msty_models.count_input(profile, model, messages, [])
-        if type(tokens) is not int or not 0 <= tokens <= INPUT_TOKEN_LIMIT:
-            return rejected_context_budget('Сводка не помещается в безопасный контекст; исходники сохранены.', tokens)
+        if type(tokens) is not int or not 0 <= tokens <= msty_execution.input_limit(state):
+            return rejected_context_budget('Сводка не помещается в безопасный контекст; исходники сохранены.',
+                                           tokens, state=state)
         model = msty_models.bind_tools(profile, model, [], 'none')
     except Exception:
-        return rejected_context_budget('Не удалось проверить вход сводки; исходники сохранены без обрезки.')
+        return rejected_context_budget('Не удалось проверить вход сводки; исходники сохранены без обрезки.',
+                                       state=state)
     budget_check = {'version': 1, 'status': 'accepted', 'input_tokens': tokens,
-                    'limit': INPUT_TOKEN_LIMIT, 'method': msty_models.count_method(profile, messages),
+                    'limit': msty_execution.input_limit(state), 'method': msty_models.count_method(profile, messages),
                     'model_profile': profile}
     raw = await model.ainvoke(messages)
     try:
