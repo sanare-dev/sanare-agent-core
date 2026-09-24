@@ -182,12 +182,23 @@ def _read_jsonl_lines(path: Path) -> list[bytes]:
         return []
 
 
+def _has_symlink_parent(path: Path, root: Path) -> bool:
+    parent = path.parent
+    while parent != root:
+        if parent.is_symlink() or parent == parent.parent:
+            return True
+        parent = parent.parent
+    return False
+
+
 def extract_kimi_candidates(path: Path, root: Path) -> list[Candidate]:
     if path.name != "wire.jsonl":
         return []
     try:
         relative = path.relative_to(root)
     except ValueError:
+        return []
+    if _has_symlink_parent(path, root):
         return []
     session_id = hashlib.sha256(str(relative.parent).encode("utf-8")).hexdigest()
     found: list[Candidate] = []
@@ -242,6 +253,8 @@ def extract_claude_candidates(path: Path, root: Path) -> list[Candidate]:
     try:
         relative = path.relative_to(root)
     except ValueError:
+        return []
+    if _has_symlink_parent(path, root):
         return []
     session_id = hashlib.sha256(str(relative).encode("utf-8")).hexdigest()
     found: list[Candidate] = []

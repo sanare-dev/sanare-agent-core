@@ -151,6 +151,19 @@ class ImportCompactionsTests(unittest.TestCase):
                                        "timestamp": "2026-09-24T01:00:00Z"}) + "\n")
         self.assertEqual(stage_claude(root, self.pending)["candidates"], 0)
 
+    def test_claude_skips_symlinked_project_directory(self):
+        root = self.root / "claude" / "projects"
+        root.mkdir(parents=True)
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "session.jsonl").write_text(json.dumps({
+            "type": "user", "isCompactSummary": True,
+            "message": {"content": "Текст выжимки."},
+            "timestamp": "2026-09-24T01:00:00Z",
+        }) + "\n")
+        (root / "linked").symlink_to(outside, target_is_directory=True)
+        self.assertEqual(stage_claude(root, self.pending)["candidates"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
