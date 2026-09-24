@@ -7,6 +7,7 @@ can contain private information, so neither is copied into its output.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -42,7 +43,7 @@ def audit_registry(path: Path, cutoff: datetime) -> dict[str, object]:
         return {"state": "unavailable", "reason": "source_missing"}
     try:
         uri = f"file:{path.resolve().as_posix()}?mode=ro"
-        with sqlite3.connect(uri, uri=True) as conn:
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
             conn.row_factory = sqlite3.Row
             tables = {
                 row[0]
