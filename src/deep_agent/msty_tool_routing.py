@@ -152,8 +152,14 @@ _DOMAIN_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("brain", re.compile(
         r"(?is)(?:\bmsty\b|langgraph|langsmith|\bbrain\b|мозг|агент|оркестрац|toolset|"
         r"тулсет|prompt|промпт|skill|скилл|памят|middleware|маршрут)")),
+    # Verified sources for «найди/поставь решение» (owner 24.09): GitHub,
+    # Hugging Face, the MCP registry, public Discord, vendor docs. «Сходи на
+    # GitHub и поставь» routed to files+Codex only — no fetch/browser — and
+    # Brain answered «нет веб-инструмента» (live, Amazon project chat).
     ("web", re.compile(
-        r"(?is)(?:интернет|web\b|веб|url\b|ссылк|онлайн|search\s+web|browse)")),
+        r"(?is)(?:интернет|web\b|веб|url\b|ссылк|онлайн|search\s+web|browse|github|гитхаб|"
+        r"hugging\s*face|huggingface|discord|дискорд|реестр\w*\s+mcp|mcp\s+registry|"
+        r"документаци|\bdocs?\b|найди|поищи|поиск|загугли|search\b)")),
 )
 
 # Наборы инструментов ниже ВЫВОДЯТСЯ из манифеста TAU L1 (msty_registry), который
@@ -255,6 +261,19 @@ def _content_text(content: Any) -> str:
                 parts.append(item["text"])
         return "\n".join(parts)
     return ""
+
+
+_BRAIN_DESK_MARK = "[Brain Desk · правая рука владельца]"
+
+
+def _from_brain_desk(messages: list[Any]) -> bool:
+    """The Brain Desk window marks its standing system instruction."""
+    for message in messages[:3]:
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "type", None)
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+        if role in ("system",) and _BRAIN_DESK_MARK in _content_text(content):
+            return True
+    return False
 
 
 def latest_user_text(messages: list[Any]) -> str:
@@ -529,7 +548,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                 chosen.update(_TASK)
             if not domains:
                 chosen.update({"msty_admin_route_request", "msty_admin_memory_search"})
-            if set(domains) & {"sites", "pressable", "supabase", "commerce", "tax", "content"}:
+            # The Brain Desk window has its own projects (context already in the
+            # system message); the Msty registry answers unregistered_project and
+            # Brain called that a blocker (live 24.09, Amazon project chat).
+            if (set(domains) & {"sites", "pressable", "supabase", "commerce", "tax", "content"}
+                    and not _from_brain_desk(messages)):
                 chosen.add("msty_project_resolve")
             if re.search(r"(?is)(?:раньше|истори|памят|где\s+леж|вспомни|previous|memory)", text):
                 chosen.add("msty_admin_memory_search")
