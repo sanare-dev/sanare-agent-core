@@ -26,7 +26,7 @@ from langgraph.types import Command, interrupt
 from langmem import create_search_memory_tool
 
 from . import msty, msty_compaction, msty_execution, msty_guard, msty_models, msty_prompts, msty_task, msty_tool_routing
-from . import consolidator, msty_breaker, msty_registry, msty_subagents, msty_taxonomy
+from . import consolidator, msty_breaker, msty_registry, msty_subagents, msty_swarm, msty_taxonomy
 from .msty_native_memory import (
     CANDIDATES_NAMESPACE, backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware,
 )
@@ -60,7 +60,7 @@ def server_executed() -> frozenset:
         names.add(msty_tool_routing.REQUEST_TOOL)
     return frozenset(names | enabled_optional_tools())
 RESERVED_TOOLS = NATIVE_TOOLS | {'native_execute', 'native_task', 'native_compact_conversation',
-                                 *OPTIONAL_TOOL_FLAGS}
+                                 msty_swarm.TOOL, *OPTIONAL_TOOL_FLAGS}
 VIRTUAL_ROOTS = ('/scratch', '/memory', '/skills', '/memories', '/large_tool_results')
 WRITABLE_ROOTS = ('/scratch/', '/memories/')
 VIRTUAL_FS_SCOPE = (
@@ -386,6 +386,10 @@ class State(AgentState, total=False):
     text_stream_protocol: str | None
     consult_profile: str | None
     lead_profile: str | None
+    # Рой (msty-swarm-v1): протокол выставляет только мост; допуск роя приходит
+    # в билете продолжения и приватен — клиент не может его подставить.
+    swarm_protocol: str | None
+    swarm_admission: Annotated[NotRequired[dict | None], PrivateStateAttr]
     native_needs_admission: Annotated[NotRequired[bool], PrivateStateAttr]
     native_protocol_messages: Annotated[NotRequired[list[dict]], PrivateStateAttr]
     native_external_observations: Annotated[NotRequired[dict], PrivateStateAttr]
@@ -478,9 +482,19 @@ def _protocol_state(state):
 def native_continue_request(state):
     execution = state['execution']
     pending = execution['pending']
-    return {'version': 1, 'type': 'msty_native_continue', 'task_id': execution['task_id'],
+    request = {'version': 1, 'type': 'msty_native_continue', 'task_id': execution['task_id'],
         'batch_id': pending['batch_id'], 'result_sha256': pending['result_sha256'],
         'native_actions': _native_actions(state)}
+    # Рой: мост резервирует каждую подзадачу ДО ToolNode по этому описателю.
+    swarm = msty_swarm.descriptor(pending) if msty_swarm.enabled(state) else None
+    if swarm is not None:
+        request['swarm'] = swarm
+    return request
+
+
+def _swarm_on(state) -> bool:
+    """Рой выдаётся лиду при протоколе моста, один раз за ход владельца."""
+    return msty_swarm.enabled(state) and _calls_this_turn(state.get('messages'), msty_swarm.TOOL) == 0
 
 
 class NativeMstyMiddleware(AgentMiddleware):
@@ -531,6 +545,10 @@ class NativeMstyMiddleware(AgentMiddleware):
         catalog = ('' if analyst or not tool_route.get('catalog')
                    or not msty_tool_routing.dispatcher_enabled() else
                    msty_tool_routing.catalog_prompt(client_tools, tool_route.get('selected_names', [])))
+        swarm_on = not analyst and _swarm_on(state)
+        if swarm_on:
+            native.append(msty_swarm.schema())
+        executed = server_executed() | ({msty_swarm.TOOL} if swarm_on else frozenset())
         if catalog and state.get('tool_choice') not in ('none',) and not (
                 isinstance(state.get('tool_choice'), dict)
                 and state['tool_choice'].get('type') == 'none'):
@@ -570,11 +588,12 @@ class NativeMstyMiddleware(AgentMiddleware):
             # only know LangChain's messages/tools/values channels.
             result = self.secret_guard.redact_result(result)
             calls = result.tool_calls
-            native_calls = [call for call in calls if call['name'] in server_executed()]
-            external_calls = [call for call in calls if call['name'] not in server_executed()]
+            native_calls = [call for call in calls if call['name'] in executed]
+            external_calls = [call for call in calls if call['name'] not in executed]
             prior_external = (state.get('execution') or {}).get('actions_issued', 0)
             if (prior_external + prior_native + len(calls) > msty_execution.MAX_ACTIONS or
-                    sum(call['name'] == 'native_write_todos' for call in native_calls) > 1):
+                    sum(call['name'] == 'native_write_todos' for call in native_calls) > 1 or
+                    sum(call['name'] == msty_swarm.TOOL for call in native_calls) > 1):
                 return result.model_copy(update={'content':
                     'Действия не выполнены: общий лимит действий или повторное обновление списка задач не допускает этот шаг.',
                     'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
@@ -605,7 +624,7 @@ class NativeMstyMiddleware(AgentMiddleware):
             ('version', 'fingerprint', 'intent', 'domains', 'source',
              'selected_count', 'available_count', 'semantic')}
         calls = result.get('tool_calls') or []
-        native_calls = [call for call in calls if call['name'] in server_executed()]
+        native_calls = [call for call in calls if call['name'] in executed]
         execution['native_actions'] = prior_native
         if native_calls:
             execution['actions_issued'] -= len(native_calls)
@@ -640,11 +659,19 @@ class NativeMstyMiddleware(AgentMiddleware):
             # Model/result already checkpointed; no ToolNode side effect yet.
             # Bridge atomically claims the shared action quota and reserves the
             # next model ticket before providing this exact resume capability.
-            expected = {**native_continue_request(state), 'type': 'msty_native_resume'}
-            resumed = interrupt(native_continue_request(state))
+            request = native_continue_request(state)
+            expected = {**request, 'type': 'msty_native_resume'}
+            resumed = interrupt(request)
+            admission = None
+            if isinstance(resumed, dict) and 'swarm' in request:
+                resumed = dict(resumed)
+                try:
+                    admission = msty_swarm.check_admission(request['swarm'], resumed.pop('swarm_admission', None))
+                except msty_swarm.SwarmPlanError as error:
+                    raise msty_execution.ExecutionProtocolError(str(error)) from None
             if resumed != expected or type(resumed.get('version')) is not int:
                 raise msty_execution.ExecutionProtocolError('Билет продолжения не соответствует native шагу.')
-            return {'native_needs_admission': False,
+            return {'native_needs_admission': False, 'swarm_admission': admission,
                     'execution': {**execution, 'status': 'running', 'pending': None}}
         if execution['status'] != 'waiting_tools':
             return None
@@ -781,6 +808,36 @@ class NativeMstyMiddleware(AgentMiddleware):
                     'steps_used': 0, 'budget': 0, 'recommended_calls': [], 'artifacts': {},
                     'usage': _final_usage()}
 
+    async def _run_swarm(self, call, request):
+        """Рой: только по допуску моста из билета этого же native-пакета."""
+        if call['name'] not in request.state.get('native_tool_names', []):
+            raise msty_execution.ExecutionProtocolError('Инструмент роя не передавался модели.')
+
+        def reply(text, ok=False):
+            return ToolMessage(content=text, name=call['name'], tool_call_id=call['id'],
+                               status='success' if ok else 'error')
+        try:
+            plan = msty_swarm.parse_plan(call.get('args'))
+        except msty_swarm.SwarmPlanError as error:
+            return reply('Рой не запущен: ' + str(error) + ' Модельных вызовов не было; '
+                         'исправь план или продолжай без роя.')
+        admission = request.state.get('swarm_admission')
+        if not isinstance(admission, dict):
+            raise msty_execution.ExecutionProtocolError('Рой исполняется только по допуску моста.')
+        if admission['status'] == 'rejected':
+            return reply('Рой не допущен мостом: ' + admission['reason'] + ' Модельных вызовов '
+                         'исполнителей не было; продолжай сам и не выдавай ответ за работу роя.')
+        writer = request.runtime.stream_writer if request.runtime is not None else None
+        emit = writer if callable(writer) else (lambda event: None)
+        try:
+            report = await msty_swarm.run(plan, admission, emit)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 — рой не роняет граф лида
+            return reply('Рой завершился ошибкой (' + type(error).__name__[:60] + '); '
+                         'результатов нет, расход исполнителей мост считает неизвестным.')
+        return reply(msty_swarm.tool_text(report), ok=report['status'] != 'failed')
+
     async def awrap_tool_call(self, request, handler):
         call = request.tool_call
         errors = request.state.get('tau_errors') or []
@@ -801,6 +858,8 @@ class NativeMstyMiddleware(AgentMiddleware):
                          ' — выбери из MSTY_TOOL_CATALOG_V1 или используй msty_codex_start.')
             return ToolMessage(content=text, name=call['name'], tool_call_id=call['id'],
                                status='success' if enabled else 'error')
+        if call['name'] == msty_swarm.TOOL:
+            return await self._run_swarm(call, request)
         if call['name'] == msty_subagents.DELEGATE_TOOL:
             # Sub-agents: серверное исполнение, НЕ клиентское. Имя сверено с
             # выданным на шаге списком, аргументы — со статической схемой
