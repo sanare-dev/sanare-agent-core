@@ -371,3 +371,29 @@ def test_nas_structure_question_gets_file_reads():
     assert "files" in value["domains"]
     assert {"list_directory", "read_text_file"} <= names
     assert not ({"write_file", "edit_file", "move_file"} & names)
+
+
+# Live 24.09 (Brain Desk, Amazon project chat): «сходи на GitHub и поставь»
+# got no fetch/browser, and the Msty resolver was offered for a window project.
+DESK_SYSTEM = {"role": "system",
+               "content": "Проект.\n\n[Brain Desk · правая рука владельца] Клиент — окно Brain Desk."}
+
+
+def test_verified_sources_route_to_web_tools():
+    for text in ("Найди на GitHub RDP-клиент и поставь его",
+                 "Поищи модель на Hugging Face",
+                 "Что пишут в Discord проекта про этот MCP?"):
+        names, value, _ = route(text)
+        assert "web" in value["domains"], text
+        assert {"fetch", "msty_web_fetch"} & names, text
+        assert "browser_navigate" in names, text
+
+
+def test_window_project_is_not_resolved_in_msty_registry():
+    messages = [DESK_SYSTEM, {"role": "user", "content": "Собери товары и цены Amazon для Sanare Lab UK"}]
+    selected, _, _ = routing.select_tools(messages, TOOLS)
+    names = {tool["function"]["name"] for tool in selected}
+    assert "msty_project_resolve" not in names
+    # Without the window mark (Msty itself) the resolver stays.
+    names_msty, _, _ = route("Собери товары и цены Amazon для Sanare Lab UK")
+    assert "msty_project_resolve" in names_msty
