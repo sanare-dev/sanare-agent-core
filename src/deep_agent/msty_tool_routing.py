@@ -133,9 +133,13 @@ _DOMAIN_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"сайт|страниц|домен|витрин|app\.sanaredev\.com|sanarelab\.|2the\.life|2thelife)")),
     ("browser", re.compile(
         r"(?is)(?:браузер|browser|клик|нажм|форма|поле|вкладк|скриншот|screenshot|ui\b)")),
+    # NAS (/Volumes/LLM-Data) is read through the same file server since
+    # brain-desk #296: «структура хранилища NAS» is a files question, not small
+    # talk with no tools (live defect 24.09: «нет файлового инструмента для NAS»).
     ("files", re.compile(
         r"(?is)(?:\b(?:file|folder|path|repo|repository|code|git|github|python|typescript|"
-        r"javascript|json|yaml|markdown)\b|файл|папк|путь|репозитор|код|коммит|ветк)")),
+        r"javascript|json|yaml|markdown|nas|ugreen)\b|файл|папк|путь|репозитор|код|коммит|ветк|"
+        r"хранилищ|/volumes/|llm-data)")),
     ("communications", re.compile(
         r"(?is)(?:почт|email|e-mail|gmail|outlook|письм|сообщени|переписк|slack|teams)")),
     ("commerce", re.compile(
@@ -199,6 +203,11 @@ _JOB_BUNDLES: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
 # протекают в выбор через широкое лексическое совпадение вроде "project"/"file".
 _KNOWN_ONLY = msty_registry.group('known_only')
 _KNOWN = msty_registry.routed_names()
+# Brain Desk's company structure (brain-desk #297, решение владельца 24.09):
+# the owner talks to Brain only, Brain executes through its departments. When
+# the client supplies these schemas they are Brain's own instruments for every
+# task turn and are never truncated away.
+_ORG_TOOLS = frozenset({"org_structure", "delegate", "delegate_many", "review"})
 # Which tools survive the MAX_SELECTED_TOOLS cap must not depend on the order
 # Msty happens to send its schemas in: the same request would otherwise get a
 # working toolset or a crippled one at random. Rank by what the step needs
@@ -508,6 +517,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                 intent = "read"
 
         if intent != "direct":
+            chosen.update(_ORG_TOOLS & available.keys())
             # The generic task contract verifies explicit local artifact files.
             # Service-specific executors (site, Pressable, Supabase and Brain
             # self-improvement) have their own receipts and verification. Giving
@@ -653,7 +663,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     if tool_choice == "none" or (isinstance(tool_choice, dict) and tool_choice.get("type") == "none"):
         chosen = historical
 
-    protected = historical | required | requested
+    protected = historical | required | requested | (_ORG_TOOLS & chosen)
     ordered = [name for name in available if name in chosen]
     if len(ordered) > MAX_SELECTED_TOOLS:
         keep = [name for name in ordered if name in protected]
