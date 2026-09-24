@@ -313,6 +313,28 @@ def is_transient_exception(error: BaseException) -> bool:
     return status in _TRANSIENT_STATUS
 
 
+# Провайдер отклонил вход фильтром своей политики ДО генерации (OpenAI
+# `invalid_prompt` у reasoning-моделей, `content_policy_violation`). Это не
+# транспорт и не ошибка графа: тот же вход у той же модели повторять бесполезно.
+_POLICY_REJECTION_CODES = frozenset(('invalid_prompt', 'content_policy_violation'))
+
+
+def policy_rejection_code(error: BaseException) -> str | None:
+    """Код отказа политики провайдера (HTTP 400) либо None; текст ошибки не читается."""
+    status = getattr(error, 'status_code', None)
+    if status is None:
+        status = getattr(getattr(error, 'response', None), 'status_code', None)
+    if status != 400:
+        return None
+    code = getattr(error, 'code', None)
+    body = getattr(error, 'body', None)
+    if code is None and isinstance(body, dict):
+        nested = body.get('error')
+        code = body.get('code') if 'code' in body else (
+            nested.get('code') if isinstance(nested, dict) else None)
+    return code if code in _POLICY_REJECTION_CODES else None
+
+
 def fingerprint(call: dict) -> str:
     """Стабильный ключ вызова: имя + каноничный дайджест аргументов."""
     name = call.get('name') if isinstance(call.get('name'), str) else ''

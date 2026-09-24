@@ -78,7 +78,20 @@ task budget, emergency stop, artifact verification and release gates remain
 independent. The local gateway validates the actual returned model identity
 against the saved profile. Missing/invalid external classification does not block:
 the same local rule chooses DeepSeek for complex action and Luna otherwise. It never
-retries the user task through a second lead model.
+retries the user task through a second lead model, with one exception below.
+
+**Provider policy rejection (23 September 2026).** When the provider refuses the
+input before any generation (HTTP 400 `invalid_prompt` / `content_policy_violation`,
+`msty_taxonomy.policy_rejection_code`), the same step is answered once by the table
+`msty.POLICY_FALLBACK` (`luna → deepseek`): no compaction, images replaced by an
+explicit text marker (DeepSeek has no verified image admission), the policy tells
+the model why it answers. The published result carries
+`response_metadata.msty_policy_fallback = {version, from, to, reason}`; the bridge
+accepts the fallback identity only for exactly this marker and table, prices it by
+its own profile and sizes the Luna lead reserve to cover the fallback. A rejection
+of the fallback, of a DeepSeek lead or of an analyst is an honest blocked answer
+with the provider code and zero usage — never a raised graph error. Other 400s
+still fail closed. Tests: `tests/unit_tests/test_msty_policy_fallback.py`.
 
 ### Progress-aware execution
 

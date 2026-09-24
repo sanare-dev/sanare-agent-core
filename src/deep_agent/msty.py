@@ -257,9 +257,67 @@ def rejected_context_budget(explanation: str, input_tokens: int | None = None, *
         'limit': msty_execution.input_limit(state), 'window_admission': True})
 
 
+# Отказ политики провайдера (OpenAI `invalid_prompt`) приходит ДО генерации:
+# тот же вход той же модели повторять бесполезно. Один переход на другую семью
+# за шаг; вложенный резерв и резерв со сжатием не допускаются. Мост принимает
+# фактическую модель только по этой же таблице и помечает ответ владельцу.
+POLICY_FALLBACK = {'luna': 'deepseek'}
+POLICY_FALLBACK_KEY = 'msty_policy_fallback'
+_IMAGE_OMITTED = ('[Изображение не передано резервной модели: основная модель отклонила запрос '
+                  'фильтром провайдера, а резервная не принимает изображения.]')
+
+
+def _without_images(messages):
+    """Резервная DeepSeek не принимает изображения: явная текстовая замена, не пропуск."""
+    result = []
+    for message in messages:
+        content = message.content
+        if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get('type') in ('image_url', 'image') for b in content):
+            content = [{'type': 'text', 'text': _IMAGE_OMITTED}
+                       if isinstance(b, dict) and b.get('type') in ('image_url', 'image') else b
+                       for b in content]
+            message = message.model_copy(update={'content': content})
+        result.append(message)
+    return result
+
+
+def policy_rejected_result(profile: str, code: str, budget_check, reason: str):
+    """Честный отказ без генерации: причина видна владельцу, расход нулевой."""
+    return publish_result(AIMessage(content=(
+        f'Провайдер основной модели отклонил запрос фильтром своей политики (`{code}`), '
+        f'генерации не было, действия не выполнены, расхода нет. {reason} '
+        'Помогает новый чат (короче история) или сообщение без спорного вложения.'),
+        usage_metadata={'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0},
+        response_metadata={'msty_generation': 'not_started', 'msty_blocked': True,
+                           'msty_policy_rejection': {'version': 1, 'profile': profile, 'code': code}}),
+        budget_check)
+
+
+async def _policy_fallback_step(state, profile, code, budget_check, *,
+                                native_system_prompt, native_result_filter):
+    fallback = POLICY_FALLBACK.get(profile)
+    if state.get(POLICY_FALLBACK_KEY) is not None or fallback is None:
+        return policy_rejected_result(profile, code, budget_check,
+                                      'Резервная модель для этого профиля не предусмотрена либо уже отказала.')
+    if state.get('brain_task_role') == 'analyst':
+        return policy_rejected_result(profile, code, budget_check, 'Консультация не переключается на другую модель.')
+    marker = {'version': 1, 'from': profile, 'to': fallback, 'reason': code}
+    binding = state.get('task_budget_binding')
+    fallback_state = {**state, 'lead_profile': fallback, 'compaction_skip_once': True,
+                      POLICY_FALLBACK_KEY: marker}
+    if isinstance(binding, dict):
+        # Локальная копия только для validate_binding этого шага; состояние
+        # графа и мост сохраняют исходный допуск, мост сверяет его с marker.
+        fallback_state['task_budget_binding'] = {**binding, 'profile': fallback}
+    return await _respond_step(fallback_state, native_system_prompt=native_system_prompt,
+                               native_result_filter=native_result_filter)
+
+
 async def _respond_step(state: State, *, native_system_prompt: str | None = None,
                         native_result_filter=None):
     tools = state.get("tools") or []
+    policy_fallback = state.get(POLICY_FALLBACK_KEY)
     try:
         incremental = msty_stream.enabled(state)
     except ValueError as error:
@@ -269,6 +327,8 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         if compaction_enabled and not msty_execution.enabled(state):
             raise msty_execution.ExecutionProtocolError('Сжатие требует checkpoint-протокола Msty.')
         messages = convert_to_messages(msty_compaction.project_messages(state))
+        if policy_fallback is not None:
+            messages = _without_images(messages)
         profile = selected_profile(state)
         consultations = consultation_count(state)
         cap = 2048 if state.get('brain_task_role') == 'analyst' else 8192
@@ -292,6 +352,12 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         intervention = msty_task.progress_intervention(state)
         if intervention is not None:
             policy += '\n\n' + intervention
+        if policy_fallback is not None:
+            policy += ('\n\nОсновная модель отклонила этот запрос фильтром политики провайдера; '
+                       'отвечаешь ты как резервная модель. Изображения из переписки тебе не переданы: '
+                       'если вопрос о картинке, прямо скажи, что её не видно, и попроси описать текстом. '
+                       'Если отвечаешь текстом, начни с одной строки: «↪ Ответ резервной модели DeepSeek: '
+                       'основная модель OpenAI отклонила запрос фильтром своей политики.»')
         full_messages = [SystemMessage(content=policy), *messages]
         full_messages = (cache_system_prefix(full_messages, tools) if profile == 'sonnet'
                          else msty_models.prepare_messages(profile, full_messages, tools))
@@ -376,38 +442,53 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             response_metadata={'msty_generation': 'not_started', 'msty_blocked': True,
                                'tau_circuit_open': connection}), budget_check)
     stream = None
+    policy_rejection = None
     try:
         stream = msty_stream.TextStream(state) if incremental else None
         try:
             raw_result = (await stream.invoke(model, full_messages) if stream else
                           await model.ainvoke(full_messages))
         except msty_stream.StreamFailure as error:
-            if getattr(error, 'transient', False):
+            if getattr(error, 'policy_rejection', None) and not getattr(error, 'emitted', True):
+                # Провайдер ответил отказом до первого фрагмента: контур жив.
+                msty_breaker.record_success(connection)
+                policy_rejection = error.policy_rejection
+            elif getattr(error, 'transient', False):
                 msty_breaker.record_transient_failure(connection)
             else:
                 msty_breaker.record_success(connection)  # провайдер ответил: контур жив
-            return publish_result(AIMessage(content=str(error), usage_metadata=None,
-                response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
+            if policy_rejection is None:
+                return publish_result(AIMessage(content=str(error), usage_metadata=None,
+                    response_metadata={'msty_generation': 'stream_failed', 'msty_blocked': True}), budget_check)
         except Exception as error:
-            if not msty_taxonomy.is_transient_exception(error):
+            policy_rejection = msty_taxonomy.policy_rejection_code(error)
+            if policy_rejection is not None:
+                msty_breaker.record_success(connection)  # провайдер ответил отказом: контур жив
+            elif not msty_taxonomy.is_transient_exception(error):
                 msty_breaker.record_success(connection)  # не транспорт: не держать пробу
                 raise
-            # Transient-отказ транспорта: классифицированный честный отказ вместо
-            # падения рана; повтор поколения не выполняем — оно платное.
-            opened = msty_breaker.record_transient_failure(connection)
-            if stream:
-                stream.invalidate()
-            return publish_result(AIMessage(content=(
-                'Вызов модели не завершён из-за временного сбоя контура'
-                + ('; circuit breaker открыт, контур охлаждается.' if opened else
-                   '; допустим один повтор позже.')
-                + ' Действия не выполнены, расход не подтверждён.'), usage_metadata=None,
-                response_metadata={'msty_generation': 'transient_failure', 'msty_blocked': True,
-                                   'tau_circuit_open': connection if opened else None}), budget_check)
+            else:
+                # Transient-отказ транспорта: классифицированный честный отказ вместо
+                # падения рана; повтор поколения не выполняем — оно платное.
+                opened = msty_breaker.record_transient_failure(connection)
+                if stream:
+                    stream.invalidate()
+                return publish_result(AIMessage(content=(
+                    'Вызов модели не завершён из-за временного сбоя контура'
+                    + ('; circuit breaker открыт, контур охлаждается.' if opened else
+                       '; допустим один повтор позже.')
+                    + ' Действия не выполнены, расход не подтверждён.'), usage_metadata=None,
+                    response_metadata={'msty_generation': 'transient_failure', 'msty_blocked': True,
+                                       'tau_circuit_open': connection if opened else None}), budget_check)
     finally:
         # Исход пробы полуоткрытого контура записан выше (success/transient);
         # отмена или непредвиденный выход не должны держать пробу 150 с.
         msty_breaker.release_probe(connection, probe_token)
+    if policy_rejection is not None:
+        # Отказ до генерации: расход не возник, повтор той же модели бесполезен.
+        return await _policy_fallback_step(state, profile, policy_rejection, budget_check,
+                                           native_system_prompt=native_system_prompt,
+                                           native_result_filter=native_result_filter)
     msty_breaker.record_success(connection)
     try:
         result = msty_models.stamp_usage(profile, raw_result)
@@ -457,6 +538,10 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     result, _ = msty_evidence.gate_final_answer(state, result)
     # Explicit None clears any check left in a persisted LangGraph thread;
     # an earlier accepted count must never attest a different request.
+    if policy_fallback is not None:
+        # Мост принимает фактическую модель резерва только по этой метке.
+        result = result.model_copy(update={'response_metadata': {
+            **result.response_metadata, POLICY_FALLBACK_KEY: dict(policy_fallback)}})
     if stream:
         stream.finish(result)
     return publish_result(result, budget_check)
