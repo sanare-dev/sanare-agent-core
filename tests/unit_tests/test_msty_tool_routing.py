@@ -429,3 +429,15 @@ def test_window_server_thread_gets_ssh_tools_even_on_short_follow_up():
     # Msty without the window mark: no SSH projection.
     selected, _, _ = routing.select_tools(messages[1:], tools)
     assert "run-command" not in {tool["function"]["name"] for tool in selected}
+
+
+def test_window_skill_request_gets_skill_and_source_tools():
+    extra = ["skills_list", "skills_get", "skills_find_ready", "skills_save",
+             "search_repositories", "search_code", "connector_search", "connector_propose"]
+    tools = TOOLS + [schema(n) for n in extra]
+    text = ("налоговое обложение, бухгалтерский учёт, юридические моменты по United Kingdom, "
+            "подача декларации. Ищи и загрузи себе все актуальные скилы по этим вопросам")
+    selected, _, _ = routing.select_tools([DESK_SYSTEM, {"role": "user", "content": text}], tools)
+    names = {tool["function"]["name"] for tool in selected}
+    assert {"skills_find_ready", "skills_save", "search_repositories", "fetch"} <= names
+    assert len(names) <= routing.MAX_SELECTED_TOOLS

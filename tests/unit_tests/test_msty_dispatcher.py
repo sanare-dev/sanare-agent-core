@@ -61,11 +61,13 @@ def test_explain_question_does_not_carry_catalog():
     assert route['catalog'] is False
 
 
-def test_dispatcher_is_off_by_default(monkeypatch):
+def test_dispatcher_is_on_by_default_and_can_be_switched_off(monkeypatch):
+    # 24.09: keyword routing alone hid the owner's tools; the bridge allows
+    # native_request_tools, so the catalog + request is the default now.
     monkeypatch.delenv('MSTY_TOOL_DISPATCHER', raising=False)
-    assert routing.dispatcher_enabled() is False
-    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
     assert routing.dispatcher_enabled() is True
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'off')
+    assert routing.dispatcher_enabled() is False
 
 
 def test_request_tools_call_enables_only_toolset_names():
@@ -123,7 +125,7 @@ def test_write_tool_via_execute_tool_needs_mutation_intent():
 
 
 def test_request_history_ignored_when_dispatcher_off(monkeypatch):
-    monkeypatch.delenv('MSTY_TOOL_DISPATCHER', raising=False)
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'off')
     history = [{'role': 'user', 'content': 'Привет'},
                {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'r1', 'type': 'function',
                 'function': {'name': 'native_request_tools',
