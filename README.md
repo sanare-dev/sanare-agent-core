@@ -131,6 +131,17 @@ short continuation commands retain the current route. The unfiltered client list
 remains in checkpoint state for exact external callback validation and never grants
 anything the client did not supply.
 
+Input limit (24 September 2026, brain-desk #183): a request may carry up to
+`msty_models.MAX_TOOLS = 256` client schemas; the native harness validates all of
+them up front (unique names, function type, object parameters, finite JSON) and
+refuses 257+ before any model call. The routed step still exposes at most
+`MAX_SELECTED_TOOLS = 28` external schemas, and the catalog lists every unselected
+schema (`MAX_CATALOG = 256`). One generation is additionally capped at the provider
+limit `MAX_MODEL_TOOLS = 128` (OpenAI/DeepSeek Chat Completions): the legacy `msty`
+graph (workers, pre-native continuations) binds every client schema and therefore
+still refuses 129+ honestly instead of sending them. The bridge has no own count cap
+(read-only check of `brain_bridge.py`; only its transport byte limit applies).
+
 This is deliberately not `LLMToolSelectorMiddleware`: the stock selector performs
 another model call before the lead model. The deterministic middleware therefore
 adds no routing model latency or token charge. Exact requested tool names, explicit
@@ -830,3 +841,23 @@ Offline coverage: `tests/unit_tests/test_msty_swarm.py` (real Send/ToolNode/
 checkpoint, mocked models). Activation order: deploy this graph, then the
 bridge's `BRAIN_SWARM_ENABLED=1`, then the Brain Desk toggle (brain-desk
 `docs/swarm.md`). Tests are not evidence of deployment or answer quality.
+
+Follow-ups from the independent review of #18:
+
+- Executors use the lead's circuit breaker (`msty_breaker`, connection
+  `model:<profile>`). An open circuit skips the subtask with no provider call:
+  one terminal event `failed`, `error=provider_unavailable`, `started=false` (the
+  bridge settles the row as `not_started`); transient failures and successes are
+  recorded; a half-open probe is released in `finally`.
+- `check_admission` checks each subtask binding like the lead's
+  `validate_binding`: exact keys, `version=1`, `pricing_version=PRICING_VERSION`,
+  plan profile/output, and `input_limit` within `[180000, window_input_limit]`.
+- Stream events go through a guard: a failing writer no longer drops the
+  super-step; results survive, `events_lost` is reported and the lead is told the
+  cost of those subtasks is unknown.
+- At execution the plan is re-verified against the admitted descriptor
+  (`swarm_id`, `tool_call_id`, `plan_sha256`, subtasks); a mismatch is a protocol
+  error before any executor call.
+- A second `native_swarm` in one step gets its own refusal text.
+- Regression tests run the real lead step (adapter, `bind_tools`,
+  `prepare_messages`, `stamp_usage`, `valid_tool_calls`) for deepseek and luna.

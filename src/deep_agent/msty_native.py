@@ -492,6 +492,12 @@ def native_continue_request(state):
     return request
 
 
+SECOND_SWARM_REFUSAL = (
+    'Действия не выполнены: в одном шаге допускается только один вызов native_swarm, '
+    'а модель запросила несколько роев. Ни один рой не запущен, модельных вызовов '
+    'исполнителей не было.')
+
+
 def _swarm_on(state) -> bool:
     """Рой выдаётся лиду при протоколе моста, один раз за ход владельца."""
     return msty_swarm.enabled(state) and _calls_this_turn(state.get('messages'), msty_swarm.TOOL) == 0
@@ -510,6 +516,12 @@ class NativeMstyMiddleware(AgentMiddleware):
         names = msty.tool_names(tools)
         if len(names) != len(tools) or names & RESERVED_TOOLS:
             raise msty_execution.ExecutionProtocolError('Внешние схемы конфликтуют с native инструментами.')
+        try:
+            # Вход: до MAX_TOOLS (256) уникальных конечных схем; модели шаг отдаёт
+            # не больше msty_tool_routing.MAX_SELECTED_TOOLS внешних.
+            msty_models.check_tools(tools)
+        except msty_models.ModelAdapterError as error:
+            raise msty_execution.ExecutionProtocolError(str(error)) from None
         _native_actions(state)
         return {'native_needs_admission': False, 'native_external_observations': {}}
 
@@ -591,11 +603,14 @@ class NativeMstyMiddleware(AgentMiddleware):
             native_calls = [call for call in calls if call['name'] in executed]
             external_calls = [call for call in calls if call['name'] not in executed]
             prior_external = (state.get('execution') or {}).get('actions_issued', 0)
-            if (prior_external + prior_native + len(calls) > msty_execution.MAX_ACTIONS or
-                    sum(call['name'] == 'native_write_todos' for call in native_calls) > 1 or
-                    sum(call['name'] == msty_swarm.TOOL for call in native_calls) > 1):
-                return result.model_copy(update={'content':
-                    'Действия не выполнены: общий лимит действий или повторное обновление списка задач не допускает этот шаг.',
+            blocked = None
+            if sum(call['name'] == msty_swarm.TOOL for call in native_calls) > 1:
+                blocked = SECOND_SWARM_REFUSAL
+            elif (prior_external + prior_native + len(calls) > msty_execution.MAX_ACTIONS or
+                    sum(call['name'] == 'native_write_todos' for call in native_calls) > 1):
+                blocked = 'Действия не выполнены: общий лимит действий или повторное обновление списка задач не допускает этот шаг.'
+            if blocked:
+                return result.model_copy(update={'content': blocked,
                     'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {},
                     'response_metadata': {**result.response_metadata, 'msty_blocked': True}})
             if native_calls and external_calls and not result.invalid_tool_calls:
@@ -666,7 +681,8 @@ class NativeMstyMiddleware(AgentMiddleware):
             if isinstance(resumed, dict) and 'swarm' in request:
                 resumed = dict(resumed)
                 try:
-                    admission = msty_swarm.check_admission(request['swarm'], resumed.pop('swarm_admission', None))
+                    admission = msty_swarm.admission_record(request['swarm'], msty_swarm.check_admission(
+                        request['swarm'], resumed.pop('swarm_admission', None)))
                 except msty_swarm.SwarmPlanError as error:
                     raise msty_execution.ExecutionProtocolError(str(error)) from None
             if resumed != expected or type(resumed.get('version')) is not int:
@@ -824,6 +840,11 @@ class NativeMstyMiddleware(AgentMiddleware):
         admission = request.state.get('swarm_admission')
         if not isinstance(admission, dict):
             raise msty_execution.ExecutionProtocolError('Рой исполняется только по допуску моста.')
+        try:
+            # Вторая линия: план этого вызова = план, по которому мост выдал допуск.
+            msty_swarm.verify_execution(call, plan, admission)
+        except msty_swarm.SwarmPlanError as error:
+            raise msty_execution.ExecutionProtocolError(str(error)) from None
         if admission['status'] == 'rejected':
             return reply('Рой не допущен мостом: ' + admission['reason'] + ' Модельных вызовов '
                          'исполнителей не было; продолжай сам и не выдавай ответ за работу роя.')

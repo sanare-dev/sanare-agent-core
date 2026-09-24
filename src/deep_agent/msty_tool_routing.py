@@ -411,7 +411,12 @@ def _explicit_requests(messages: list[Any]) -> set[str]:
     return names
 
 
-def catalog_prompt(tools: list[dict], selected: list[str], limit: int = 160) -> str:
+#: Каталог перечисляет каждую невыданную схему входа (msty_models.MAX_TOOLS),
+#: иначе инструменты сверх предела были бы молча недоступны для запроса.
+MAX_CATALOG = 256
+
+
+def catalog_prompt(tools: list[dict], selected: list[str], limit: int = MAX_CATALOG) -> str:
     """Каталог переданных, но не выданных на шаге схем: имя — короткое назначение."""
     lines = []
     for tool in tools:

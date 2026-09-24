@@ -44,7 +44,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from . import msty_models
+from . import msty_breaker, msty_execution, msty_models, msty_taxonomy
 
 PROTOCOL = 'msty-swarm-v1'
 TOOL = 'native_swarm'
@@ -67,6 +67,9 @@ MAX_RESULT_CHARS = 6000         # на подзадачу в контекст л
 WORKER_TIMEOUT_SECONDS = 75     # мост ограничивает весь ход 150 с
 _NAMESPACE = uuid.UUID('2f0c2d4e-6c1b-4a8e-9f3e-5b7a0c1d2e3f')
 TERMINAL = ('done', 'incomplete', 'failed', 'timeout')
+#: error подзадачи при открытом контуре провайдера (статус остаётся failed —
+#: множество TERMINAL моста не меняется).
+PROVIDER_UNAVAILABLE = 'provider_unavailable'
 
 WORKER_POLICY = (
     'Ты — исполнитель роя Brain. Тебе поручена ОДНА подзадача общей цели; '
@@ -207,14 +210,47 @@ def check_admission(swarm: dict, admission) -> dict:
                                        for i in items] != [s['id'] for s in swarm['subtasks']]:
         raise SwarmPlanError('Допуск роя покрывает не все подзадачи плана.')
     for item, planned in zip(items, swarm['subtasks']):
-        binding = item.get('binding')
         if (set(item) != {'id', 'request_id', 'binding'} or not isinstance(item['request_id'], str) or
-                not 0 < len(item['request_id']) <= 128 or not isinstance(binding, dict) or
-                binding.get('profile') != planned['profile'] or
-                binding.get('output_limit') != planned['max_tokens'] or
-                type(binding.get('input_limit')) is not int):
+                not 0 < len(item['request_id']) <= 128 or not _binding_matches(item['binding'], planned)):
             raise SwarmPlanError('Тарифный допуск подзадачи не совпадает с планом.')
     return admission
+
+
+def _binding_matches(binding, planned) -> bool:
+    """Та же сверка, что у лида (msty_execution.validate_binding): версия и
+    тарифный манифест, профиль и выход из плана, вход — в окне профиля."""
+    expected = {'version': 1, 'pricing_version': msty_execution.PRICING_VERSION,
+                'profile': planned['profile'], 'output_limit': planned['max_tokens']}
+    return (isinstance(binding, dict) and set(binding) == {*expected, 'input_limit'} and
+            all(binding[key] == value for key, value in expected.items()) and
+            all(type(binding[key]) is int for key in ('version', 'input_limit', 'output_limit')) and
+            planned['profile'] in msty_execution.CONTEXT_WINDOWS and
+            msty_execution.LEGACY_INPUT_LIMIT <= binding['input_limit'] <=
+            msty_execution.window_input_limit(planned['profile']))
+
+
+def admission_record(swarm: dict, admission: dict) -> dict:
+    """Проверенный допуск вместе с описателем, по которому он выдан.
+
+    Хранится приватно в checkpoint; при исполнении verify_execution сверяет
+    с ним исполняемый план (вторая линия к структурной гарантии пакета).
+    """
+    return {**admission, 'descriptor': {key: swarm[key] for key in
+                                        ('swarm_id', 'tool_call_id', 'plan_sha256', 'subtasks')}}
+
+
+def verify_execution(call: dict, plan: dict, record) -> None:
+    """Исполняемый план = допущенный: swarm_id, вызов, plan_sha256, подзадачи."""
+    descriptor = record.get('descriptor') if isinstance(record, dict) else None
+    if (not isinstance(descriptor, dict) or record.get('swarm_id') != descriptor.get('swarm_id') or
+            descriptor.get('tool_call_id') != call.get('id') or
+            descriptor.get('plan_sha256') != _digest(plan) or
+            descriptor.get('subtasks') != [{key: item[key] for key in ('id', 'title', 'role', 'profile', 'max_tokens')}
+                                           for item in plan['subtasks']]):
+        raise SwarmPlanError('Исполняемый план роя не совпадает с допуском моста.')
+    if record.get('status') == 'admitted' and [s.get('id') for s in record.get('subtasks') or []] != \
+            [s['id'] for s in plan['subtasks']]:
+        raise SwarmPlanError('Исполняемый план роя не совпадает с допуском моста.')
 
 
 def _content_text(content) -> str:
@@ -247,13 +283,53 @@ def make_worker_model(profile: str, max_tokens: int):
     return msty_models.make_model(profile, max_tokens)
 
 
+class _GuardedEmit:
+    """Поток событий, который не роняет super-step.
+
+    Сбой stream writer в ветке Send отбросил бы результаты и итоговые
+    usage-события всех исполнителей. Потерянное событие считается, мост
+    закрывает такую строку как неизвестный расход (не ноль).
+    """
+
+    def __init__(self, emit: Callable):
+        self.emit, self.lost = emit, 0
+
+    def __call__(self, event: dict) -> None:
+        try:
+            self.emit(event)
+        except Exception:  # noqa: BLE001 — CancelledError (BaseException) проходит
+            self.lost += 1
+
+
+def _event(swarm_id, sub, status, **extra) -> dict:
+    return {'type': EVENT, 'version': 1, 'swarm_id': swarm_id, 'subtask': sub['id'],
+            'status': status, 'profile': sub['profile'], **extra}
+
+
+def _result(sub, status, error, reason, usage, text) -> dict:
+    return {'id': sub['id'], 'title': sub['title'], 'role': sub['role'],
+            'profile': sub['profile'], 'status': status, 'error': error,
+            'finish_reason': reason if isinstance(reason, str) else None,
+            'usage': ({k: usage.get(k) for k in ('input_tokens', 'output_tokens')}
+                      if isinstance(usage, dict) else None),
+            'text': text[:MAX_RESULT_CHARS] + ('…(усечено)' if len(text) > MAX_RESULT_CHARS else '')}
+
+
 async def _worker_call(swarm_id: str, goal: str, sub: dict, emit: Callable,
                        model_factory: Callable) -> dict:
     started, usage, metadata, reason, text = False, None, None, None, ''
     status, error = 'failed', None
     begun = time.monotonic()
-    emit({'type': EVENT, 'version': 1, 'swarm_id': swarm_id, 'subtask': sub['id'],
-          'status': 'running', 'profile': sub['profile']})
+    # TAU L4: тот же контур, что у лида ('model:'+профиль). Открытый контур —
+    # подзадача не вызывается: статус failed/provider_unavailable, started=False,
+    # мост закрывает строку нулём (not_started), платного вызова нет.
+    connection = 'model:' + sub['profile']
+    remaining, probe_token = msty_breaker.admit(connection)
+    if remaining is not None:
+        emit(_event(swarm_id, sub, 'failed', started=False, usage=None, response_metadata=None,
+                    finish_reason=None, chars=0, elapsed_ms=0, error=PROVIDER_UNAVAILABLE))
+        return _result(sub, 'failed', PROVIDER_UNAVAILABLE, None, None, '')
+    emit(_event(swarm_id, sub, 'running'))
     try:
         model = model_factory(sub['profile'], sub['max_tokens'])
         task = (f'Общая цель роя: {goal}\n\nТвоя подзадача «{sub["title"]}» (роль: {sub["role"]}):\n'
@@ -263,7 +339,17 @@ async def _worker_call(swarm_id: str, goal: str, sub: dict, emit: Callable,
         messages = [SystemMessage(content=WORKER_POLICY + ' Твоя роль: ' + sub['role'] + '.'),
                     HumanMessage(content=task)]
         started = True
-        raw = await asyncio.wait_for(model.ainvoke(messages), timeout=WORKER_TIMEOUT_SECONDS)
+        try:
+            raw = await asyncio.wait_for(model.ainvoke(messages), timeout=WORKER_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if msty_taxonomy.is_transient_exception(exc):
+                msty_breaker.record_transient_failure(connection)
+            else:
+                msty_breaker.record_success(connection)  # провайдер ответил: контур жив
+            raise
+        msty_breaker.record_success(connection)
         try:
             usage = msty_models.checked_usage(sub['profile'], raw)
         except Exception:
@@ -286,25 +372,23 @@ async def _worker_call(swarm_id: str, goal: str, sub: dict, emit: Callable,
         status, error = 'failed', 'model_identity' if started else 'model_setup'
     except Exception as exc:  # noqa: BLE001 — исполнитель не роняет super-step
         status, error = 'failed', type(exc).__name__[:60]
-    event = {'type': EVENT, 'version': 1, 'swarm_id': swarm_id, 'subtask': sub['id'],
-             'status': status, 'profile': sub['profile'], 'started': started,
-             'usage': usage, 'response_metadata': _identity(metadata),
-             'finish_reason': reason if isinstance(reason, str) else None,
-             'chars': len(text), 'elapsed_ms': int((time.monotonic() - begun) * 1000)}
+    finally:
+        # Проба полуоткрытого контура не держится 150 с после отмены/сбоя.
+        msty_breaker.release_probe(connection, probe_token)
+    event = _event(swarm_id, sub, status, started=started, usage=usage,
+                   response_metadata=_identity(metadata),
+                   finish_reason=reason if isinstance(reason, str) else None,
+                   chars=len(text), elapsed_ms=int((time.monotonic() - begun) * 1000))
     if error:
         event['error'] = error
     emit(event)
-    return {'id': sub['id'], 'title': sub['title'], 'role': sub['role'],
-            'profile': sub['profile'], 'status': status, 'error': error,
-            'finish_reason': event['finish_reason'],
-            'usage': ({k: usage.get(k) for k in ('input_tokens', 'output_tokens')}
-                      if isinstance(usage, dict) else None),
-            'text': text[:MAX_RESULT_CHARS] + ('…(усечено)' if len(text) > MAX_RESULT_CHARS else '')}
+    return _result(sub, status, error, reason, usage, text)
 
 
 def build_graph(emit: Callable, model_factory: Callable | None = None):
     """plan → Send(worker)×N → collect. Без checkpointer: живёт внутри ToolNode."""
     factory = model_factory or make_worker_model
+    emit = emit if isinstance(emit, _GuardedEmit) else _GuardedEmit(emit)
 
     def fan_out(state):
         return [Send('worker', {'swarm_id': state['swarm_id'], 'goal': state['goal'], 'subtask': sub})
@@ -330,7 +414,9 @@ def summary(swarm_id: str, goal: str, results: list[dict]) -> dict:
     report = {'version': 1, 'swarm_id': swarm_id, 'goal': goal, 'status': status,
               'completed': len(done), 'total': len(results), 'subtasks': results}
     if status != 'complete':
-        missing = [f'{r["id"]} «{r["title"]}» ({r["status"]})' for r in results if r['status'] != 'done']
+        missing = [f'{r["id"]} «{r["title"]}» ('
+                   + ('провайдер недоступен, вызова не было' if r.get('error') == PROVIDER_UNAVAILABLE
+                      else r['status']) + ')' for r in results if r['status'] != 'done']
         report['note'] = ('ЧАСТИЧНЫЙ РЕЗУЛЬТАТ роя: не выполнены ' + '; '.join(missing) +
                           '. В ответе владельцу явно назови невыполненные части; не выдавай '
                           'частичный итог за полный и не придумывай их содержание.')
@@ -340,6 +426,7 @@ def summary(swarm_id: str, goal: str, results: list[dict]) -> dict:
 async def run(plan: dict, admission: dict, emit: Callable, model_factory: Callable | None = None) -> dict:
     """Исполнить допущенный рой; результат — отчёт для ToolMessage лида."""
     swarm_id = admission['swarm_id']
+    emit = _GuardedEmit(emit)
     graph = build_graph(emit, model_factory)
     # Свежий config: подграф не наследует checkpointer/поток родителя.
     final = await graph.ainvoke({'swarm_id': swarm_id, 'goal': plan['goal'],
@@ -350,6 +437,10 @@ async def run(plan: dict, admission: dict, emit: Callable, model_factory: Callab
     report = summary(swarm_id, plan['goal'], results)
     emit({'type': EVENT, 'version': 1, 'swarm_id': swarm_id, 'subtask': None,
           'status': report['status'], 'completed': report['completed'], 'total': report['total']})
+    if emit.lost:
+        # Мост не получил часть событий: эти строки учёта он закроет как
+        # неизвестный расход; лид не должен выдавать учёт роя за подтверждённый.
+        report['events_lost'] = emit.lost
     return report
 
 
@@ -358,4 +449,7 @@ def tool_text(report: dict) -> str:
             'и не выполненные действия). Синтезируй итог для владельца сам.')
     if report.get('note'):
         head += ' ' + report['note']
+    if report.get('events_lost'):
+        head += (f' Потеряно событий учёта роя: {report["events_lost"]}; расход этих '
+                 'подзадач неизвестен, не называй его подтверждённым.')
     return head + '\n' + json.dumps(report, ensure_ascii=False)
