@@ -61,3 +61,33 @@ SHA-256 от `(source_kind, thread_id, compaction_id, source_sha256)`; повт�
 
 Использован существующий формат compaction Brain Desk и подход кандидатов из
 `src/deep_agent/consolidator.py`; новая библиотека/служба не добавлялась.
+
+## Чтение очереди Brain Desk (#238)
+
+`src/deep_agent` разворачивается на удалённом сервере и не имеет доступа к
+файлам Mac (см. `AGENTS.md` репозитория: «avoid calls to actual file system»),
+поэтому очередь читает не граф, а серверная часть Brain Desk — так же, как она
+уже напрямую вызывает `src/lib/server/memory/engram.py` для памяти. Единый
+источник формата — этот файл и `import_compactions.py`, а не отдельная копия
+парсинга в TypeScript.
+
+```sh
+python3 tools/import_compactions.py --list-pending
+python3 tools/import_compactions.py --resolve-pending <id> --decision written
+python3 tools/import_compactions.py --resolve-pending <id> --decision rejected
+```
+
+- `--list-pending` печатает в stdout JSON-массив уже застейдженных кандидатов
+  (тот же формат записи, плюс `id` — имя файла без `.json`). Не читает
+  источники заново и не вызывает модель.
+- `--resolve-pending ID --decision written|rejected` переносит один файл из
+  `pending/` в `reviewed/<decision>/` (права `0700`/`0600` сохраняются). После
+  переноса кандидат больше не показывается `--list-pending` и не появляется
+  заново при повторном запуске обычного импорта того же источника — имя файла
+  проверяется также в `reviewed/`, а не только в `pending/`. Возвращает
+  `{"moved": true|false}`; `false` — неверный id/decision или кандидат уже не
+  в очереди (гонка, не ошибка).
+- Ожидаемый вызывающий — Brain Desk (`src/lib/server/import/pending-inbox.ts`,
+  brain-desk#238-inbox): при отметке владельца сначала пишет через
+  существующий адаптер памяти, затем помечает исход здесь. До первого
+  успешного вызова адаптера кандидат остаётся в `pending/`.

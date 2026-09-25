@@ -6,7 +6,15 @@ import sqlite3
 import tempfile
 import unittest
 
-from import_compactions import extract_candidates, stage, stage_claude, stage_kimi, stage_openwebui
+from import_compactions import (
+    extract_candidates,
+    list_pending,
+    resolve_pending,
+    stage,
+    stage_claude,
+    stage_kimi,
+    stage_openwebui,
+)
 
 
 THREAD_ID = "11111111-2222-4333-8444-555555555555"
@@ -207,6 +215,45 @@ class ImportCompactionsTests(unittest.TestCase):
             connection.execute("CREATE TABLE chat_message (id TEXT, content TEXT)")
         self.assertEqual(stage_openwebui(database, self.pending)["candidates"], 0)
         self.assertEqual(list(self.pending.glob("*.json")), [])
+
+    def test_list_pending_reads_staged_candidates_with_id(self):
+        self.write_thread(thread("Решение: использовать локальное хранилище."))
+        stage(self.threads, self.pending)
+        [row] = list_pending(self.pending)
+        self.assertRegex(row["id"], r"^[0-9a-f]{64}$")
+        self.assertEqual(row["summary"], "Решение: использовать локальное хранилище.")
+        self.assertEqual(row["status"], "pending_review")
+
+    def test_list_pending_ignores_missing_dir_and_junk_files(self):
+        self.assertEqual(list_pending(self.pending), [])
+        self.pending.mkdir()
+        (self.pending / "not-a-candidate.json").write_text("{}")
+        (self.pending / ("a" * 64 + ".json")).write_text("not json")
+        self.assertEqual(list_pending(self.pending), [])
+
+    def test_resolve_pending_moves_candidate_out_of_queue(self):
+        self.write_thread(thread("Решение: использовать локальное хранилище."))
+        stage(self.threads, self.pending)
+        [row] = list_pending(self.pending)
+        self.assertTrue(resolve_pending(self.pending, row["id"], "written"))
+        self.assertEqual(list_pending(self.pending), [])
+        moved = self.pending.parent / "reviewed" / "written" / f"{row['id']}.json"
+        self.assertTrue(moved.is_file())
+        self.assertEqual(json.loads(moved.read_text())["summary"], row["summary"])
+        # Re-running import for the same source does not resurrect it: it is
+        # counted as already seen (in "reviewed/"), never staged again.
+        self.assertEqual(stage(self.threads, self.pending)["existing"], 1)
+        self.assertEqual(stage(self.threads, self.pending)["new"], 0)
+        self.assertEqual(list(self.pending.glob("*.json")), [])
+
+    def test_resolve_pending_rejects_bad_id_and_repeat(self):
+        self.write_thread(thread("Решение: использовать локальное хранилище."))
+        stage(self.threads, self.pending)
+        [row] = list_pending(self.pending)
+        self.assertFalse(resolve_pending(self.pending, "../etc/passwd", "written"))
+        self.assertFalse(resolve_pending(self.pending, row["id"], "bogus"))
+        self.assertTrue(resolve_pending(self.pending, row["id"], "written"))
+        self.assertFalse(resolve_pending(self.pending, row["id"], "written"))
 
 
 if __name__ == "__main__":

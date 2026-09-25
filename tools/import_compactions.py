@@ -137,12 +137,22 @@ def _prepare_pending(pending: Path, dry_run: bool) -> None:
     pending.chmod(0o700)
 
 
+def _already_seen(pending: Path, name: str) -> bool:
+    """A candidate already staged, or already reviewed and moved out (#238):
+    either way this run must not recreate it in the pending queue."""
+    if (pending / name).exists():
+        return True
+    reviewed = pending.parent / "reviewed"
+    return any((reviewed / decision / name).exists() for decision in DECISIONS)
+
+
 def _stage_candidate(candidate: Candidate, pending: Path, counts: dict[str, int], dry_run: bool) -> None:
     counts["candidates"] += 1
-    target = pending / candidate_name(candidate)
-    if target.exists():
+    name = candidate_name(candidate)
+    if _already_seen(pending, name):
         counts["existing"] += 1
         return
+    target = pending / name
     if dry_run:
         counts["new"] += 1
         return
@@ -155,6 +165,62 @@ def _stage_candidate(candidate: Candidate, pending: Path, counts: dict[str, int]
     with os.fdopen(fd, "w", encoding="utf-8") as output:
         output.write(payload)
     counts["new"] += 1
+
+
+CANDIDATE_ID = re.compile(r"^[0-9a-f]{64}$")
+DECISIONS = ("written", "rejected")
+
+
+def list_pending(pending: Path) -> list[dict]:
+    """Read every staged candidate for an external reader (Brain Desk #238).
+
+    Read-only: parses each `pending/<id>.json`, adds its filename stem as
+    `id`, and drops anything that fails to parse as one of our own records
+    instead of raising, so one corrupt file cannot break the whole listing.
+    Sorted oldest first, matching the order candidates were observed.
+    """
+    if not pending.is_dir() or pending.is_symlink():
+        return []
+    found: list[dict] = []
+    for path in sorted(pending.glob("*.json")):
+        if not CANDIDATE_ID.fullmatch(path.stem) or path.is_symlink():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict) or data.get("status") != "pending_review":
+            continue
+        found.append({"id": path.stem, **data})
+    found.sort(key=lambda c: str(c.get("observed_at") or ""))
+    return found
+
+
+def resolve_pending(pending: Path, candidate_id: str, decision: str) -> bool:
+    """Move a reviewed candidate out of the pending queue (Brain Desk #238).
+
+    Called once the owner's tick has gone through the existing memory adapter
+    (`decision="written"`) or been declined (`decision="rejected"`); either
+    way the file leaves `pending/` so it is never re-shown or re-imported,
+    while the record itself is kept under `reviewed/<decision>/` for audit.
+    Returns False (no exception) when the id is invalid or already resolved,
+    since a repeated resolve of the same id is a normal race, not an error.
+    """
+    if decision not in DECISIONS or not CANDIDATE_ID.fullmatch(candidate_id):
+        return False
+    source = pending / f"{candidate_id}.json"
+    if not source.is_file() or source.is_symlink():
+        return False
+    destination_dir = pending.parent / "reviewed" / decision
+    destination_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if destination_dir.is_symlink():
+        raise OSError("reviewed directory is a symlink")
+    destination = destination_dir / source.name
+    try:
+        os.replace(source, destination)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def stage(threads: Path, pending: Path, *, dry_run: bool = False) -> dict[str, int]:
@@ -366,7 +432,22 @@ def main() -> int:
     parser.add_argument("--pending", type=Path, default=DEFAULT_PENDING)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--source", choices=("all", "braindesk", "kimi", "claude", "openwebui"), default="all")
+    parser.add_argument("--list-pending", action="store_true",
+                        help="print the pending queue as JSON for an external reader (Brain Desk #238)")
+    parser.add_argument("--resolve-pending", metavar="ID",
+                        help="move one candidate out of the pending queue once it has been reviewed")
+    parser.add_argument("--decision", choices=DECISIONS,
+                        help="outcome for --resolve-pending: written or rejected")
     options = parser.parse_args()
+    if options.list_pending:
+        print(json.dumps(list_pending(options.pending), ensure_ascii=False, sort_keys=True))
+        return 0
+    if options.resolve_pending:
+        if not options.decision:
+            parser.error("--resolve-pending requires --decision")
+        moved = resolve_pending(options.pending, options.resolve_pending, options.decision)
+        print(json.dumps({"moved": moved}, sort_keys=True))
+        return 0 if moved else 1
     if options.source == "openwebui" and options.openwebui_db is None:
         parser.error("--source openwebui requires --openwebui-db")
     result = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
