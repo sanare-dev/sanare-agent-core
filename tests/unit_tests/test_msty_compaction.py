@@ -253,6 +253,130 @@ def test_summary_cannot_hide_user_message_even_with_matching_hash():
         compact.project_messages({**state, 'context_memory': {'version': 1, 'segments': [segment]}})
 
 
+def multi_cluster_history(clusters):
+    """`clusters` isolated big tool bundles (each its own compaction candidate,
+    separated by a plain user message so make_plan never merges them into one
+    span), followed by the usual two verbatim tail bundles."""
+    state = initial()
+    for cluster in range(clusters):
+        identifier = f'cluster-{cluster}'
+        state['messages'].extend([
+            {'role': 'assistant', 'content': 'Readback.', 'tool_calls': [
+                {'id': identifier, 'type': 'function', 'function': {
+                    'name': 'read_fixture', 'arguments': '{"path":"synthetic.txt"}'}}]},
+            {'role': 'tool', 'tool_call_id': identifier, 'content': 'Untrusted fixture. ' * 1500},
+            {'role': 'user', 'content': f'Continue analysis {cluster}.'},
+        ])
+    for index in range(2):
+        identifier = f'recent-{index}'
+        state['messages'].extend([
+            {'role': 'assistant', 'content': 'Readback.', 'tool_calls': [
+                {'id': identifier, 'type': 'function', 'function': {
+                    'name': 'read_fixture', 'arguments': '{"path":"recent.txt"}'}}]},
+            {'role': 'tool', 'tool_call_id': identifier, 'content': f'recent observation {index}'}])
+    return state
+
+
+def test_two_compaction_rounds_in_one_request_use_distinct_stages(monkeypatch):
+    # Owner decision 25.09.2026: one huge upload can need more than one summary
+    # pass before the lead can answer. Two isolated oversized clusters must each
+    # get their own stage_id/source_sha256, resumed back to back, no crash.
+    state = multi_cluster_history(2)
+    responses, counts = [summary(state)], [190000, 500]
+    seen = install(monkeypatch, responses, counts)
+    async def scenario():
+        graph = msty.builder.compile(checkpointer=InMemorySaver())
+        cfg = {'configurable': {'thread_id': 'two-rounds'}}
+        first = await graph.ainvoke(state, cfg)
+        assert first['execution']['status'] == 'waiting_compaction'
+        assert first['compaction_round'] == 1
+        stage1 = first['compaction_stage']
+        responses.append(summary(first))
+        counts.extend([190000, 500])
+        second = await graph.ainvoke(
+            Command(resume={first['__interrupt__'][0].id: resume(first)}), cfg)
+        assert second['execution']['status'] == 'waiting_compaction'
+        assert second['compaction_round'] == 2
+        stage2 = second['compaction_stage']
+        # Each round is its own stage: distinct id and distinct compacted source.
+        assert stage1['stage_id'] != stage2['stage_id']
+        assert stage1['source_sha256'] != stage2['source_sha256']
+        assert len(second['context_memory']['segments']) == 2
+        responses.append('Finished after two compactions.')
+        counts.append(90000)
+        third = await graph.ainvoke(
+            Command(resume={second['__interrupt__'][0].id: resume(second)}), cfg)
+        assert third['execution']['status'] == 'answered'
+        assert third['compaction_round'] == 0
+        assert third['result']['content'] == 'Finished after two compactions.'
+        assert not third.get('__interrupt__')
+        assert len(seen['requests']) == 3
+    asyncio.run(scenario())
+
+
+def test_three_compaction_rounds_in_one_request_then_real_answer(monkeypatch):
+    state = multi_cluster_history(3)
+    responses, counts = [summary(state)], [190000, 500]
+    seen = install(monkeypatch, responses, counts)
+    async def scenario():
+        graph = msty.builder.compile(checkpointer=InMemorySaver())
+        cfg = {'configurable': {'thread_id': 'three-rounds'}}
+        current = await graph.ainvoke(state, cfg)
+        for expected_round in (1, 2, 3):
+            assert current['execution']['status'] == 'waiting_compaction'
+            assert current['compaction_round'] == expected_round
+            if expected_round < 3:
+                responses.append(summary(current))
+                counts.extend([190000, 500])
+            else:
+                responses.append('Finished after three compactions.')
+                counts.append(90000)
+            current = await graph.ainvoke(
+                Command(resume={current['__interrupt__'][0].id: resume(current)}), cfg)
+        assert current['execution']['status'] == 'answered'
+        assert current['compaction_round'] == 0
+        assert current['result']['content'] == 'Finished after three compactions.'
+        assert not current.get('__interrupt__')
+        assert len(seen['requests']) == 4
+    asyncio.run(scenario())
+
+
+def test_fourth_compaction_round_declines_gracefully_without_charge(monkeypatch):
+    # A fourth cluster is still genuinely compactable when the cap is hit: the
+    # graph must decline softly (no charge, no crash) rather than either loop
+    # forever or attempt a still-oversized real generation.
+    state = multi_cluster_history(4)
+    responses, counts = [summary(state)], [190000, 500]
+    seen = install(monkeypatch, responses, counts)
+    async def scenario():
+        graph = msty.builder.compile(checkpointer=InMemorySaver())
+        cfg = {'configurable': {'thread_id': 'fourth-declines'}}
+        current = await graph.ainvoke(state, cfg)
+        for expected_round in (1, 2, 3):
+            assert current['execution']['status'] == 'waiting_compaction'
+            assert current['compaction_round'] == expected_round
+            if expected_round < 3:
+                responses.append(summary(current))
+                counts.extend([190000, 500])
+            else:
+                # Round 4 would still find a real plan (the 4th cluster), but
+                # the cap is already reached: only the outer trigger count is
+                # consumed, no model call, no fourth compaction stage.
+                counts.append(150000)
+            current = await graph.ainvoke(
+                Command(resume={current['__interrupt__'][0].id: resume(current)}), cfg)
+        assert current['execution']['status'] == 'blocked'
+        assert current['result']['response_metadata']['msty_generation'] == 'not_started'
+        assert current['result']['usage_metadata'] == {
+            'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
+        assert current['context_budget_check']['status'] == 'rejected'
+        assert not current.get('__interrupt__')
+        assert current['compaction_round'] == 0
+        assert compact.make_plan(current) is not None  # a real cluster was still left uncompacted
+        assert len(seen['requests']) == 3  # exactly the 3 allowed compaction model calls, no 4th
+    asyncio.run(scenario())
+
+
 def test_many_small_bundles_are_combined_without_crossing_owner_message():
     state = initial()
     for index in range(12):
