@@ -269,7 +269,7 @@ def test_large_context_is_counted_in_a_worker_before_generation_without_truncati
     assert seen['config']['max_tokens'] == 8192
     assert seen['config']['max_retries'] == 0
     assert result['context_budget_check'] == {
-        'version': 1, 'status': 'accepted', 'input_tokens': 120000, 'limit': 180000,
+        'version': 1, 'status': 'accepted', 'input_tokens': 120000, 'limit': 180000, 'window_admission': True,
         'method': 'anthropic-exact-v1', 'model_profile': 'sonnet'}
     assert result['result']['usage_metadata']['input_tokens'] == 120010
 
@@ -299,7 +299,7 @@ def test_input_token_limit_is_inclusive_and_overflow_never_generates(monkeypatch
         'tools': [], 'context_budget': 'anthropic-count-v1'}))
     expected_check = {
         'version': 1, 'status': 'accepted' if accepted else 'rejected',
-        'input_tokens': tokens, 'limit': 180000}
+        'input_tokens': tokens, 'limit': 180000, 'window_admission': True}
     if accepted:
         expected_check.update(method='anthropic-exact-v1', model_profile='sonnet')
     assert result['context_budget_check'] == expected_check
@@ -320,7 +320,7 @@ def test_count_failure_is_fail_closed_without_raw_exception_or_generation(monkey
         'tools': [], 'context_budget': 'anthropic-count-v1'}))
     assert seen['events'] == ['count']
     assert result['context_budget_check'] == {
-        'version': 1, 'status': 'rejected', 'input_tokens': None, 'limit': 180000}
+        'version': 1, 'status': 'rejected', 'input_tokens': None, 'limit': 180000, 'window_admission': True}
     assert 'PRIVATE_PROVIDER_RESPONSE_SENTINEL' not in str(result)
     assert result['result']['usage_metadata']['total_tokens'] == 0
     assert 'не запущена' in result['result']['content']

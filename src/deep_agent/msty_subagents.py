@@ -292,14 +292,17 @@ async def _execute(call: dict, loadout: dict, backend, scratch: dict,
     return f'error=unknown_tool. {name} не исполняется под-прогоном.', False
 
 
-def _gate_findings(findings: str, successful_reads: list, errors: list) -> str:
+def _gate_findings(findings: str, successful_reads: list, errors: list, goal: str = '') -> str:
     """Evidence gate на отчёте под-агента: негатив без статус-чтения — не факт.
 
     Под-прогон не исполняет статус-чтения (status_read — внешние инструменты,
     их исполняет родитель по recommended_calls); чтение виртуальной ФС
     доказательством состояния системы не является. Поэтому диагноз-негатив
-    под-агента всегда помечается неподтверждённым.
+    под-агента всегда помечается неподтверждённым — если цель под-агента
+    вообще о состоянии системы (планы и тексты Gate не трогает).
     """
+    if not msty_evidence.is_status_question(goal):
+        return findings
     if not msty_evidence.has_negative_claim(findings):
         return findings
     checked = ', '.join(sorted(set(successful_reads))) or 'ничего'
@@ -376,7 +379,7 @@ async def run(*, goal: str, role: str, domains: list, max_steps, report_format,
         findings = (f'Под-прогон прерван ({failure_class}-сбой контура модели). '
                     'Частичных результатов нет; родителю решать, повторять ли.')
         status = 'failed'
-    findings = _gate_findings(findings.strip(), successful_reads, errors)
+    findings = _gate_findings(findings.strip(), successful_reads, errors, goal)
     artifacts = {path: text[:MAX_ARTIFACT_CHARS] for path, text in scratch.items()
                  if not path.startswith('__')}
     return {'version': 1, 'status': status, 'role': role,

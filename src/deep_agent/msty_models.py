@@ -112,7 +112,14 @@ LUNA_IMAGE_PATCH_LIMITS = MappingProxyType({'low': 256, 'high': 2500, 'original'
 LUNA_IMAGE_COUNT_METHOD = 'tiktoken-image-envelope-v1'
 MAX_ADMISSION_IMAGES = 32
 MAX_MESSAGES = 512
-MAX_TOOLS = 128
+#: Input: client schemas one request may carry (brain-desk #183: the window
+#: sends <=120 today; connectors may need more). Every one is validated here;
+#: the native harness routes <=msty_tool_routing.MAX_SELECTED_TOOLS to the model.
+MAX_TOOLS = 256
+#: Provider cap on functions bound to ONE generation (OpenAI and DeepSeek Chat
+#: Completions: 128). A legacy path that binds every client schema is refused
+#: above it before any paid call instead of receiving a provider 400.
+MAX_MODEL_TOOLS = 128
 
 
 def _profile(profile: str) -> Profile:
@@ -175,10 +182,15 @@ def _canonical(value):
                       allow_nan=False)
 
 
-def _tools(profile: str, tools: list[dict]) -> list[dict]:
-    _profile(profile)
-    if not isinstance(tools, list) or len(tools) > MAX_TOOLS:
-        raise ModelAdapterError('Недопустимый список инструментов.')
+def check_tools(tools: list[dict]) -> None:
+    """Input contract for client schemas: <=MAX_TOOLS, unique names, finite JSON."""
+    _checked_tools(tools, MAX_TOOLS)
+
+
+def _checked_tools(tools: list[dict], limit: int) -> list[dict]:
+    if not isinstance(tools, list) or len(tools) > limit:
+        raise ModelAdapterError(f'Недопустимый список инструментов: больше {limit} схем.'
+                                if isinstance(tools, list) else 'Недопустимый список инструментов.')
     result, names = deepcopy(tools), set()
     for tool in result:
         function = tool.get('function') if isinstance(tool, dict) else None
@@ -187,15 +199,23 @@ def _tools(profile: str, tools: list[dict]) -> list[dict]:
                 or function['name'] in names or not isinstance(function.get('parameters', {}), dict)):
             raise ModelAdapterError('Недопустимая или неоднозначная схема инструмента.')
         names.add(function['name'])
-        if profile != 'sonnet':
-            # Strip provider metadata only, never a property named cache_control
-            # inside the actual tool's argument schema.
-            tool.pop('cache_control', None)
-            function.pop('cache_control', None)
     try:
         _canonical(result)
     except (TypeError, ValueError):
         raise ModelAdapterError('Схемы инструментов не являются конечным JSON.') from None
+    return result
+
+
+def _tools(profile: str, tools: list[dict]) -> list[dict]:
+    """Schemas of one generation: the input contract plus the provider cap."""
+    _profile(profile)
+    result = _checked_tools(tools, MAX_MODEL_TOOLS)
+    if profile != 'sonnet':
+        for tool in result:
+            # Strip provider metadata only, never a property named cache_control
+            # inside the actual tool's argument schema.
+            tool.pop('cache_control', None)
+            tool['function'].pop('cache_control', None)
     return result
 
 

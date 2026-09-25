@@ -985,3 +985,73 @@ def test_graph_step_for_a_plain_question_carries_neither_tools_nor_extra_policy(
     for block in (*msty_prompts.ACTIONABLE_BLOCKS, *msty_prompts.DOMAIN_BLOCKS,
                   *msty_prompts.TOOL_BLOCKS):
         assert block not in system, block
+
+
+@pytest.mark.parametrize('content,expected', [
+    # brain-desk #309: живой ZodError Supabase с блоком самовосстановления окна.
+    ('Ошибка инструмента: {"error":{"name":"ZodError","message":"ref must be exactly 20 '
+     'characters long"}}\n\n[Brain Desk · самовосстановление] Класс: validation (неверный '
+     'аргумент). Вызови list_projects и возьми project_id оттуда.', 'invalid_args'),
+    ('[{"name":"inbox_events"}]', None),
+])
+def test_failed_client_tool_result_is_classified_and_next_step_gets_recovery_note(
+        monkeypatch, content, expected):
+    """Отказ из окна не засчитывается успехом: ToolMessage размечен классом, а
+    следующий шаг модели получает корректирующую заметку до ответа владельцу."""
+    seen = scripted(monkeypatch, [answer('', [call('external_read', {'name': 'x' * 19}, 'ext-1')]),
+                                  answer()])
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': f'recovery-{expected}'}}
+        first, _ = await invoke(graph, initial(), config)
+        external = first.tasks[0].interrupts[0]
+        resume = external_resume(first.values)
+        resume['input']['messages'][-1]['content'] = content
+        final, _ = await invoke(graph, Command(resume={external.id: resume}), config)
+        assert final.values['execution']['status'] == 'answered'
+        return final
+
+    final = asyncio.run(run())
+    assert len(seen) == 2
+    observed = [m for m in seen[1]['state']['messages'] if m['role'] == 'tool'][-1]
+    system = seen[1]['system']
+    if expected is None:
+        assert observed['content'] == content
+        assert 'TOOL_ERROR_RECOVERY_NOTE' not in system
+        assert not final.values.get('tau_errors')
+        return
+    assert observed['content'].startswith(f'tau_class={expected}.')
+    assert 'ref must be exactly' in observed['content']
+    assert 'TOOL_ERROR_RECOVERY_NOTE' in system
+    assert f'external_read: tau_class={expected}' in system
+    assert 'TOOL_ERROR_RECOVERY_NOTE' not in seen[0]['system']
+    # Превентивное правило (не угадывать id) шло уже с первым шагом внешнего вызова.
+    assert 'TOOL_ERROR_RECOVERY_V1' in seen[0]['system']
+    assert [entry['class'] for entry in final.values['tau_errors']] == [expected]
+
+
+def test_tool_error_recovery_block_is_always_on_the_wire_and_reconciles_reuse():
+    """brain-desk #309: правило восстановления после ошибки инструмента — в любом
+    маршруте, а правила повторного использования id уступают отклонённому id."""
+    full = msty.POLICY + '\n' + msty_native.NATIVE_POLICY
+    block = next(b for b in msty.POLICY.split('\n\n') if b.startswith('TOOL_ERROR_RECOVERY_V1'))
+    for needle in ('до ответа', 'не угадывай', 'list_projects', 'Переподключить',
+                   'Урок Brain Desk', 'без изменений не повторяй'):
+        assert needle in block, needle
+    # Блок следует за внешними инструментами на любом маршруте, включая direct.
+    for route in ({'intent': 'direct', 'domains': []},
+                  {'intent': 'read', 'domains': ['supabase']},
+                  {'intent': 'mutate', 'domains': ['brain']}):
+        assert block in msty_prompts.select_policy(
+            full, route, ['native_read_file', 'list_tables'], external_names=['list_tables'])
+        # Без внешних инструментов вызывать нечего — префикс не раздувается.
+        assert block not in msty_prompts.select_policy(
+            full, route, ['native_read_file'], external_names=[])
+    # Неизвестный набор внешних (старый вызывающий) — консервативно сохраняется.
+    assert block in msty_prompts.select_policy(full, {'intent': 'direct', 'domains': []},
+                                               ['list_tables'])
+    reuse = next(b for b in msty.POLICY.split('\n\n') if b.startswith('MSTY_CONTEXT_REUSE_V1'))
+    assert 'кроме случая, когда инструмент отклонил этот id' in reuse
+    from deep_agent import msty_memory
+    assert 'если инструмент отклонил\nproject_id — вызови list_projects' in msty_memory.system_context()
