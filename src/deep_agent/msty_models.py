@@ -86,24 +86,26 @@ PROFILES = MappingProxyType({
     'luna': Profile('openai', 'gpt-6-luna', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'deepseek': Profile('deepseek', 'deepseek-flash', 'https://api.deepseek.com/v1', 'DEEPSEEK_API_KEY'),
     'sonnet': Profile('anthropic', 'claude-sonnet-4-6', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
-    # Gateway profiles use provider-prefixed BYOK ids. They are retained for
-    # explicit operator/direct use, but premium profiles are not admitted as
-    # autonomous Brain leads or consultants.
+    # Legacy profiles remain for historical records and explicit direct use;
+    # they are not admitted to new Brain consultations.
     'astra': Profile('openai', 'gpt-6-astra', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'sol': Profile('openai', 'gpt-5.6-sol', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
     'opus': Profile('anthropic', 'claude-opus-4-8', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
     'fable': Profile('anthropic', 'claude-fable-5-1', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
+    'sol6': Profile('openai', 'gpt-6-sol', 'https://api.openai.com/v1', 'OPENAI_API_KEY'),
+    'opus5': Profile('anthropic', 'claude-opus-5-5', 'https://api.anthropic.com', 'ANTHROPIC_API_KEY'),
 })
 # Server-owned allowlist for the optional analyst consultation profile. The
 # model never supplies this directly: the bridge validates the parent-issued
 # request field before it reaches the graph.
-CONSULT_PROFILES = frozenset(('deepseek', 'astra', 'opus', 'fable'))
+CONSULT_PROFILES = frozenset(('deepseek', 'sol6', 'opus5'))
 LEAD_PROFILES = frozenset(('luna', 'deepseek'))
 COUNT_METHODS = MappingProxyType({
     'luna': 'tiktoken-admission-v1', 'deepseek': 'conservative-text-v1',
     'sonnet': 'anthropic-exact-v1',
     'astra': 'tiktoken-admission-v1', 'sol': 'tiktoken-admission-v1',
     'opus': 'anthropic-exact-v1', 'fable': 'anthropic-exact-v1',
+    'sol6': 'tiktoken-admission-v1', 'opus5': 'anthropic-exact-v1',
 })
 COUNT_TIMEOUT_SECONDS = 20.0
 LUNA_IMAGE_PATCH_LIMITS = MappingProxyType({'low': 256, 'high': 2500, 'original': 30000, 'auto': 30000})
@@ -154,9 +156,8 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
     options = dict(use_responses_api=False, stream_usage=False)
     if profile == 'luna':
         options.update(reasoning_effort='none', store=False)
-    elif profile == 'sol':
-        # Kept for an explicit operator/direct profile only. Brain's autonomous
-        # lead and consultation allowlists deliberately exclude it.
+    elif profile in ('sol', 'sol6'):
+        # Sol 6 is admitted only as a bound analyst; never as a lead.
         options.update(reasoning_effort='medium', store=False)
     elif profile == 'astra':
         # gpt-6-astra has no 'none' tier; 'low' is its minimal reasoning effort.

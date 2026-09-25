@@ -67,7 +67,7 @@ any unrecognised text are never removed and an absent route leaves the text whol
 For a newly correlated top-level task, the local gateway first applies a zero-token
 deterministic rule: mutations, incidents and whole-architecture recovery use
 DeepSeek Flash; ordinary questions stay on Luna. Sol is excluded from autonomous
-Brain lead and consultation allowlists. The optional private TypeSafe Jev sidecar
+Brain leads. The optional private TypeSafe Jev sidecar
 may still choose Luna/DeepSeek for the non-complex lane. The cloud graph receives
 only the resulting immutable `lead_profile` (`deepseek` or `luna`). Resumes reuse
 the stored binding; old checkpoints preserve their
@@ -92,6 +92,19 @@ its own profile and sizes the Luna lead reserve to cover the fallback. A rejecti
 of the fallback, of a DeepSeek lead or of an analyst is an honest blocked answer
 with the provider code and zero usage — never a raised graph error. Other 400s
 still fail closed. Tests: `tests/unit_tests/test_msty_policy_fallback.py`.
+
+### Bound analyst consultation profiles (#58)
+
+The graph admits `deepseek`, `sol6` (`gpt-6-sol`) and `opus5`
+(`claude-opus-5-5`) as text-only analyst consultations when the local bridge
+issues the matching budget binding. They are never autonomous lead profiles.
+The active Gateway route refuses the former `astra`, `sol` (5.6), `opus`
+(4.8) and `fable` selectors. Their profile definitions remain only for
+historical accounting and explicit direct operator use outside this route.
+The bridge and Msty tool schema must be switched in coordination with the
+deployed graph; a source PR alone does not prove the live graph uses these
+allowlists. Offline tests use synthetic keys and mocked Gateway responses,
+without paid provider calls.
 
 ### Progress-aware execution
 

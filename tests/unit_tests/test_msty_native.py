@@ -864,11 +864,11 @@ def test_analyst_consult_profile_allowlist():
              'messages': [{'role': 'user', 'content': 'synthetic brief'}]}
     assert msty.selected_profile(state) == 'deepseek'
     assert msty.selected_profile({**state, 'consult_profile': None}) == 'deepseek'
-    for profile in ('astra', 'opus', 'fable'):
+    for profile in ('sol6', 'opus5'):
         assert msty.selected_profile({**state, 'consult_profile': profile}) == profile
     # Lead-only, premium autonomous and unknown profiles are never a valid
     # consultation target.
-    for bad in ('luna', 'sol', 'sonnet', 'unknown', '', 42):
+    for bad in ('luna', 'astra', 'sol', 'opus', 'fable', 'sonnet', 'unknown', '', 42):
         with pytest.raises(msty_models.ModelAdapterError):
             msty.selected_profile({**state, 'consult_profile': bad})
 
