@@ -431,6 +431,131 @@ def progress_intervention(state):
     )
 
 
+# Open plan gate (brain-desk #443) — the Stop hook of agent harnesses: Codex
+# CLI Stop hooks and Claude Code «decision: block» (the Ralph loop is built on
+# it). A turn that tries to end while the plan written in THIS owner turn
+# still has pending/in_progress items does not end: the model gets its plan
+# back and continues. The plan is either the native TODO list or the Brain
+# Desk window's task harness tool (brain_task_plan, «До результата»). Bounded:
+# at most OPEN_PLAN_GATE_LIMIT times per owner turn, never twice without a real
+# action in between, never against an owner control phrase, never past the
+# shared action cap. Every continuation is an ordinary metered step (native
+# ticket or the client's external round trip): the bridge budget, emergency
+# stop and approvals are untouched.
+NATIVE_TODOS = 'native_write_todos'
+TASK_PLAN_SUFFIX = 'brain_task_plan'
+TASK_CHECK_SUFFIX = 'brain_task_check'
+OPEN_PLAN_GATE_LIMIT = 3
+PLAN_GATE_PREFIX = 'plangate_'
+OPEN_STATUSES = frozenset({'pending', 'in_progress'})
+_TERMINATED = ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter')
+
+
+def _plan_items(name, args):
+    """(kind, [(title, status)]) of one plan call, None for any other call."""
+    if name == NATIVE_TODOS and isinstance(args.get('todos'), list):
+        return 'native', [(item.get('content'), item.get('status'))
+                          for item in args['todos'] if isinstance(item, dict)]
+    if _named(name, TASK_PLAN_SUFFIX) and isinstance(args.get('items'), list):
+        return 'task', [(item.get('title'), item.get('status'))
+                        for item in args['items'] if isinstance(item, dict)]
+    return None
+
+
+def _plan_bookkeeping(name):
+    return name == NATIVE_TODOS or _named(name, TASK_PLAN_SUFFIX) or _named(name, TASK_CHECK_SUFFIX)
+
+
+def open_plan(state):
+    """The latest plan written in this owner turn: kind, arguments, open titles."""
+    latest = None
+    for message in _current_messages(state):
+        if not isinstance(message, dict) or message.get('role') != 'assistant':
+            continue
+        for call in message.get('tool_calls') or []:
+            name, args = _call_args(call)
+            found = _plan_items(name, args) if args is not None else None
+            if found is None:
+                continue
+            latest = {'kind': found[0], 'name': name, 'args': args, 'open': [
+                ' '.join(title.split())[:120] for title, status in found[1]
+                if status in OPEN_STATUSES and isinstance(title, str) and title.strip()]}
+    return latest
+
+
+def _gate_history(state):
+    """(gates fired in this owner turn, real actions after the last one)."""
+    fired = since = 0
+    for message in _current_messages(state):
+        if not isinstance(message, dict) or message.get('role') != 'assistant':
+            continue
+        for call in message.get('tool_calls') or []:
+            identifier = call.get('id') if isinstance(call, dict) else None
+            name, _ = _call_args(call)
+            if isinstance(identifier, str) and identifier.startswith(PLAN_GATE_PREFIX):
+                fired, since = fired + 1, 0
+            elif isinstance(name, str) and not _plan_bookkeeping(name):
+                since += 1
+    return fired, since
+
+
+def open_plan_intervention(state):
+    """System note for the step right after a gate: why the turn goes on."""
+    messages = _current_messages(state)
+    last = next((m for m in reversed(messages) if isinstance(m, dict) and m.get('role') == 'assistant'), None)
+    if last is None or not any(isinstance(call, dict) and str(call.get('id', '')).startswith(PLAN_GATE_PREFIX)
+                               for call in last.get('tool_calls') or []):
+        return None
+    plan = open_plan(state)
+    if plan is None or not plan['open']:
+        return None
+    left = '; '.join(plan['open'][:8])
+    return ('MSTY_OPEN_PLAN_V1. Ты попытался закончить ход, но в твоём плане открыты пункты: '
+            f'{left}. Ход не закончен. Сделай следующий пункт реальными инструментами и проверь '
+            'результат. Пункт, который сделать нельзя, отметь в плане и прямо назови блокер и что '
+            'нужно от владельца. Не заканчивай ход обещанием («теперь сделаю…», «сейчас проверю…»): '
+            'итог — только после проверки, с доказательствами.')
+
+
+def open_plan_gate(state, result, tools, disabled):
+    """Continue a turn that would end with open plan items (see the note above)."""
+    meta = result.response_metadata
+    if (result.tool_calls or result.invalid_tool_calls or disabled or owner_control(state) or
+            meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
+            meta.get('stop_reason', meta.get('finish_reason')) in _TERMINATED or
+            (state.get('execution') or {}).get('actions_issued', 0) >= MAX_ACTIONS):
+        return None
+    plan = open_plan(state)
+    if plan is None or not plan['open']:
+        return None
+    fired, progress = _gate_history(state)
+    if fired >= OPEN_PLAN_GATE_LIMIT or (fired and not progress):
+        # No endless loop: the answer goes out, honestly marked unfinished.
+        update = {'response_metadata': {**meta, 'msty_completion_gate': 'open_plan_released'}}
+        if isinstance(result.content, str):
+            update['content'] = (result.content.rstrip() + '\n\n_Не закрыто в плане: '
+                                 + '; '.join(plan['open'][:8]) + '._')
+        return result.model_copy(update=update)
+    names = [tool.get('function', {}).get('name') for tool in tools
+             if isinstance(tool, dict) and tool.get('type') == 'function']
+    choice = state.get('tool_choice')
+    selected = choice.get('function', {}).get('name') if isinstance(choice, dict) else None
+    identifier = PLAN_GATE_PREFIX + uuid.uuid4().hex
+    check = next((name for name in names if _named(name, TASK_CHECK_SUFFIX)), None)
+    if plan['kind'] == 'task' and check and selected in (None, check):
+        draft = result.content if isinstance(result.content, str) else ''
+        call = {'id': identifier, 'name': check, 'type': 'tool_call', 'args': {
+            'stop_attempt': True, 'open_items': plan['open'][:12], 'draft': draft[:1500]}}
+    elif plan['kind'] == 'native' and NATIVE_TODOS in names and selected is None:
+        call = {'id': identifier, 'name': NATIVE_TODOS, 'type': 'tool_call', 'args': deepcopy(plan['args'])}
+    else:
+        return None
+    return result.model_copy(update={
+        'content': 'Ход не закончен: в плане открыты пункты — продолжаю работу.',
+        'tool_calls': [call], 'invalid_tool_calls': [], 'additional_kwargs': {},
+        'response_metadata': {**meta, 'msty_completion_gate': 'open_plan_continue'}})
+
+
 def _site_progress(state, job_id):
     """Latest executor view and consecutive identical views for one site job."""
     latest = None
@@ -587,7 +712,9 @@ def gate_final(state, result, tools, disabled):
             owner_control(state) or meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
             meta.get('stop_reason', meta.get('finish_reason')) in
                 ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter')):
-        return result
+        # The artifact verification above takes precedence; otherwise a turn
+        # with open items of its own plan continues (brain-desk #443).
+        return open_plan_gate(state, result, tools, disabled) or result
     names = [tool.get('function', {}).get('name') for tool in tools
              if tool.get('type') == 'function' and _named(tool.get('function', {}).get('name'), VERIFY_SUFFIX)]
     choice = state.get('tool_choice')
