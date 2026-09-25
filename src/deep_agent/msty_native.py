@@ -381,7 +381,7 @@ class State(AgentState, total=False):
     compaction_protocol: str | None
     context_memory: dict
     compaction_stage: dict | None
-    compaction_skip_once: bool
+    compaction_round: int
     task_contract: dict | None
     text_stream_protocol: str | None
     consult_profile: str | None
@@ -673,7 +673,7 @@ class NativeMstyMiddleware(AgentMiddleware):
             native_tool_route=tool_route, tau_errors=tau_errors, tau_evidence=tau_evidence,
             native_needs_admission=execution['status'] == 'waiting_native')
         if not compacted:
-            update.update(compaction_skip_once=False, compaction_stage=None)
+            update.update(compaction_round=0, compaction_stage=None)
         return ExtendedModelResponse(model_response=ModelResponse(
             result=[] if compacted else [AIMessage.model_validate(result)]), command=Command(update=update))
 

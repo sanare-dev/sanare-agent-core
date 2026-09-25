@@ -137,7 +137,11 @@ class State(TypedDict):
     compaction_protocol: str
     context_memory: dict
     compaction_stage: dict | None
-    compaction_skip_once: bool
+    # How many compaction stages have run back to back since the last real
+    # (non-compaction) generation. Internal only: never part of the bridge's
+    # msty-compaction-v1 interrupt/resume wire shape. Capped at
+    # msty_compaction.MAX_COMPACTIONS_PER_TURN by _respond_step.
+    compaction_round: int
     task_contract: dict | None
     text_stream_protocol: str | None
     project_memory_delivery: dict
@@ -304,7 +308,10 @@ async def _policy_fallback_step(state, profile, code, budget_check, *,
         return policy_rejected_result(profile, code, budget_check, 'Консультация не переключается на другую модель.')
     marker = {'version': 1, 'from': profile, 'to': fallback, 'reason': code}
     binding = state.get('task_budget_binding')
-    fallback_state = {**state, 'lead_profile': fallback, 'compaction_skip_once': True,
+    # This nested one-off retry never compacts on its own and must never
+    # decline for a cap it never approached: None disables the compaction
+    # check outright for this attempt (distinct from an exhausted int count).
+    fallback_state = {**state, 'lead_profile': fallback, 'compaction_round': None,
                       POLICY_FALLBACK_KEY: marker}
     if isinstance(binding, dict):
         # Локальная копия только для validate_binding этого шага; состояние
@@ -395,11 +402,21 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             return rejected_context_budget(
                 'Генерация не запущена: проверка размера контекста не завершилась. '
                 'Контекст сохранён без обрезки; требуется восстановить проверку его размера.', state=state)
-        if (compaction_enabled and not state.get('compaction_skip_once') and
+        compaction_round = state.get('compaction_round', 0)
+        if (compaction_enabled and compaction_round is not None and
                 tokens >= msty_compaction.TRIGGER_TOKENS):
             plan = msty_compaction.make_plan(state)
             if plan is not None:
-                return await _compact_step(state, profile, output_limit, policy, plan)
+                if compaction_round < msty_compaction.MAX_COMPACTIONS_PER_TURN:
+                    return await _compact_step(state, profile, output_limit, policy, plan, compaction_round + 1)
+                # Cap reached and compaction is still needed: decline gracefully
+                # instead of running a still-oversized turn. No charge, no crash;
+                # the rounds already paid and archived this turn stay intact.
+                return rejected_context_budget(
+                    'Генерация не запущена: этому ходу потребовалось больше '
+                    f'{msty_compaction.MAX_COMPACTIONS_PER_TURN} сжатий контекста подряд. '
+                    'Уже выполненные сжатия сохранены; новый запрос продолжит с этого места.',
+                    tokens, state=state)
         limit = msty_execution.input_limit(state)
         if tokens > limit:
             return rejected_context_budget(
@@ -547,8 +564,14 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     return publish_result(result, budget_check)
 
 
-async def _compact_step(state, profile, output_limit, policy, plan):
-    """Exactly one model call, published/charged before the internal resume."""
+async def _compact_step(state, profile, output_limit, policy, plan, round_number):
+    """Exactly one model call, published/charged before the internal resume.
+
+    round_number (1..MAX_COMPACTIONS_PER_TURN) is this turn's compaction count
+    so far, including this stage; it is recorded on the state (compaction_round)
+    so the next respond can cap or continue rounds. It is never part of the
+    compaction_stage dict or the interrupt/resume wire payload themselves.
+    """
     cap = min(msty_compaction.SUMMARY_OUTPUT_CAP, output_limit)
     try:
         model = msty_models.make_model(profile, cap)
@@ -586,7 +609,7 @@ async def _compact_step(state, profile, output_limit, policy, plan):
         return publish_result(blocked, budget_check)
     result = result.model_copy(update={'content': '', 'tool_calls': [], 'invalid_tool_calls': [],
         'additional_kwargs': {}, 'response_metadata': {**result.response_metadata, 'msty_stage': 'compaction'}})
-    return {**publish_result(result, budget_check), **update}
+    return {**publish_result(result, budget_check), **update, 'compaction_round': round_number}
 
 
 async def respond(state: State):
@@ -602,7 +625,7 @@ async def respond(state: State):
         result['execution']['status'] = msty_task.final_status(
             {**state, 'task_contract': result['task_contract']}, result['execution']['status'])
     if not result.get('compaction_stage'):
-        result.update(compaction_skip_once=False, compaction_stage=None)
+        result.update(compaction_round=0, compaction_stage=None)
     return result
 
 

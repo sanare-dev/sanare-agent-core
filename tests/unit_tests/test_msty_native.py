@@ -319,8 +319,9 @@ def test_existing_compaction_keeps_native_count_and_uses_own_resume_ticket(monke
             return {**msty.publish_result(summary, None),
                 'context_memory': {'version': 1, 'segments': []},
                 'compaction_stage': {'version': 1, 'status': 'ready', 'stage_id': 'summary-step',
-                    'source_sha256': 'a' * 64, 'summary_sha256': 'b' * 64}}
-        assert len(seen) == 3 and state['compaction_skip_once'] is True
+                    'source_sha256': 'a' * 64, 'summary_sha256': 'b' * 64},
+                'compaction_round': 1}
+        assert len(seen) == 3 and state['compaction_round'] == 1
         return msty.publish_result(answer(), None)
 
     monkeypatch.setattr(msty, '_respond_step', step)
