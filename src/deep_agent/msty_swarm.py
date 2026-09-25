@@ -50,7 +50,24 @@ PROTOCOL = 'msty-swarm-v1'
 TOOL = 'native_swarm'
 EVENT = 'swarm_event'
 MIN_SUBTASKS = 2
-MAX_SUBTASKS = 5
+
+
+def _max_subtasks() -> int:
+    """Потолок подзадач роя — конфигурацией, не кодом (brain-desk #443).
+
+    MSTY_SWARM_MAX_SUBTASKS (2..100). По умолчанию 5 — как у моста
+    (brain_swarm.MAX_SUBTASKS): поднимать вместе с BRAIN_SWARM_MAX_SUBTASKS
+    моста, иначе мост отвергнет план шире своего потолка.
+    """
+    import os
+    try:
+        value = int(os.environ.get('MSTY_SWARM_MAX_SUBTASKS', '5'))
+    except ValueError:
+        return 5
+    return min(100, max(MIN_SUBTASKS, value))
+
+
+MAX_SUBTASKS = _max_subtasks()
 #: Дешёвые исполнители, реально доступные облачному графу (msty_models).
 #: Gemini Flash живёт только локальной полосой моста и здесь недоступен.
 PROFILES = ('deepseek', 'luna')

@@ -148,13 +148,13 @@ def test_window_task_tools_are_always_routed_for_brain_desk():
     tools = [PLAN, CHECK, READ] + [
         {'type': 'function', 'function': {'name': f'brain_task_{n}', 'description': n,
                                           'parameters': {'type': 'object', 'properties': {}}}}
-        for n in ('ask', 'finish', 'save')]
+        for n in ('ask', 'finish', 'save', 'spawn')]
     messages = [{'role': 'system', 'content': '[Brain Desk · правая рука владельца] …'},
                 {'role': 'user', 'content': 'привет'}]
     selected, route, _ = routing.select_tools(messages, tools)
     names = {t['function']['name'] for t in selected}
     assert {'brain_task_plan', 'brain_task_check', 'brain_task_ask', 'brain_task_finish',
-            'brain_task_save'} <= names
+            'brain_task_save', 'brain_task_spawn'} <= names
     # Not the window: nothing is forced.
     selected, _, _ = routing.select_tools([{'role': 'user', 'content': 'привет'}], tools)
     assert 'brain_task_plan' not in {t['function']['name'] for t in selected}
@@ -211,3 +211,15 @@ def test_real_native_graph_turn_with_open_todos_continues_then_ends_when_closed(
         assert len(seen['requests']) == 4
 
     asyncio.run(scenario())
+
+
+def test_native_swarm_cap_is_configuration_not_code(monkeypatch):
+    from deep_agent import msty_swarm
+    monkeypatch.delenv('MSTY_SWARM_MAX_SUBTASKS', raising=False)
+    assert msty_swarm._max_subtasks() == 5
+    monkeypatch.setenv('MSTY_SWARM_MAX_SUBTASKS', '20')
+    assert msty_swarm._max_subtasks() == 20
+    monkeypatch.setenv('MSTY_SWARM_MAX_SUBTASKS', '500')
+    assert msty_swarm._max_subtasks() == 100
+    monkeypatch.setenv('MSTY_SWARM_MAX_SUBTASKS', 'x')
+    assert msty_swarm._max_subtasks() == 5

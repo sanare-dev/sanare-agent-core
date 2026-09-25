@@ -228,7 +228,7 @@ _WINDOW_TOOLS = frozenset({"connector_search", "connector_propose"})
 # project knowledge file. It is the loop itself, so every step of the task
 # keeps it whatever the words or the continuation route.
 _TASK_MODE_TOOLS = frozenset({"brain_task_plan", "brain_task_check", "brain_task_ask",
-                              "brain_task_finish", "brain_task_save"})
+                              "brain_task_finish", "brain_task_save", "brain_task_spawn"})
 # Remote Windows servers over the window's SSH connector (ssh-mcp, brain-desk
 # #343): live 24.09 «подключись и реши вопрос» about Crin-Barbu got no SSH
 # schemas — the router had no remote domain, and the owner's short follow-up
