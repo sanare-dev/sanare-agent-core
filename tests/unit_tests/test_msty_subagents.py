@@ -147,6 +147,13 @@ def test_report_shape_and_evidence_gate_on_negative_claim():
     assert 'НЕ подтверждена' in report['findings']
 
 
+def test_subagent_plan_goal_is_not_gated():
+    """Цель — план, не диагноз: оговорка-приставка не нужна (24.09.2026)."""
+    model = ScriptedModel([answer('План: сначала то, что сломано; сервис оплаты не работает — #12.')])
+    report = run_subagent(model, goal='Составь план улучшения очереди задач.')
+    assert 'Не могу подтвердить' not in report['findings']
+
+
 def test_errors_classified_with_budget_two():
     def bad(i):
         return call('native_read_file', {'file_path': '/etc/passwd'}, f'c{i}')

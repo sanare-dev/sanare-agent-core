@@ -28,7 +28,7 @@ MAX_SELECTED_TOOLS = 28
 _CONTINUATION_VERB = re.compile(
     r"(?is)\b(?:да+|ok|ок(?:ей)?|продолж\w*|сдела\w*|делай(?:те)?|доделыв\w*|доделай|"
     r"исправ\w*|почин\w*|чини|фикс\w*|правь|перенастра\w*|довед\w*|доводи|заверш\w*|"
-    r"впер[её]д|дальше)\b"
+    r"впер[её]д|дальше|реша\w*|решай(?:те)?|реши(?:те|ть)?)\b"
 )
 MAX_CONTINUATION_CHARS = 64
 _INCIDENT = re.compile(
@@ -101,7 +101,12 @@ def dispatcher_enabled() -> bool:
     серверном native-исполнении (brain_bridge NATIVE_TOOLS); до его выкладки
     выключено, иначе батч с этим вызовом падал бы на чеке моста."""
     import os
-    return os.environ.get("MSTY_TOOL_DISPATCHER", "off").strip().lower() == "on"
+    # On by default since 24.09: the bridge allows native_request_tools
+    # (brain_bridge NATIVE_TOOLS), and keyword routing alone kept hiding the
+    # owner's tools («нет инструмента» whenever the words did not match). The
+    # model now sees the catalog of every schema it was not given and asks for
+    # what it needs. MSTY_TOOL_DISPATCHER=off switches it back.
+    return os.environ.get("MSTY_TOOL_DISPATCHER", "on").strip().lower() != "off"
 MAX_REQUESTED = 20
 _PASSTHROUGH_SUFFIX = "execute_tool"
 _BROWSER_INTERACTION = re.compile(
@@ -133,9 +138,13 @@ _DOMAIN_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"сайт|страниц|домен|витрин|app\.sanaredev\.com|sanarelab\.|2the\.life|2thelife)")),
     ("browser", re.compile(
         r"(?is)(?:браузер|browser|клик|нажм|форма|поле|вкладк|скриншот|screenshot|ui\b)")),
+    # NAS (/Volumes/LLM-Data) is read through the same file server since
+    # brain-desk #296: «структура хранилища NAS» is a files question, not small
+    # talk with no tools (live defect 24.09: «нет файлового инструмента для NAS»).
     ("files", re.compile(
         r"(?is)(?:\b(?:file|folder|path|repo|repository|code|git|github|python|typescript|"
-        r"javascript|json|yaml|markdown)\b|файл|папк|путь|репозитор|код|коммит|ветк)")),
+        r"javascript|json|yaml|markdown|nas|ugreen)\b|файл|папк|путь|репозитор|код|коммит|ветк|"
+        r"хранилищ|/volumes/|llm-data)")),
     ("communications", re.compile(
         r"(?is)(?:почт|email|e-mail|gmail|outlook|письм|сообщени|переписк|slack|teams)")),
     ("commerce", re.compile(
@@ -148,8 +157,14 @@ _DOMAIN_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("brain", re.compile(
         r"(?is)(?:\bmsty\b|langgraph|langsmith|\bbrain\b|мозг|агент|оркестрац|toolset|"
         r"тулсет|prompt|промпт|skill|скилл|памят|middleware|маршрут)")),
+    # Verified sources for «найди/поставь решение» (owner 24.09): GitHub,
+    # Hugging Face, the MCP registry, public Discord, vendor docs. «Сходи на
+    # GitHub и поставь» routed to files+Codex only — no fetch/browser — and
+    # Brain answered «нет веб-инструмента» (live, Amazon project chat).
     ("web", re.compile(
-        r"(?is)(?:интернет|web\b|веб|url\b|ссылк|онлайн|search\s+web|browse)")),
+        r"(?is)(?:интернет|web\b|веб|url\b|ссылк|онлайн|search\s+web|browse|github|гитхаб|"
+        r"hugging\s*face|huggingface|discord|дискорд|реестр\w*\s+mcp|mcp\s+registry|"
+        r"документаци|\bdocs?\b|найди|поищи|поиск|загугли|search\b)")),
 )
 
 # Наборы инструментов ниже ВЫВОДЯТСЯ из манифеста TAU L1 (msty_registry), который
@@ -199,6 +214,70 @@ _JOB_BUNDLES: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
 # протекают в выбор через широкое лексическое совпадение вроде "project"/"file".
 _KNOWN_ONLY = msty_registry.group('known_only')
 _KNOWN = msty_registry.routed_names()
+# Brain Desk's company structure (brain-desk #297, решение владельца 24.09):
+# the owner talks to Brain only, Brain executes through its departments. When
+# the client supplies these schemas they are Brain's own instruments for every
+# task turn and are never truncated away.
+_ORG_TOOLS = frozenset({"org_structure", "delegate", "delegate_many", "review"})
+# Brain Desk window (owner 24.09): «нет инструмента» is a task — the web read
+# and the connector finder are always at hand for a working turn, whatever
+# the words («решай проблему» routed to route_request + system_map only).
+_WINDOW_TOOLS = frozenset({"connector_search", "connector_propose"})
+# Remote Windows servers over the window's SSH connector (ssh-mcp, brain-desk
+# #343): live 24.09 «подключись и реши вопрос» about Crin-Barbu got no SSH
+# schemas — the router had no remote domain, and the owner's short follow-up
+# carried no server word. The thread's recent turns count too.
+_SSH_TOOLS = frozenset({
+    "list-connections", "list-sessions", "open-session", "close-session",
+    "read-session-output", "read-command", "run-command", "privileged-command",
+    "signal-process", "sftp-upload", "sftp-download", "sftp-list",
+    "sftp-upload-file", "sftp-download-file"})
+_REMOTE = re.compile(
+    r"(?is)(?:\bssh\b|сервер|server|windows|винд|rdp|powershell|удал[её]нн\w*\s+(?:рабоч|доступ|машин)|"
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b|crin|sanare-uk|подкл\w*\s+к\s+сервер)")
+
+
+# Skills of the window (brain-desk skills MCP) and the verified sources to
+# build them from: live 24.09 «ищи и загрузи себе скилы по налогам UK» got
+# connector_search + search_docs + fetch only — no skills_find_ready /
+# skills_save, no GitHub search — and Brain answered «нет навыков».
+_SKILL_TOOLS = frozenset({
+    "skills_list", "skills_get", "skills_find_ready", "skills_save", "skills_schedule_refresh",
+    "search_repositories", "search_code", "get_file_contents",
+    "fetch", "msty_web_fetch", "browser_navigate", "browser_snapshot"})
+_SKILL_WORDS = re.compile(
+    r"(?is)(?:навык|скил|скилл|skill|базу?\s+знани|научись|изучи|загрузи\s+себе|набей)")
+
+
+# Brain Desk's skill catalog (brain-desk #367, progressive disclosure as in
+# Anthropic Agent Skills): the window puts only id, name and «когда
+# применять» of every skill into its system message, and the model opens a
+# body with skills_get. Without that schema the catalog is useless — live
+# 24.09 «посчитай корпоративный налог UK Ltd» got Supabase docs search.
+_SKILL_CATALOG_MARK = "[Brain Desk · каталог навыков]"
+_SKILL_OPEN = frozenset({"skills_get"})
+
+
+def _has_skill_catalog(messages: list[Any]) -> bool:
+    for message in messages[:3]:
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "type", None)
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+        if role == "system" and _SKILL_CATALOG_MARK in _content_text(content):
+            return True
+    return False
+
+
+def _recent_user_text(messages: list[Any], turns: int = 4) -> str:
+    """The latest few owner turns: a short «сделай» continues their subject."""
+    texts: list[str] = []
+    for message in reversed(messages):
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "type", None)
+        if role in ("user", "human"):
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+            texts.append(_content_text(content))
+            if len(texts) >= turns:
+                break
+    return "\n".join(texts)
 # Which tools survive the MAX_SELECTED_TOOLS cap must not depend on the order
 # Msty happens to send its schemas in: the same request would otherwise get a
 # working toolset or a crippled one at random. Rank by what the step needs
@@ -246,6 +325,19 @@ def _content_text(content: Any) -> str:
                 parts.append(item["text"])
         return "\n".join(parts)
     return ""
+
+
+_BRAIN_DESK_MARK = "[Brain Desk · правая рука владельца]"
+
+
+def _from_brain_desk(messages: list[Any]) -> bool:
+    """The Brain Desk window marks its standing system instruction."""
+    for message in messages[:3]:
+        role = message.get("role") if isinstance(message, dict) else getattr(message, "type", None)
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+        if role in ("system",) and _BRAIN_DESK_MARK in _content_text(content):
+            return True
+    return False
 
 
 def latest_user_text(messages: list[Any]) -> str:
@@ -411,7 +503,12 @@ def _explicit_requests(messages: list[Any]) -> set[str]:
     return names
 
 
-def catalog_prompt(tools: list[dict], selected: list[str], limit: int = 160) -> str:
+#: Каталог перечисляет каждую невыданную схему входа (msty_models.MAX_TOOLS),
+#: иначе инструменты сверх предела были бы молча недоступны для запроса.
+MAX_CATALOG = 256
+
+
+def catalog_prompt(tools: list[dict], selected: list[str], limit: int = MAX_CATALOG) -> str:
     """Каталог переданных, но не выданных на шаге схем: имя — короткое назначение."""
     lines = []
     for tool in tools:
@@ -465,6 +562,13 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         domains = [item for item in prior_route.get("domains", []) if isinstance(item, str)]
         chosen = {item for item in prior_route.get("selected_names", []) if item in available}
         source = "continued"
+        if _from_brain_desk(messages):
+            chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
+            chosen.discard("msty_project_resolve")
+            if _REMOTE.search(_recent_user_text(messages)):
+                chosen.update(_SSH_TOOLS & available.keys())
+            if _SKILL_WORDS.search(_recent_user_text(messages)):
+                chosen.update(_SKILL_TOOLS & available.keys())
     else:
         domains = _domains(text)
         intent = _intent(text, domains)
@@ -502,7 +606,21 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
             if intent == "direct":
                 intent = "read"
 
+        # A server thread in the window is work even when the owner's words are
+        # short or misspelt («подклбчи и сдеай»).
+        if (intent == "direct" and _from_brain_desk(messages)
+                and (_REMOTE.search(_recent_user_text(messages))
+                     or _SKILL_WORDS.search(_recent_user_text(messages)))):
+            intent = "read"
         if intent != "direct":
+            chosen.update(_ORG_TOOLS & available.keys())
+            if _from_brain_desk(messages):
+                chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
+                chosen.discard("msty_project_resolve")
+                if _REMOTE.search(_recent_user_text(messages)):
+                    chosen.update(_SSH_TOOLS & available.keys())
+                if _SKILL_WORDS.search(_recent_user_text(messages)):
+                    chosen.update(_SKILL_TOOLS & available.keys())
             # The generic task contract verifies explicit local artifact files.
             # Service-specific executors (site, Pressable, Supabase and Brain
             # self-improvement) have their own receipts and verification. Giving
@@ -514,7 +632,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                 chosen.update(_TASK)
             if not domains:
                 chosen.update({"msty_admin_route_request", "msty_admin_memory_search"})
-            if set(domains) & {"sites", "pressable", "supabase", "commerce", "tax", "content"}:
+            # The Brain Desk window has its own projects (context already in the
+            # system message); the Msty registry answers unregistered_project and
+            # Brain called that a blocker (live 24.09, Amazon project chat).
+            if (set(domains) & {"sites", "pressable", "supabase", "commerce", "tax", "content"}
+                    and not _from_brain_desk(messages)):
                 chosen.add("msty_project_resolve")
             if re.search(r"(?is)(?:раньше|истори|памят|где\s+леж|вспомни|previous|memory)", text):
                 chosen.add("msty_admin_memory_search")
@@ -613,6 +735,11 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
                 semantic_names = {hit['name'] for hit in semantic['hits']}
                 chosen.update(semantic_names)
 
+    # The window's skill catalog is in context: the model can open a skill.
+    skill_open = (_SKILL_OPEN & available.keys()
+                  if _from_brain_desk(messages) and _has_skill_catalog(messages) else set())
+    chosen.update(skill_open)
+
     historical_calls = _historical_tool_names(messages)
     historical = historical_calls & available.keys()
     # If a native virtual-file attempt was rejected, surface the corresponding
@@ -648,7 +775,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     if tool_choice == "none" or (isinstance(tool_choice, dict) and tool_choice.get("type") == "none"):
         chosen = historical
 
-    protected = historical | required | requested
+    protected = historical | required | requested | (_ORG_TOOLS & chosen) | (skill_open & chosen)
     ordered = [name for name in available if name in chosen]
     if len(ordered) > MAX_SELECTED_TOOLS:
         keep = [name for name in ordered if name in protected]

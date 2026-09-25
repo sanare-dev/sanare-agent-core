@@ -246,7 +246,7 @@ def test_count_receipt_identifies_method_and_model_without_changing_usage(monkey
     monkeypatch.setattr(msty_models, 'count_input', count)
     result = asyncio.run(msty.graph.ainvoke(initial(context_budget='msty-model-count-v1')))
     assert result['context_budget_check'] == {
-        'version': 1, 'status': 'accepted', 'input_tokens': 42, 'limit': 180000,
+        'version': 1, 'status': 'accepted', 'input_tokens': 42, 'limit': 180000, 'window_admission': True,
         'method': method, 'model_profile': profile}
     assert counts[0][0] == profile
     assert counts[0][1] == seen['invocations'][0][1]

@@ -338,3 +338,128 @@ def test_non_system_questions_do_not_get_status_tools(question):
              for name in ('msty_system_overview', 'msty_admin_health')]
     _, route, _ = routing.select_tools([{"role": "user", "content": question}], tools)
     assert not {'msty_system_overview', 'msty_admin_health'} & set(route['selected_names'])
+
+
+ORG = ["org_structure", "delegate", "delegate_many", "review"]
+
+
+def test_brain_desk_org_tools_are_brains_own_for_task_turns():
+    """brain-desk #297: Brain delegates to departments; never cut away."""
+    tools = TOOLS + [schema(name) for name in ORG]
+    selected, value, _ = routing.select_tools(
+        [{"role": "user", "content": "Разбери задачу #237 и предложи план исправления"}], tools)
+    names = [tool["function"]["name"] for tool in selected]
+    assert set(ORG) <= set(names)
+    assert len(names) <= routing.MAX_SELECTED_TOOLS
+    # A broad mutation that fills the limit still keeps them.
+    selected, _, _ = routing.select_tools(
+        [{"role": "user", "content": "Исправь сайт app.sanaredev.com, базу supabase, файлы репозитория и проверь в браузере"}],
+        tools)
+    assert set(ORG) <= {tool["function"]["name"] for tool in selected}
+    # Small talk gets no tools at all, as before.
+    selected, value, _ = routing.select_tools(
+        [{"role": "user", "content": "Объясни кратко, что такое LangGraph."}], tools)
+    assert selected == [] and value["intent"] == "direct"
+    # Without the client's schemas nothing is invented.
+    names, _, _ = route("Разбери задачу #237 и предложи план исправления")
+    assert not set(ORG) & names
+
+
+def test_nas_structure_question_gets_file_reads():
+    """brain-desk #296: NAS is read through the file server."""
+    names, value, _ = route("Проверь структуру хранилища NAS, как в библиотеке: какие разделы?")
+    assert "files" in value["domains"]
+    assert {"list_directory", "read_text_file"} <= names
+    assert not ({"write_file", "edit_file", "move_file"} & names)
+
+
+# Live 24.09 (Brain Desk, Amazon project chat): «сходи на GitHub и поставь»
+# got no fetch/browser, and the Msty resolver was offered for a window project.
+DESK_SYSTEM = {"role": "system",
+               "content": "Проект.\n\n[Brain Desk · правая рука владельца] Клиент — окно Brain Desk."}
+
+
+def test_verified_sources_route_to_web_tools():
+    for text in ("Найди на GitHub RDP-клиент и поставь его",
+                 "Поищи модель на Hugging Face",
+                 "Что пишут в Discord проекта про этот MCP?"):
+        names, value, _ = route(text)
+        assert "web" in value["domains"], text
+        assert {"fetch", "msty_web_fetch"} & names, text
+        assert "browser_navigate" in names, text
+
+
+def test_window_project_is_not_resolved_in_msty_registry():
+    messages = [DESK_SYSTEM, {"role": "user", "content": "Собери товары и цены Amazon для Sanare Lab UK"}]
+    selected, _, _ = routing.select_tools(messages, TOOLS)
+    names = {tool["function"]["name"] for tool in selected}
+    assert "msty_project_resolve" not in names
+    # Without the window mark (Msty itself) the resolver stays.
+    names_msty, _, _ = route("Собери товары и цены Amazon для Sanare Lab UK")
+    assert "msty_project_resolve" in names_msty
+
+
+def test_window_working_turn_always_has_web_and_connector_finder():
+    tools = TOOLS + [schema("connector_search"), schema("connector_propose")]
+    for text in ("решай проблему", "подключись к серверу Amazon и разверни бота"):
+        selected, value, _ = routing.select_tools(
+            [DESK_SYSTEM, {"role": "user", "content": text}], tools)
+        names = {tool["function"]["name"] for tool in selected}
+        assert {"connector_search", "connector_propose"} <= names, text
+        assert {"fetch", "msty_web_fetch"} & names, text
+        assert "msty_project_resolve" not in names, text
+    # Msty (no window mark) keeps its narrow routing.
+    selected, _, _ = routing.select_tools([{"role": "user", "content": "решай проблему"}], tools)
+    assert "connector_search" not in {tool["function"]["name"] for tool in selected}
+
+
+SSH = ["list-connections", "read-command", "run-command", "sftp-list", "open-session"]
+
+
+def test_window_server_thread_gets_ssh_tools_even_on_short_follow_up():
+    tools = TOOLS + [schema(n) for n in SSH] + [schema("connector_search"), schema("connector_propose")]
+    messages = [DESK_SYSTEM,
+                {"role": "user", "content": "Сервер Crin-Barbu 188.227.57.24, порт 2222, Administrator — проверь hostname"},
+                {"role": "assistant", "content": "SSH-инструментов нет."},
+                {"role": "user", "content": "подклбчи и сдеай реши вопрос"}]
+    selected, _, _ = routing.select_tools(messages, tools)
+    names = {tool["function"]["name"] for tool in selected}
+    assert {"run-command", "read-command", "list-connections"} <= names
+    assert len(names) <= routing.MAX_SELECTED_TOOLS
+    # Msty without the window mark: no SSH projection.
+    selected, _, _ = routing.select_tools(messages[1:], tools)
+    assert "run-command" not in {tool["function"]["name"] for tool in selected}
+
+
+def test_window_skill_request_gets_skill_and_source_tools():
+    extra = ["skills_list", "skills_get", "skills_find_ready", "skills_save",
+             "search_repositories", "search_code", "connector_search", "connector_propose"]
+    tools = TOOLS + [schema(n) for n in extra]
+    text = ("налоговое обложение, бухгалтерский учёт, юридические моменты по United Kingdom, "
+            "подача декларации. Ищи и загрузи себе все актуальные скилы по этим вопросам")
+    selected, _, _ = routing.select_tools([DESK_SYSTEM, {"role": "user", "content": text}], tools)
+    names = {tool["function"]["name"] for tool in selected}
+    assert {"skills_find_ready", "skills_save", "search_repositories", "fetch"} <= names
+    assert len(names) <= routing.MAX_SELECTED_TOOLS
+
+
+def test_window_skill_catalog_gets_skills_get_on_a_plain_task():
+    # brain-desk #367: the window lists skills (id, name, «когда применять»)
+    # in its system message; a plain task without the word «навык» must still
+    # let the model open the fitting skill with skills_get.
+    extra = ["skills_list", "skills_get", "skills_find_ready", "skills_save"]
+    tools = TOOLS + [schema(n) for n in extra]
+    catalog = {"role": "system", "content": DESK_SYSTEM["content"] + "\n\n[Brain Desk · каталог навыков] …\n"
+               "- msty:taxes-compliance — taxes-compliance: Налоги и сроки."}
+    text = "У моей UK Ltd прибыль £120 000. Посчитай корпоративный налог и сроки CT600."
+    selected, _, _ = routing.select_tools([catalog, {"role": "user", "content": text}], tools)
+    names = {tool["function"]["name"] for tool in selected}
+    assert "skills_get" in names
+    assert "skills_save" not in names  # writes stay on the intent routes
+    # No catalog in the window's system message — no extra schema.
+    selected, _, _ = routing.select_tools([DESK_SYSTEM, {"role": "user", "content": text}], tools)
+    assert "skills_get" not in {tool["function"]["name"] for tool in selected}
+    # Msty without the window mark: the catalog mark alone does nothing.
+    foreign = {"role": "system", "content": "[Brain Desk · каталог навыков] …"}
+    selected, _, _ = routing.select_tools([foreign, {"role": "user", "content": text}], tools)
+    assert "skills_get" not in {tool["function"]["name"] for tool in selected}
