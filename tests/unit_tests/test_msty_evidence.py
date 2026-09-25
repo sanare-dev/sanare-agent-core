@@ -89,9 +89,12 @@ def _result(content, **meta):
         response_metadata=meta)
 
 
+STATUS_ASK = [{'role': 'user', 'content': 'Работает ли синхронизация магазина?'}]
+
+
 def test_gate_rewrites_bare_negative_claim_and_preserves_original():
     result, label = msty_evidence.gate_final_answer(
-        {'messages': []}, _result('Cron-синхронизация не настроена.'))
+        {'messages': STATUS_ASK}, _result('Cron-синхронизация не настроена.'))
     assert label == 'unconfirmed'
     assert result.content.startswith('Не могу подтвердить негативный вывод')
     assert 'Cron-синхронизация не настроена.' in result.content  # исходник сохранён
@@ -213,3 +216,64 @@ def test_failed_state_is_evidence_not_unread():
     read = [dict(STATUS_HISTORY[0]), STATUS_HISTORY[1],
             {'role': 'tool', 'tool_call_id': 's1', 'content': '{"state": "failed", "last_run": 1}'}]
     assert msty_evidence.successful_status_reads({'messages': read}) == ['msty_store_sync_status']
+
+
+# --- Область Gate: только вопросы о состоянии системы (24.09.2026) ----------
+
+DAILY_REVIEW = ('Ежедневный разбор проекта «Улучшение Brain Desk и Brain». Разбери очередь '
+                '(queue.md, owner-ideas, открытые issues и PR), выбери следующую задачу и '
+                'предложи план: шаги, зона, что искать готовым, проверки, кто лучше подходит.')
+BRIEF = ('Составь мой утренний бриф на сегодня по данным ниже. Коротко, по-русски. Начни '
+         'сразу с «Главное сегодня» — без вступления, оговорок и предупреждений.')
+
+
+@pytest.mark.parametrize('question', [DAILY_REVIEW, BRIEF,
+                                      'Составь план улучшения Brain на неделю',
+                                      'Напиши текст письма поставщику'])
+def test_gate_leaves_planning_briefs_and_texts_alone(question):
+    """Архитектор 24.09: «очередь начинается со сломанного… [1]» — не диагноз."""
+    original = _result('Очередь начинается со сломанного и медленного, что блокирует '
+                       'владельца; сервис оплаты не работает — это задача #12.')
+    result, label = msty_evidence.gate_final_answer(
+        {'messages': [{'role': 'user', 'content': question}]}, original)
+    assert label is None and result is original
+
+
+@pytest.mark.parametrize('question', [
+    'Работает ли синхронизация магазина?',
+    'Проверь, почему не обновляются товары',
+    'Какой статус у cron?',
+    'Is the webhook down?',
+    'Почему упал деплой?',
+])
+def test_gate_applies_to_status_questions(question):
+    _, label = msty_evidence.gate_final_answer(
+        {'messages': [{'role': 'user', 'content': question}]},
+        _result('Синхронизация не работает.'))
+    assert label == 'unconfirmed'
+
+
+def test_gate_applies_when_status_tool_was_called_this_turn():
+    """Модель сама пошла диагностировать: неудачное статус-чтение — в области Gate."""
+    turn = [{'role': 'user', 'content': DAILY_REVIEW},
+            {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 's1', 'type': 'function',
+                'function': {'name': 'msty_store_sync_status', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 's1', 'content': 'HTTP 503 Service Unavailable'}]
+    _, label = msty_evidence.gate_final_answer(
+        {'messages': turn}, _result('Синхронизация не работает.'))
+    assert label == 'unconfirmed'
+
+
+def test_status_words_deep_in_long_prompt_are_data_not_the_question():
+    long_prompt = BRIEF + ' ' + 'x' * msty_evidence.STATUS_HEAD + ' статус: сбой синхронизации'
+    assert not msty_evidence.is_status_question(long_prompt)
+    assert msty_evidence.is_status_question('Статус синхронизации? ' + 'x' * 1000)
+
+
+def test_respond_leaves_daily_review_untouched(monkeypatch):
+    _install_model(monkeypatch, 'Следующая задача: #237. Очередь начинается со сломанного '
+                                'и медленного; сервис оплаты не работает — см. #12.')
+    result = asyncio.run(msty.respond({'messages': [
+        {'role': 'user', 'content': DAILY_REVIEW}], 'tools': []}))['result']
+    assert result['content'].startswith('Следующая задача: #237.')
+    assert 'tau_evidence_gate' not in result['response_metadata']

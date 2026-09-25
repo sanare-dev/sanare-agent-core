@@ -1,0 +1,52 @@
+name: Public skill scout
+
+on:
+  pull_request:
+    paths:
+      - tools/skill_scout.py
+      - tools/test_skill_scout.py
+      - tools/SKILL_SCOUT.md
+      - .github/workflows/skill-scout.yml
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tools -p test_skill_scout.py -v
+
+  scout:
+    if: github.event_name != 'pull_request'
+    needs: offline-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Discover public candidates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python tools/skill_scout.py > skill-candidates.json
+          scout_status=$?
+          set -e
+          python tools/skill_scout.py --format markdown --from-json skill-candidates.json >> "$GITHUB_STEP_SUMMARY"
+          exit "$scout_status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-skill-candidates
+          path: skill-candidates.json
+          if-no-files-found: ignore

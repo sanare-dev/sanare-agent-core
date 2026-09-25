@@ -1,0 +1,19 @@
+name: Incognito consolidation
+on: [push, pull_request]
+
+jobs:
+  incognito-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.26'
+      - run: uv sync --frozen
+      - run: uv run --frozen python -m pytest -q tests/test_incognito_consolidation.py
+      - run: uv run --frozen ruff check src/deep_agent/consolidator.py tests/test_incognito_consolidation.py

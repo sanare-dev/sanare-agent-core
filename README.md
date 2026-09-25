@@ -78,7 +78,20 @@ task budget, emergency stop, artifact verification and release gates remain
 independent. The local gateway validates the actual returned model identity
 against the saved profile. Missing/invalid external classification does not block:
 the same local rule chooses DeepSeek for complex action and Luna otherwise. It never
-retries the user task through a second lead model.
+retries the user task through a second lead model, with one exception below.
+
+**Provider policy rejection (23 September 2026).** When the provider refuses the
+input before any generation (HTTP 400 `invalid_prompt` / `content_policy_violation`,
+`msty_taxonomy.policy_rejection_code`), the same step is answered once by the table
+`msty.POLICY_FALLBACK` (`luna → deepseek`): no compaction, images replaced by an
+explicit text marker (DeepSeek has no verified image admission), the policy tells
+the model why it answers. The published result carries
+`response_metadata.msty_policy_fallback = {version, from, to, reason}`; the bridge
+accepts the fallback identity only for exactly this marker and table, prices it by
+its own profile and sizes the Luna lead reserve to cover the fallback. A rejection
+of the fallback, of a DeepSeek lead or of an analyst is an honest blocked answer
+with the provider code and zero usage — never a raised graph error. Other 400s
+still fail closed. Tests: `tests/unit_tests/test_msty_policy_fallback.py`.
 
 ### Progress-aware execution
 
@@ -130,6 +143,17 @@ route-specific system fragment. A new subject in the same chat is reclassified;
 short continuation commands retain the current route. The unfiltered client list
 remains in checkpoint state for exact external callback validation and never grants
 anything the client did not supply.
+
+Input limit (24 September 2026, brain-desk #183): a request may carry up to
+`msty_models.MAX_TOOLS = 256` client schemas; the native harness validates all of
+them up front (unique names, function type, object parameters, finite JSON) and
+refuses 257+ before any model call. The routed step still exposes at most
+`MAX_SELECTED_TOOLS = 28` external schemas, and the catalog lists every unselected
+schema (`MAX_CATALOG = 256`). One generation is additionally capped at the provider
+limit `MAX_MODEL_TOOLS = 128` (OpenAI/DeepSeek Chat Completions): the legacy `msty`
+graph (workers, pre-native continuations) binds every client schema and therefore
+still refuses 129+ honestly instead of sending them. The bridge has no own count cap
+(read-only check of `brain_bridge.py`; only its transport byte limit applies).
 
 This is deliberately not `LLMToolSelectorMiddleware`: the stock selector performs
 another model call before the lead model. The deterministic middleware therefore
@@ -618,6 +642,58 @@ generic creation to zero; do not charge it twice. Tests exercise that real SDK
 conversion using synthetic usage only. Live cache hits and any measured benefit
 belong in the deployment receipt, not inferred from unit tests.
 
+## Window-sized admission — 24 September 2026 (brain-desk #145)
+
+180,000 input tokens was the admission threshold of the Sonnet-200K era, not
+the window of the current leads (Luna `gpt-6-luna` 1,050,000; DeepSeek Flash
+1,000,000). A bound task now carries its admission limit in
+`task_budget_binding.input_limit`, pinned by the bridge together with the budget
+reserve for exactly that input. The graph accepts it only within
+`msty_execution.window_input_limit(profile)` = window − min(64K, 10%) (Luna
+986,000; DeepSeek 936,000; 200K models 180,000) and never below 180,000; the
+`context_budget_check.limit` it returns equals the bound limit, so the bridge
+can verify the same number. Requests without a binding keep 180,000.
+
+Deploy order: this graph first — it still admits the old bridge's 180,000
+binding — then enable the bridge's window limits and reload it. An old graph
+rejects a bridge binding above 180,000 before generation (no model call).
+Native tool-bundle compaction (`msty_compaction.TRIGGER_TOKENS` = 120,000) is
+unchanged: it only projects old tool results and keeps long tool chains cheap.
+A larger admitted input is billed as such (Luna doubles input price above
+272K); cross-turn chat compaction stays in the bridge.
+
+Capability attestation (24.09.2026 incident): every `context_budget_check`
+(accepted or rejected, including the compaction stage) carries
+`window_admission: true`. The bridge sends a binding above 180,000 only after
+it has seen this attestation (or an attested window limit equal to its
+binding); until then it keeps 180,000 without an owner-visible error, so a
+bridge flag switched on before this graph is live cannot break answers.
+
+## Tool error recovery — 24 September 2026 (brain-desk #309)
+
+Brain Desk executes MCP calls in the window and returns failures as text:
+`Ошибка инструмента: …` (isError), `Инструмент отказал: …` (JSON-RPC error),
+`Результат неизвестен (…)`, `Отклонено/Отказано Brain Desk …`, and — with
+brain-desk #313 — a final paragraph `[Brain Desk · самовосстановление] Класс: X`.
+`msty_taxonomy.classify_tool_text` used to miss these prefixes, so a Supabase
+ZodError (`ref must be exactly 20 characters long` for a guessed project_id)
+counted as success and no TAU policy fired. Now the window class is taken as
+the most reliable signal (validation/not_found → `invalid_args`, or
+`unknown_tool` for a missing tool; transient → `transient`; auth/not_connected
+→ `needs_owner`; permission → `policy_refusal`; a lost outcome → `unknown_state`);
+without the block the envelope prefixes and signatures (ZodError, `-32602`) are
+classified. `needs_owner` and `policy_refusal` are separate from `deterministic`
+because its hint «смени инструмент» would invite bypassing a refusal.
+
+The next model step after a failed call gets a short system note
+`TOOL_ERROR_RECOVERY_NOTE` (tool, class, policy; budget exhausted after 2
+attempts), after LangGraph ToolNode `handle_tool_errors` and Reflexion. Policy
+block `TOOL_ERROR_RECOVERY_V1` (fix and retry before answering, never guess ids,
+call `list_projects` when a remembered id is rejected, reconnect card for
+auth/not_connected, follow «Урок Brain Desk») ships whenever external tools are
+on the wire; it is not an ALWAYS block because the minimal always-loaded prefix
+is capped at 5,500 tokens. Offline tests only; live behaviour is not proven.
+
 ## Context admission — 20 September 2026
 
 The local bridge limits transport to 2 MB after bounded directory-tree previews;
@@ -771,3 +847,62 @@ deepagents stays 0.4.11: 0.7.18 requires langchain-core>=1.6.4,
 langchain-anthropic>=1.7.3, langsmith>=0.14 and langchain-google-genai, and adds
 no semantic search to `StoreBackend`; the needed route mapping exists in 0.4.11.
 Offline coverage: `tests/unit_tests/test_msty_candidate_memory.py`, `test_consolidate_memory.py`.
+
+## Swarm (msty-swarm-v1) — 24 September 2026, off by default
+
+Owner request (brain-desk #142): like Kimi Agent Swarm, the lead may split a
+complex divisible task into 2–5 subtasks, each with its own prompt, role and
+cheap executor, run them in parallel and synthesize the result itself.
+Patterns taken: LangGraph `Send` map-reduce (fan-out + `operator.add` reducer),
+deepagents `task` context isolation (only the result goes up), OpenAI Agents SDK
+agents-as-tools (the manager stays in charge), Anthropic's multi-agent research
+(briefs with goal/format/boundaries; effort scaled to complexity; ~15× tokens,
+so single-agent by default). Kimi PARL is RL training of the orchestrator; it is
+not reproduced — our lead decides by instruction.
+
+Native `task` stays disabled (its hidden model calls bypass the bridge ledger).
+Instead `native_swarm` (`msty_swarm.py`) reuses the checkpointed native batch:
+
+1. Offered only when the bridge sets `swarm_protocol=msty-swarm-v1` (lead role,
+   once per owner turn; clients cannot shadow the name).
+2. The batch's `msty_native_continue` interrupt carries a `swarm` descriptor
+   (ids, titles, roles, profiles `deepseek|luna`, `max_tokens` 256–2048 — no
+   prompt text). An invalid plan gets no descriptor and a guard reply, no call.
+3. The bridge reserves one ledger row per subtask (analyst binding of that
+   profile, correlation `swarm_id`/`subtask`, stage `swarm`), checks the swarm
+   cap (`BRAIN_SWARM_CAP_USD`, default $0.50), task cap and stop, and resumes
+   with `swarm_admission` (all subtasks, or rejected with a reason). Missing or
+   foreign admission is a protocol error; rejection lets the lead continue alone.
+4. ToolNode runs a `Send` subgraph: one generation per executor, no tools,
+   75 s timeout, `max_concurrency=5`. Executors never raise (a failed branch
+   would drop the super-step); failures, timeouts and length cut-offs become
+   statuses. Custom `swarm_event` stream events carry measured usage and model
+   identity so the bridge settles each row; no answer text is streamed.
+5. The ToolMessage reports `complete|partial|failed`; a partial swarm carries an
+   explicit instruction not to present it as complete.
+
+Gemini Flash is a bridge-local lane and is not available to the cloud graph.
+Offline coverage: `tests/unit_tests/test_msty_swarm.py` (real Send/ToolNode/
+checkpoint, mocked models). Activation order: deploy this graph, then the
+bridge's `BRAIN_SWARM_ENABLED=1`, then the Brain Desk toggle (brain-desk
+`docs/swarm.md`). Tests are not evidence of deployment or answer quality.
+
+Follow-ups from the independent review of #18:
+
+- Executors use the lead's circuit breaker (`msty_breaker`, connection
+  `model:<profile>`). An open circuit skips the subtask with no provider call:
+  one terminal event `failed`, `error=provider_unavailable`, `started=false` (the
+  bridge settles the row as `not_started`); transient failures and successes are
+  recorded; a half-open probe is released in `finally`.
+- `check_admission` checks each subtask binding like the lead's
+  `validate_binding`: exact keys, `version=1`, `pricing_version=PRICING_VERSION`,
+  plan profile/output, and `input_limit` within `[180000, window_input_limit]`.
+- Stream events go through a guard: a failing writer no longer drops the
+  super-step; results survive, `events_lost` is reported and the lead is told the
+  cost of those subtasks is unknown.
+- At execution the plan is re-verified against the admitted descriptor
+  (`swarm_id`, `tool_call_id`, `plan_sha256`, subtasks); a mismatch is a protocol
+  error before any executor call.
+- A second `native_swarm` in one step gets its own refusal text.
+- Regression tests run the real lead step (adapter, `bind_tools`,
+  `prepare_messages`, `stamp_usage`, `valid_tool_calls`) for deepseek and luna.

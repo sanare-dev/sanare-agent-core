@@ -109,4 +109,6 @@ class TextStream:
             from . import msty_taxonomy  # локально: без цикла импорта
             failure = StreamFailure('Поток модели не завершён; действия не выданы, расход не подтверждён.')
             failure.transient = msty_taxonomy.is_transient_exception(error)
+            failure.policy_rejection = msty_taxonomy.policy_rejection_code(error)
+            failure.emitted = bool(self.parts)
             raise failure from None

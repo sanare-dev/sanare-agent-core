@@ -20,6 +20,7 @@ from langgraph_sdk import get_client
 
 RECENT_CONVERSATIONS_TOOL = 'native_recent_conversations'
 CONSOLIDATION_MARKER = 'MSTY_MEMORY_CONSOLIDATION_V1'
+INCOGNITO_MARKER = 'BRAIN_DESK_INCOGNITO_V1'
 SOURCE_GRAPH = 'msty_native'
 WINDOW_HOURS = 8  # launchd interval is 6 h; 2 h overlap, cards are updated, not duplicated
 MAX_THREADS = 10
@@ -52,7 +53,7 @@ def _text(content) -> str:
 
 def format_threads(threads: list[dict], since: datetime) -> str:
     """Bounded plain-text digest of human/AI turns; tool payloads are skipped,
-    and consolidation threads themselves are excluded by their marker."""
+    and consolidation and incognito threads are excluded by their markers."""
     chunks, total = [], 0
     for thread in threads:
         updated = str(thread.get('updated_at') or '')
@@ -65,6 +66,10 @@ def format_threads(threads: list[dict], since: datetime) -> str:
                     if isinstance(m, dict)]
         if any(m.get('type') == 'human' and CONSOLIDATION_MARKER in _text(m.get('content'))
                for m in messages):
+            continue
+        # Brain Desk puts this note in a system turn. Check every message before
+        # selecting the last N visible turns, including system and tool turns.
+        if any(INCOGNITO_MARKER in _text(m.get('content')) for m in messages):
             continue
         lines = [f"{m.get('type')}: {_text(m.get('content'))[:MAX_CHARS_PER_MESSAGE]}"
                  for m in messages[-MAX_MESSAGES_PER_THREAD:] if m.get('type') in ('human', 'ai')
