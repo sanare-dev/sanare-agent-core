@@ -144,6 +144,15 @@ def next_node(state):
     return '__end__'
 
 
+def _turn_form(message):
+    """The owner's turn in the form the native harness checkpoints."""
+    from langchain_core.messages import convert_to_openai_messages
+    try:
+        return convert_to_openai_messages([message])[0]
+    except (ValueError, TypeError, KeyError, NotImplementedError):
+        raise ExecutionProtocolError('Некорректное исходное обращение текущего шага.') from None
+
+
 def _last_user(messages):
     if not isinstance(messages, list) or any(not isinstance(m, dict) for m in messages):
         raise ExecutionProtocolError('Некорректная история продолжения Msty.')
@@ -215,7 +224,12 @@ def validate_resume(state, resume):
         model_ids.add(model_id)
     start, last_user = _last_user(incoming.get('messages'))
     _, original_user = _last_user(state.get('messages'))
-    if canonical_digest(last_user) != canonical_digest(original_user):
+    # Native harness keeps the checkpointed turn in OpenAI form
+    # (convert_to_openai_messages joins text parts), while the client resends
+    # its original parts — e.g. the owner's text + an attachment (brain-desk
+    # #537, LangSmith 25.09 16:39 UTC). Compare both in that one canonical
+    # form: the same content passes, any change of the turn still fails.
+    if canonical_digest(_turn_form(last_user)) != canonical_digest(_turn_form(original_user)):
         raise ExecutionProtocolError('Новый пользовательский ход не является результатом инструмента.')
     observed_calls, observed_results = set(), set()
     new_results = []
