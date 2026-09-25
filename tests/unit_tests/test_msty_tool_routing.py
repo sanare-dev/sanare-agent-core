@@ -231,6 +231,23 @@ def test_every_executor_job_id_reaches_its_own_continuation_tools():
         assert not (names & {"msty_codex_start", "msty_worker_start"}), text
 
 
+def test_removed_session_id_gets_core_resolvers_and_a_catalog_escape_hatch():
+    """A removed window session ("rs_<hex>") is a job reference like any other.
+
+    Live defect 2026-09-25: new window tools for removed sessions shipped with
+    no bundle here. "что с rs_<hex>" carried no verb this router knows and no
+    domain word, so it classified as intent=direct with zero tools selected
+    AND catalog=False — a dead end with no way for the model to even ask for
+    the right tool by name.
+    """
+    for text in ("что с rs_67d8f2a9b1c04e77", "восстанови rs_67d8f2a9b1c04e77",
+                 "статус rs_a1b2c3d4e5f6"):
+        names, value, _ = route(text)
+        assert value["intent"] != "direct", text
+        assert value["catalog"], text
+        assert names & routing._CORE_READ, text
+
+
 def test_a_bare_word_without_a_job_id_gets_no_executor_bundle():
     """Only an actual id unlocks a job bundle; the word alone must not.
 

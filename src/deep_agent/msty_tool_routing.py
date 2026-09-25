@@ -208,6 +208,18 @@ _JOB_BUNDLES: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
     (re.compile(r"(?i)\bcodex-[0-9a-f]{8,32}\b"), frozenset({"msty_codex_status", "msty_codex_cancel"})),
     (re.compile(r"(?i)\bworker-[0-9a-f]{8,32}\b"), frozenset(_WORKER)),
     (re.compile(r"(?i)\bbrain-[0-9a-f]{8,32}\b"), frozenset(_BRAIN_JOB)),
+    # A removed/deleted window session (the provider's own "rs_<hex>" response
+    # id) is named the same bare way as any other job id ("что с rs_...",
+    # "восстанови rs_..."), with no verb this router knows and no domain word.
+    # Before this entry such a turn fell through to intent=direct with zero
+    # selected tools AND catalog=False (live defect 2026-09-25: new window
+    # tools for removed sessions arrived with no bundle here, so the model got
+    # nothing to work with and no catalog escape hatch to self-request the
+    # actual tool by name). Route it like every other job id: promote to
+    # "read" and hand the core resolvers so the model can look the session up
+    # and, via the now-visible catalog, request whatever removed-session tool
+    # the client actually supplied.
+    (re.compile(r"(?i)\brs_[0-9a-f]{6,64}\b"), frozenset(_CORE_READ)),
 )
 # Установленные операции коннекторов, сознательно не входящие в маршрут по
 # умолчанию (группа known_only манифеста): выбираются точным именем, но не
