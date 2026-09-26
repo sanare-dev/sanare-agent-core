@@ -13,6 +13,7 @@ import re
 import uuid
 
 from .msty_execution import MAX_ACTIONS, canonical_digest
+from . import msty_models
 
 PLAN_SUFFIX = 'msty_task_plan'
 VERIFY_SUFFIX = 'msty_task_verify'
@@ -335,7 +336,7 @@ def _outcome_start_gate(state, result, tools, disabled):
     needed, content = _incident_needs_first_action(state)
     if (not needed or result.tool_calls or result.invalid_tool_calls or disabled or
             meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
-            meta.get('stop_reason', meta.get('finish_reason')) in
+            msty_models.finish_reason(meta) in
                 ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter') or
             (state.get('execution') or {}).get('actions_issued', 0) >= MAX_ACTIONS):
         return None
@@ -494,7 +495,7 @@ def _site_gate(state, result, tools, disabled):
     meta = result.response_metadata
     if (result.tool_calls or result.invalid_tool_calls or disabled or owner_control(state) or
             meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
-            meta.get('stop_reason', meta.get('finish_reason')) in
+            msty_models.finish_reason(meta) in
                 ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter')):
         return None
     pending = {job: status for job, status in site_jobs(state).items() if status != 'clean'}
@@ -585,7 +586,7 @@ def gate_final(state, result, tools, disabled):
                                   'msty_completion_gate': 'failed_verification_preserved'}})
     if (contract.get('status') != 'planned' or result.tool_calls or result.invalid_tool_calls or disabled or
             owner_control(state) or meta.get('msty_blocked') or meta.get('msty_generation') == 'not_started' or
-            meta.get('stop_reason', meta.get('finish_reason')) in
+            msty_models.finish_reason(meta) in
                 ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter')):
         return result
     names = [tool.get('function', {}).get('name') for tool in tools

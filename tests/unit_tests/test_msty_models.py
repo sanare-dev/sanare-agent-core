@@ -68,6 +68,26 @@ def test_luna_output_floor_matches_responses_api_minimum(requested, monkeypatch)
     assert obj.max_tokens == max(requested, adapter.RESPONSES_MIN_OUTPUT_TOKENS)
 
 
+@pytest.mark.parametrize('metadata,expected', [
+    ({'finish_reason': 'stop'}, 'stop'),
+    ({'stop_reason': 'end_turn'}, 'end_turn'),
+    # gpt-6-luna via the Responses API: no finish_reason/stop_reason field at
+    # all (langchain_openai _construct_lc_result_from_responses_api). Every
+    # safety gate that used to read those two keys directly now needs this
+    # instead, or it stops seeing luna's truncation/refusal state entirely.
+    ({'status': 'completed'}, 'stop'),
+    ({'status': 'incomplete'}, 'length'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'}}, 'length'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'content_filter'}}, 'content_filter'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'something_new'}}, 'length'),
+    ({'status': 'failed'}, None),
+    ({}, None),
+    (None, None),
+])
+def test_finish_reason_bridges_chat_completions_and_responses_api(metadata, expected):
+    assert adapter.finish_reason(metadata) == expected
+
+
 def test_missing_provider_key_never_falls_back(monkeypatch):
     monkeypatch.delenv('DEEPSEEK_API_KEY')
     with pytest.raises(adapter.ModelAdapterError, match='Ключ'):

@@ -462,6 +462,38 @@ def count_method(profile, messages):
     return COUNT_METHODS[profile]
 
 
+#: Chat Completions/Anthropic expose finish_reason/stop_reason directly; the
+#: OpenAI Responses API (luna, since 2026-09-26) has neither field at all —
+#: only a terminal `status`, plus `incomplete_details.reason` when truncated
+#: (langchain_openai _construct_lc_result_from_responses_api, live-verified).
+#: Unrecognized incomplete reasons fall back to 'length' (the conservative,
+#: blocking choice) rather than being silently treated as a clean finish.
+RESPONSES_INCOMPLETE_REASON = MappingProxyType({'max_output_tokens': 'length', 'content_filter': 'content_filter'})
+
+
+def finish_reason(metadata):
+    """Terminal reason across both wire shapes, or None if truly unknown.
+
+    Every safety gate that used to read
+    `metadata.get('stop_reason', metadata.get('finish_reason'))` directly must
+    use this instead, or it stops seeing luna's truncation/refusal state under
+    the Responses API (status is never 'max_tokens'/'length'/etc.).
+    """
+    if not isinstance(metadata, dict):
+        return None
+    reason = metadata.get('stop_reason', metadata.get('finish_reason'))
+    if reason is not None:
+        return reason
+    status = metadata.get('status')
+    if status == 'completed':
+        return 'stop'
+    if status == 'incomplete':
+        details = metadata.get('incomplete_details')
+        code = details.get('reason') if isinstance(details, dict) else None
+        return RESPONSES_INCOMPLETE_REASON.get(code, 'length')
+    return None
+
+
 def checked_usage(profile: str, result: AIMessage):
     """Preserve measured tokens even if subsequent identity validation fails."""
     _profile(profile)
