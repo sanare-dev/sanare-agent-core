@@ -418,3 +418,13 @@ def test_pricing_version_and_luna_model_match_bridge_when_available():
     luna = re.search(r"'luna': \{'model': '([^']+)'", text).group(1)
     assert version == msty_execution.PRICING_VERSION
     assert luna == adapter.PROFILES['luna'].model
+
+
+def test_luna_responses_reasoning_blocks_are_dropped_from_replayed_history():
+    # Live 26.09: after the Responses API switch (#35) the next step failed with
+    # «Этот блок истории нельзя безопасно перенести…» on Luna's own reasoning item.
+    from langchain_core.messages import AIMessage
+    from deep_agent import msty_models
+    msg = AIMessage(content=[{'type': 'reasoning', 'id': 'rs_1', 'summary': []},
+                             {'type': 'text', 'text': 'готово'}])
+    assert msty_models._openai_content(msg).content == [{'type': 'text', 'text': 'готово'}]

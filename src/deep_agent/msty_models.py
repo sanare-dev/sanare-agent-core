@@ -269,6 +269,13 @@ def _openai_content(message: BaseMessage):
             # Preserve historical text as assistant content; provider signatures
             # are not portable to Chat Completions. Never treat it as a new user.
             blocks.append({'type': 'text', 'text': block['thinking']})
+        elif kind == 'reasoning' and isinstance(message, AIMessage):
+            # Luna runs on the Responses API with store=False (#35): its reasoning
+            # items carry no replayable encrypted state, and the provider never
+            # accepts them back as input. They are the model's own scratchpad,
+            # not owner/tool content, so dropping them from replayed history is
+            # lossless for the conversation (OpenAI reasoning guide).
+            continue
         elif kind == 'tool_use' and isinstance(message, AIMessage):
             if (not isinstance(block.get('id'), str) or not block['id']
                     or not isinstance(block.get('name'), str) or not block['name']
