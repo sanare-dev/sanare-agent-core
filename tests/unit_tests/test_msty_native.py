@@ -239,6 +239,48 @@ def test_requested_tool_becomes_visible_same_run_no_new_owner_message(monkeypatc
     asyncio.run(run())
 
 
+def test_tool_beyond_routed_28_is_callable_same_run(monkeypatch):
+    """brain-desk 26.09 (owner: «доводи до конца»): with more schemas than the
+    router hands the model (MAX_SELECTED_TOOLS = 28), the 40th tool is not on
+    the first step's wire, but native_request_tools makes it a real schema on
+    the next model step of the same run and its call is dispatched there."""
+    from deep_agent import msty_tool_routing
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    filler = [{'type': 'function', 'function': {
+        'name': f'external_filler_{i:02d}',
+        'description': 'Read one synthetic external item.',
+        'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}}
+        for i in range(39)]
+    target = 'external_hidden'
+    seen = scripted(monkeypatch, [
+        answer('', [call('native_request_tools', {'names': [target]}, 'req-40')]),
+        answer('', [call(target, {}, 'hidden-40')]),
+        answer()])
+
+    async def run():
+        saver, store = InMemorySaver(), InMemoryStore()
+        data = initial()
+        data['tools'] = filler + [deepcopy(_HIDDEN_TOOL)]
+        assert len(data['tools']) == 40 > msty_tool_routing.MAX_SELECTED_TOOLS
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        config = {'configurable': {'thread_id': 'dispatcher-beyond-28'}}
+        first, _ = await invoke(graph, data, config)
+        first_names = msty.tool_names(seen[0]['state']['tools'])
+        assert target not in first_names
+        assert len([n for n in first_names if n.startswith('external_')]) <= \
+            msty_tool_routing.MAX_SELECTED_TOOLS
+        pending = first.tasks[0].interrupts[0]
+        assert pending.value['type'] == 'msty_native_continue'
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        second, events = await invoke(graph, Command(resume={pending.id: {
+            **pending.value, 'type': 'msty_native_resume'}}), config)
+        assert len(seen) == 2
+        assert target in msty.tool_names(seen[1]['state']['tools'])
+        assert second.values['execution']['status'] == 'waiting_tools'
+        assert [c['name'] for c in events[0]['tool_calls']] == [target]
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('mode', ['limit', 'duplicate_todos'])
 def test_unsafe_batches_block_before_publication_or_execution(monkeypatch, mode):
     data = initial()
@@ -1107,5 +1149,10 @@ def test_tool_error_recovery_block_is_always_on_the_wire_and_reconciles_reuse():
     assert 'id отклонён инструментом, неизвестен' in reuse
     assert 'см. TOOL_ERROR_RECOVERY_V1' in reuse
     assert 'MSTY_CONTEXT_REUSE_V1' in block.replace('\n', ' ')
+    # 26.09: one condition, same words in both blocks; no «исключение» riddle.
+    for text in (block, reuse):
+        flat = ' '.join(text.split())
+        assert 'только когда id' in flat
+        assert 'исключение' not in flat
     from deep_agent import msty_memory
     assert 'если инструмент отклонил\nproject_id — вызови list_projects' in msty_memory.system_context()
