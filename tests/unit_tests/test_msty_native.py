@@ -191,6 +191,54 @@ def test_mixed_native_external_batch_runs_sequentially_without_new_user_command(
     asyncio.run(run())
 
 
+_HIDDEN_TOOL = {'type': 'function', 'function': {'name': 'external_hidden',
+    'description': 'Check a private status endpoint outside default routing.',
+    'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}}
+
+
+def initial_with_hidden_tool():
+    data = initial()
+    data['tools'] = deepcopy(TOOLS) + [deepcopy(_HIDDEN_TOOL)]
+    return data
+
+
+def test_requested_tool_becomes_visible_same_run_no_new_owner_message(monkeypatch):
+    """brain-agency-audit-2026-09-26 #2: a tool outside the routed set is only a
+    text catalog entry until native_request_tools is called; it must become a
+    real schema on the NEXT model step of the SAME run (gateway admission
+    resume only — no fresh message from the owner), not a following turn."""
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    seen = scripted(monkeypatch, [
+        answer('', [call('native_request_tools', {'names': ['external_hidden']}, 'req-1')]),
+        answer('', [call('external_hidden', {}, 'hidden-1')]),
+        answer()])
+
+    async def run():
+        saver, store = InMemorySaver(), InMemoryStore()
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        config = {'configurable': {'thread_id': 'dispatcher-same-run'}}
+        first, events = await invoke(graph, initial_with_hidden_tool(), config)
+        # Step 1: not requested yet, so not on the wire; only the text catalog
+        # (checked at the routing layer in test_msty_dispatcher.py) names it.
+        assert 'external_hidden' not in msty.tool_names(seen[0]['state']['tools'])
+        assert first.values['execution']['status'] == 'waiting_native'
+        pending = first.tasks[0].interrupts[0]
+        assert pending.value['type'] == 'msty_native_continue'
+
+        # The only thing that advances the graph here is the bridge's own
+        # gateway-admission resume (msty_native_continue -> msty_native_resume):
+        # no Command carries a new HumanMessage, and no owner input is read.
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        second, events = await invoke(graph, Command(resume={pending.id: {
+            **pending.value, 'type': 'msty_native_resume'}}), config)
+        assert len(seen) == 2
+        # Step 2, same thread/run, same owner turn: the requested schema is now
+        # a real tool the model can call directly.
+        assert 'external_hidden' in msty.tool_names(seen[1]['state']['tools'])
+        assert second.values['execution']['status'] == 'waiting_tools'
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('mode', ['limit', 'duplicate_todos'])
 def test_unsafe_batches_block_before_publication_or_execution(monkeypatch, mode):
     data = initial()
@@ -1053,6 +1101,11 @@ def test_tool_error_recovery_block_is_always_on_the_wire_and_reconciles_reuse():
     assert block in msty_prompts.select_policy(full, {'intent': 'direct', 'domains': []},
                                                ['list_tables'])
     reuse = next(b for b in msty.POLICY.split('\n\n') if b.startswith('MSTY_CONTEXT_REUSE_V1'))
-    assert 'кроме случая, когда инструмент отклонил этот id' in reuse
+    # brain-agency-audit-2026-09-26 #1: the two blocks now state one rule instead
+    # of contradicting each other — known/confirmed id reused directly, rejected/
+    # unknown id gets a fresh live check, worded the same way in both blocks.
+    assert 'id отклонён инструментом, неизвестен' in reuse
+    assert 'см. TOOL_ERROR_RECOVERY_V1' in reuse
+    assert 'MSTY_CONTEXT_REUSE_V1' in block.replace('\n', ' ')
     from deep_agent import msty_memory
     assert 'если инструмент отклонил\nproject_id — вызови list_projects' in msty_memory.system_context()

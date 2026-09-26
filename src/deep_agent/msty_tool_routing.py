@@ -17,6 +17,17 @@ from . import msty_registry, msty_semantic
 
 
 ROUTE_VERSION = 2
+# brain-agency-audit-2026-09-26 #2: kept at 28, not raised to 40-60. The real
+# friction the audit found was never the cap itself — it is that a tool
+# outside it used to read as a one-turn-late "ask and wait for the owner"
+# protocol. test_requested_tool_becomes_visible_same_run_no_new_owner_message
+# (test_msty_native.py) proves that is not how it works: native_request_tools
+# is a server-executed tool gated by the same gateway-admission resume as any
+# other native call, so a requested schema is on the wire on the NEXT model
+# step of the SAME run, with no fresh owner message in between. Given that,
+# raising the cap would add schema tokens to every step (routed or not) for a
+# latency that is already zero at the turn level — pure cost, no benefit. Stays
+# well under MAX_MODEL_TOOLS (128, the provider's per-call function limit).
 MAX_SELECTED_TOOLS = 28
 
 # fullmatch against a fixed list meant that any extra word broke it: "Делай, не
