@@ -235,6 +235,12 @@ _ORG_TOOLS = frozenset({"org_structure", "delegate", "delegate_many", "review"})
 # and the connector finder are always at hand for a working turn, whatever
 # the words («решай проблему» routed to route_request + system_map only).
 _WINDOW_TOOLS = frozenset({"connector_search", "connector_propose"})
+# Brain Desk «До результата» (brain-desk #443): the window's task harness —
+# plan with criteria, self-check, the owner's decision, the report, the
+# project knowledge file. It is the loop itself, so every step of the task
+# keeps it whatever the words or the continuation route.
+_TASK_MODE_TOOLS = frozenset({"brain_task_plan", "brain_task_check", "brain_task_ask",
+                              "brain_task_finish", "brain_task_save", "brain_task_spawn"})
 # Remote Windows servers over the window's SSH connector (ssh-mcp, brain-desk
 # #343): live 24.09 «подключись и реши вопрос» about Crin-Barbu got no SSH
 # schemas — the router had no remote domain, and the owner's short follow-up
@@ -751,6 +757,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     skill_open = (_SKILL_OPEN & available.keys()
                   if _from_brain_desk(messages) and _has_skill_catalog(messages) else set())
     chosen.update(skill_open)
+    task_mode = (_TASK_MODE_TOOLS & available.keys()) if _from_brain_desk(messages) else set()
+    chosen.update(task_mode)
 
     historical_calls = _historical_tool_names(messages)
     historical = historical_calls & available.keys()
@@ -787,7 +795,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     if tool_choice == "none" or (isinstance(tool_choice, dict) and tool_choice.get("type") == "none"):
         chosen = historical
 
-    protected = historical | required | requested | (_ORG_TOOLS & chosen) | (skill_open & chosen)
+    protected = (historical | required | requested | (_ORG_TOOLS & chosen) | (skill_open & chosen)
+                 | (task_mode & chosen))
     ordered = [name for name in available if name in chosen]
     if len(ordered) > MAX_SELECTED_TOOLS:
         keep = [name for name in ordered if name in protected]

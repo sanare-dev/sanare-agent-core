@@ -359,6 +359,10 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         intervention = msty_task.progress_intervention(state)
         if intervention is not None:
             policy += '\n\n' + intervention
+        # The step after an open plan gate (brain-desk #443): why the turn goes on.
+        continuation = msty_task.open_plan_intervention(state)
+        if continuation is not None:
+            policy += '\n\n' + continuation
         if policy_fallback is not None:
             policy += ('\n\nОсновная модель отклонила этот запрос фильтром политики провайдера; '
                        'отвечаешь ты как резервная модель. Изображения из переписки тебе не переданы: '
