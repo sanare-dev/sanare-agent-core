@@ -358,8 +358,13 @@ See `test_msty_compaction.py` and `test_msty_task.py` for offline acceptance.
 ### Unified inference transport
 
 Operator setting `MSTY_LLM_GATEWAY_ENABLED=1` routes all admitted cloud profiles through
-LangSmith Gateway. Luna uses `/openai/v1/chat/completions` with its native model ID;
-DeepSeek uses `/v1/chat/completions` and the saved `custom/Msty%20DeepSeek%20Flash`
+LangSmith Gateway. Luna uses `/openai/v1/responses` (OpenAI Responses API,
+`use_responses_api=True`) with its native model ID — owner decision 26 September 2026,
+live-verified through this exact route: Chat Completions only allows function
+calling at `reasoning_effort='none'`, while the Responses API keeps tool calling at
+every reasoning tier, so Luna now runs at `reasoning={'effort': 'max'}`. Streaming
+reads the Responses API's `status` field (`completed`/`incomplete`), not
+`finish_reason`; DeepSeek uses `/v1/chat/completions` and the saved `custom/Msty%20DeepSeek%20Flash`
 configuration. The latter must match server config ID
 `ae7376e7-fea6-43cb-b50c-97db118c8c47` in
 `MSTY_LLM_GATEWAY_DEEPSEEK_CONFIG_ID`. The Gateway credential is supplied only by
@@ -382,7 +387,8 @@ acceptance evidence live in the owning project's change journal, not this source
 increment. Engine, sandboxes and subscription preferences are unchanged.
 
 The `msty` graph now defaults to server profile `luna` (`gpt-6-luna` since 2026-09-23,
-reasoning `none`). There is no compulsory prompt rewriter, council or hidden
+reasoning `max` via the Responses API since 2026-09-26). There is no compulsory
+prompt rewriter, council or hidden
 second model. Each cloud run performs at most one billed generation; the explicit
 compaction protocol above may require two separately counted runs in one client leg.
 `MSTY_MODEL_PROFILE=sonnet` is an explicit operator rollback, not an automatic

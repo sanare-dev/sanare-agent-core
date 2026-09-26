@@ -297,6 +297,25 @@ def test_real_async_adapter_requests_usage_and_preserves_raw_final_metadata(monk
     assert [event['text'] for event in emitted] == ['First ', 'second']
 
 
+@pytest.mark.parametrize('status,accepted', [('completed', True), ('incomplete', True),
+                                             ('failed', False), ('cancelled', False)])
+def test_responses_api_status_only_finish_is_mapped_not_widened(status, accepted, monkeypatch):
+    """Luna now uses the Responses API: streaming carries `status`, never
+    finish_reason/stop_reason (langchain_openai _construct_lc_result_from_responses_api).
+    Only completed/incomplete are accepted, mapped onto the existing
+    Chat-Completions vocabulary; KNOWN_FINISH itself is not widened."""
+    monkeypatch.setattr(msty_stream, 'get_stream_writer', lambda: (lambda event: None))
+    class Model:
+        async def astream(self, messages, **kwargs):
+            yield AIMessageChunk(content='Answer', response_metadata={'status': status, 'model': 'gpt-6-luna'})
+    if accepted:
+        final = asyncio.run(msty_stream.TextStream({}).invoke(Model(), []))
+        assert final.content == 'Answer'
+    else:
+        with pytest.raises(msty_stream.StreamFailure, match='не содержит подтверждения завершения'):
+            asyncio.run(msty_stream.TextStream({}).invoke(Model(), []))
+
+
 def test_independent_fresh_task_does_not_inherit_old_artifact_buffer(monkeypatch):
     install(monkeypatch, chunks('Short answer.'))
     async def scenario():

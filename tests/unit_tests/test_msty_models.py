@@ -38,9 +38,9 @@ def test_fixed_model_endpoint_and_no_retries(profile, model, endpoint, monkeypat
     assert obj.anthropic_api_url == endpoint if profile == 'sonnet' else obj.openai_api_base == endpoint
     assert obj.temperature is None
     if profile != 'sonnet':
-        assert obj.use_responses_api is False
+        assert obj.use_responses_api is (profile == 'luna')
     if profile == 'luna':
-        assert obj.reasoning_effort == 'none'
+        assert obj.reasoning == {'effort': 'max'}
     if profile == 'deepseek':
         assert obj.extra_body == {'thinking': {'type': 'disabled'}, 'max_tokens': 123}
 
@@ -331,6 +331,16 @@ def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeyp
     captured = []
     def handler(request):
         captured.append((str(request.url), json.loads(request.content)))
+        if profile == 'luna':
+            # gpt-6-luna: OpenAI Responses API wire (use_responses_api=True).
+            return httpx.Response(200, json={'id': 'synthetic', 'object': 'response', 'created_at': 1,
+                'status': 'completed', 'model': adapter.PROFILES[profile].model,
+                'output': [{'type': 'message', 'id': 'msg_1', 'role': 'assistant', 'status': 'completed',
+                            'content': [{'type': 'output_text', 'text': '17', 'annotations': []}]}],
+                'parallel_tool_calls': True, 'tool_choice': 'none', 'tools': [],
+                'top_p': 1.0, 'temperature': 1.0,
+                'usage': {'input_tokens': 55, 'output_tokens': 2, 'total_tokens': 57,
+                          'input_tokens_details': {'cached_tokens': 20}}})
         return httpx.Response(200, json={'id': 'synthetic', 'object': 'chat.completion', 'created': 1,
             'model': adapter.PROFILES[profile].model,
             'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': '17'}}],
@@ -354,19 +364,32 @@ def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeyp
     result = adapter.stamp_usage(profile, asyncio.run(execute()))
     assert len(captured) == 1
     url, payload = captured[0]
+    if profile == 'luna':
+        assert url == adapter.PROFILES[profile].endpoint + '/responses'
+        assert payload['model'] == adapter.PROFILES[profile].model
+        assert payload['tool_choice'] == 'none'
+        assert payload['tools'] == [{'type': 'function', 'name': 'read_fixture', 'parameters':
+            TOOLS[0]['function']['parameters']}]
+        assert payload['input'][2] == {'type': 'function_call', 'name': 'read_fixture',
+            'arguments': '{"path": "/synthetic/a"}', 'call_id': 'a'}
+        assert payload['input'][3] == {'type': 'function_call_output', 'output': '17', 'call_id': 'a'}
+        assert payload['reasoning'] == {'effort': 'max'} and payload['max_output_tokens'] == 40
+        assert payload['store'] is False
+        assert 'reasoning_effort' not in payload and 'thinking' not in payload
+        assert 'temperature' not in payload
+        assert result.usage_metadata is not None
+        assert result.usage_metadata['input_token_details']['cache_read'] == 20
+        assert result.usage_metadata['input_tokens'] == 55
+        return
     assert url == adapter.PROFILES[profile].endpoint + '/chat/completions'
     assert payload['model'] == adapter.PROFILES[profile].model
     assert payload['tool_choice'] == 'none' and payload['tools'] == TOOLS
     assert payload['messages'][1]['tool_calls'][0]['id'] == 'a'
     assert payload['messages'][2]['content'] == '17'
     assert 'temperature' not in payload
-    if profile == 'luna':
-        assert payload['reasoning_effort'] == 'none' and payload['max_completion_tokens'] == 40
-        assert 'thinking' not in payload
-    else:
-        assert payload['thinking'] == {'type': 'disabled'} and payload['max_tokens'] == 40
-        assert 'max_completion_tokens' not in payload
-        assert 'reasoning_effort' not in payload
+    assert payload['thinking'] == {'type': 'disabled'} and payload['max_tokens'] == 40
+    assert 'max_completion_tokens' not in payload
+    assert 'reasoning_effort' not in payload
     assert result.usage_metadata is not None, result.response_metadata.get('token_usage')
     assert result.usage_metadata['input_token_details']['cache_read'] == 20
     assert result.usage_metadata['input_tokens'] == 55
