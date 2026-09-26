@@ -448,3 +448,31 @@ def test_luna_responses_reasoning_blocks_are_dropped_from_replayed_history():
     msg = AIMessage(content=[{'type': 'reasoning', 'id': 'rs_1', 'summary': []},
                              {'type': 'text', 'text': 'готово'}])
     assert msty_models._openai_content(msg).content == [{'type': 'text', 'text': 'готово'}]
+
+
+def test_luna_responses_function_call_blocks_replay_as_tool_use():
+    # Live 26.09 (after the finish_reason fix, #38): approving a Luna tool call
+    # and resuming raised the same "этот блок истории нельзя безопасно
+    # перенести" on the model's OWN function_call output item — the Responses
+    # API's call_id/name/arguments(JSON string) shape
+    # (langchain_openai._construct_lc_result_from_responses_api), never
+    # recognized as the Anthropic-style tool_use (id/name/input dict) this
+    # history validator expects.
+    from langchain_core.messages import AIMessage
+    from deep_agent import msty_models
+    msg = AIMessage(content=[{'type': 'function_call', 'id': 'fc_1', 'call_id': 'call_1',
+                              'name': 'fetch', 'arguments': '{"url": "https://x.invalid"}',
+                              'status': 'completed'}],
+                    tool_calls=[{'type': 'tool_call', 'name': 'fetch',
+                                 'args': {'url': 'https://x.invalid'}, 'id': 'call_1'}])
+    assert msty_models._openai_content(msg).content == [{'type': 'tool_use', 'id': 'call_1',
+        'name': 'fetch', 'input': {'url': 'https://x.invalid'}}]
+
+
+def test_luna_responses_malformed_function_call_is_rejected_not_dropped():
+    from langchain_core.messages import AIMessage
+    from deep_agent import msty_models
+    msg = AIMessage(content=[{'type': 'function_call', 'call_id': 'call_1', 'name': 'fetch',
+                              'arguments': 'not-json'}])
+    with pytest.raises(msty_models.ModelAdapterError, match='Некорректный исторический вызов'):
+        msty_models._openai_content(msg)

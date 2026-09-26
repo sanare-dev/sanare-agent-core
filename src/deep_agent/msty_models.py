@@ -263,6 +263,24 @@ def _openai_content(message: BaseMessage):
         kind = block.get('type')
         copy = deepcopy(block)
         copy.pop('cache_control', None)
+        if kind == 'function_call' and isinstance(message, AIMessage):
+            # Luna's Responses API function_call output items (langchain_openai
+            # _construct_lc_result_from_responses_api) use OpenAI's own shape —
+            # call_id/name/arguments as a JSON string — not the Anthropic-style
+            # tool_use block (id/name/input dict) this history normally speaks
+            # and the rest of this function validates. Live-discovered
+            # 2026-09-26: replaying a tool-call turn after an interrupt/resume
+            # raised "этот блок истории нельзя безопасно перенести" because this
+            # shape fell through to the catch-all rejection below. Normalize it
+            # onto the existing tool_use path instead of adding a parallel one.
+            try:
+                arguments = (json.loads(block['arguments']) if isinstance(block.get('arguments'), str)
+                            else None)
+            except (TypeError, ValueError):
+                arguments = None
+            block = copy = {'type': 'tool_use', 'id': block.get('call_id'),
+                            'name': block.get('name'), 'input': arguments}
+            kind = 'tool_use'
         if kind == 'text' and isinstance(block.get('text'), str):
             blocks.append(copy)
         elif kind == 'thinking' and isinstance(message, AIMessage) and isinstance(block.get('thinking'), str):
