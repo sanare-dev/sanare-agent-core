@@ -58,6 +58,16 @@ def test_output_bound_is_strict(limit):
         adapter.make_model('luna', limit)
 
 
+@pytest.mark.parametrize('requested', [1, 8, 15, 16, 40])
+def test_luna_output_floor_matches_responses_api_minimum(requested, monkeypatch):
+    """Live-proven 2026-09-26: Responses API rejects max_output_tokens<16
+    (BadRequestError, integer_below_min_value) — a near-exhausted output budget
+    (e.g. compaction) must still floor up to it, never fail the call outright."""
+    monkeypatch.setenv('OPENAI_BASE_URL', 'https://not-a-provider.invalid')
+    obj = adapter.make_model('luna', requested)
+    assert obj.max_tokens == max(requested, adapter.RESPONSES_MIN_OUTPUT_TOKENS)
+
+
 def test_missing_provider_key_never_falls_back(monkeypatch):
     monkeypatch.delenv('DEEPSEEK_API_KEY')
     with pytest.raises(adapter.ModelAdapterError, match='Ключ'):
