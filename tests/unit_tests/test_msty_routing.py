@@ -341,6 +341,41 @@ def test_none_keeps_schemas_but_never_publishes_action(monkeypatch, profile, cho
     assert not result.get('__interrupt__')
 
 
+@pytest.mark.parametrize('incomplete,expected,phrase', [
+    ('max_output_tokens', 'length', 'исчерпан лимит вывода (64 токенов)'),
+    ('content_filter', 'content_filter', 'провайдер прервал генерацию (content_filter)')])
+def test_responses_reasoning_only_incomplete_is_explained_not_empty(monkeypatch, incomplete, expected, phrase):
+    """Live 2026-09-26 (Brain Desk run e9b6a175): Luna at effort='max' spent the
+    whole max_output_tokens on reasoning; the Responses reply had only a
+    reasoning block, status=incomplete and no finish_reason, so the bridge
+    raised «Модель вернула пустой ответ». The graph must stamp the translated
+    finish_reason and explain the missing answer instead of publishing ''."""
+    monkeypatch.setenv('MSTY_MODEL_PROFILE', 'luna')
+    response = reply([{'type': 'reasoning', 'id': 'rs_synthetic', 'summary': []}], metadata={
+        'status': 'incomplete', 'incomplete_details': {'reason': incomplete}, 'model_name': 'gpt-6-luna'})
+    models(monkeypatch, [response])
+    result = asyncio.run(msty.graph.ainvoke(initial()))
+    assert result['result']['response_metadata']['finish_reason'] == expected
+    assert result['result']['response_metadata']['status'] == 'incomplete'
+    assert phrase in result['result']['content']
+    assert result['result']['tool_calls'] == []
+    assert result['result']['usage_metadata'] == USAGE
+    assert result['execution']['status'] == 'incomplete'
+    assert result['execution']['actions_issued'] == 0
+
+
+def test_responses_truncated_partial_text_is_kept(monkeypatch):
+    monkeypatch.setenv('MSTY_MODEL_PROFILE', 'luna')
+    response = reply([{'type': 'reasoning', 'id': 'rs_synthetic', 'summary': []},
+                      {'type': 'text', 'text': 'Частичный план'}], metadata={
+        'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'}})
+    models(monkeypatch, [response])
+    result = asyncio.run(msty.graph.ainvoke(initial()))
+    assert result['result']['response_metadata']['finish_reason'] == 'length'
+    assert 'Частичный план' in str(result['result']['content'])
+    assert 'исчерпан лимит' not in str(result['result']['content'])
+
+
 @pytest.mark.parametrize('profile', ['luna', 'deepseek'])
 @pytest.mark.parametrize('reason', ['length', 'content_filter'])
 def test_truncated_or_refused_output_never_publishes_action(monkeypatch, profile, reason):

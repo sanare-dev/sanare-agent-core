@@ -321,6 +321,36 @@ async def _policy_fallback_step(state, profile, code, budget_check, *,
                                native_result_filter=native_result_filter)
 
 
+def _explain_unfinished(result: AIMessage, stop_reason: str, output_limit: int) -> AIMessage:
+    """Make a provider-terminated reply explicit to every consumer.
+
+    Live 2026-09-26 (Brain Desk run e9b6a175, ledger output_tokens == 4096 ==
+    output_limit): under the Responses API with reasoning.effort='max' Luna can
+    spend the whole max_output_tokens on reasoning and return status=incomplete
+    with no text item. The Responses wire carries no finish_reason, so the
+    bridge (which reads only finish_reason/stop_reason) saw a clean 'stop' with
+    empty content and reported «Модель вернула пустой ответ». Stamp the
+    translated reason and, when no visible text exists, say what happened.
+    """
+    metadata = result.response_metadata or {}
+    update = {}
+    if metadata.get('finish_reason') is None and metadata.get('stop_reason') is None:
+        update['response_metadata'] = {**metadata, 'finish_reason': stop_reason}
+    try:
+        visible = msty_stream.text_content(result.content).strip()
+    except msty_stream.StreamFailure:
+        visible = ''
+    if not visible:
+        update['content'] = (
+            f'Ответ модели не получен: исчерпан лимит вывода ({output_limit} токенов) до '
+            'текстового ответа (у Luna его расходует рассуждение). Действия не выполнены; '
+            'нужен больший лимит вывода или более узкая задача.'
+            if stop_reason in ('max_tokens', 'length') else
+            'Ответ модели не получен: провайдер прервал генерацию '
+            f'({stop_reason}). Действия не выполнены.')
+    return result.model_copy(update=update) if update else result
+
+
 async def _respond_step(state: State, *, native_system_prompt: str | None = None,
                         native_result_filter=None):
     tools = state.get("tools") or []
@@ -524,6 +554,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         # termination and measured usage, but never suspend for partial actions.
         result = result.model_copy(update={'tool_calls': [], 'invalid_tool_calls': [],
                                           'additional_kwargs': {}})
+        result = _explain_unfinished(result, stop_reason, output_limit)
     allowed = tool_names(tools)
     if (tools_disabled and result.tool_calls) or not valid_tool_calls(result, tools):
         # Fail closed before the client can execute an invented operation. Keep
