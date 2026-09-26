@@ -55,7 +55,7 @@ def install(monkeypatch, responses, counts):
                 content = content()
             return content if isinstance(content, AIMessage) else AIMessage(content=content,
                 usage_metadata=deepcopy(USAGE))
-    def create(profile, cap):
+    def create(profile, cap, effort=None):
         assert profile == 'luna'
         seen['caps'].append(cap)
         return Model()

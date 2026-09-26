@@ -71,7 +71,7 @@ def models(monkeypatch, sequence):
             assert responses, 'Unexpected additional paid-model attempt'
             return responses.pop(0)
 
-    def construct(profile, max_tokens):
+    def construct(profile, max_tokens, effort=None):
         seen['created'].append((profile, max_tokens))
         return Model(profile)
 
@@ -113,7 +113,10 @@ def test_default_luna_one_generation_ignores_client_model_endpoint(monkeypatch):
     assert result['result']['content'] == 'OK'
     assert result['result']['response_metadata'] == {
         'model_name': 'gpt-6-luna', 'msty_model_name': 'gpt-6-luna',
-        'msty_model_profile': 'luna', 'msty_model_provider': 'openai'}
+        'msty_model_profile': 'luna', 'msty_model_provider': 'openai',
+        'msty_reasoning_effort': {'version': 1, 'level': 'high', 'reason': 'deep_work',
+                                  'profile': 'luna', 'provider_value': 'low',
+                                  'applied_level': 'low', 'output_limit': 64}}
     assert result['result']['usage_metadata'] == USAGE
     assert result['execution']['status'] == 'answered'
     assert result['execution']['actions_issued'] == result['execution']['consultations'] == 0

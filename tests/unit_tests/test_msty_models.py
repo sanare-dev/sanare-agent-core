@@ -40,7 +40,7 @@ def test_fixed_model_endpoint_and_no_retries(profile, model, endpoint, monkeypat
     if profile != 'sonnet':
         assert obj.use_responses_api is (profile == 'luna')
     if profile == 'luna':
-        assert obj.reasoning == {'effort': 'max'}
+        assert obj.reasoning == {'effort': 'low'}  # default medium, stepped down to fit 123 output tokens
     if profile == 'deepseek':
         assert obj.extra_body == {'thinking': {'type': 'disabled'}, 'max_tokens': 123}
 
@@ -403,7 +403,7 @@ def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeyp
         assert payload['input'][2] == {'type': 'function_call', 'name': 'read_fixture',
             'arguments': '{"path": "/synthetic/a"}', 'call_id': 'a'}
         assert payload['input'][3] == {'type': 'function_call_output', 'output': '17', 'call_id': 'a'}
-        assert payload['reasoning'] == {'effort': 'max'} and payload['max_output_tokens'] == 40
+        assert payload['reasoning'] == {'effort': 'low'} and payload['max_output_tokens'] == 40
         assert payload['store'] is False
         assert 'reasoning_effort' not in payload and 'thinking' not in payload
         assert 'temperature' not in payload
