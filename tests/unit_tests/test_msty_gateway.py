@@ -29,6 +29,17 @@ def test_fixed_endpoint_key_headers_and_wire(profile, path, selector, monkeypatc
     seen = []
     async def respond(request):
         seen.append(request)
+        if profile == 'luna':
+            # gpt-6-luna rides the OpenAI Responses API (use_responses_api=True,
+            # reasoning.effort='max'); its wire shape differs from Chat
+            # Completions entirely (live-verified 2026-09-26).
+            return httpx.Response(200, json={'id': 'synthetic', 'object': 'response',
+                'created_at': 1, 'status': 'completed', 'model': models.PROFILES[profile].model,
+                'output': [{'type': 'message', 'id': 'msg_1', 'role': 'assistant', 'status': 'completed',
+                            'content': [{'type': 'output_text', 'text': 'OK', 'annotations': []}]}],
+                'parallel_tool_calls': True, 'tool_choice': 'auto', 'tools': [],
+                'top_p': 1.0, 'temperature': 1.0,
+                'usage': {'input_tokens': 3, 'output_tokens': 1, 'total_tokens': 4}})
         return httpx.Response(200, json={'id':'synthetic', 'object':'chat.completion',
             'created':1, 'model':models.PROFILES[profile].model,
             'choices':[{'index':0,'message':{'role':'assistant','content':'OK'},'finish_reason':'stop'}],
@@ -40,18 +51,19 @@ def test_fixed_endpoint_key_headers_and_wire(profile, path, selector, monkeypatc
     reply = asyncio.run(run())
     assert len(seen) == 1
     request = seen[0]
-    assert str(request.url) == gateway.HOST + path + '/chat/completions'
+    assert str(request.url) == gateway.HOST + path + ('/responses' if profile == 'luna' else '/chat/completions')
     assert request.headers['authorization'] == 'Bearer synthetic-gateway-only'
     assert request.headers['x-tenant-id'] == gateway.WORKSPACE
     assert request.headers['x-gateway-app'] == 'sanare-msty'
     wire = json.loads(request.content)
     assert wire['model'] == selector
     assert model.max_retries == 0
-    assert model.use_responses_api is False
+    assert model.use_responses_api is (profile == 'luna')
     assert model.http_client.follow_redirects is False
     assert model.http_async_client.follow_redirects is False
     if profile == 'luna':
-        assert wire['reasoning_effort'] == 'none' and wire['store'] is False
+        assert wire['reasoning'] == {'effort': 'max'} and wire['store'] is False
+        assert 'reasoning_effort' not in wire
     else:
         assert wire['thinking'] == {'type':'disabled'}
         assert wire['max_tokens'] == 100
@@ -99,7 +111,7 @@ def test_gateway_failure_is_one_attempt_no_fallback(status):
             with pytest.raises(Exception):
                 await model.ainvoke([HumanMessage(content='synthetic')])
     asyncio.run(run())
-    assert seen == [gateway.HOST+'/openai/v1/chat/completions']
+    assert seen == [gateway.HOST+'/openai/v1/responses']
 
 
 def test_gateway_requires_reported_model_identity():

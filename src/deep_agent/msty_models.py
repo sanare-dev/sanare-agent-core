@@ -9,8 +9,12 @@ https://api-docs.deepseek.com/guides/thinking_mode/
 https://github.com/openai/tiktoken/blob/main/tiktoken/model.py
 https://github.com/openai/tiktoken/blob/main/LICENSE
 
-Chat Completions is explicit. Luna reasoning=none and DeepSeek thinking=disabled
-are deliberate non-reasoning profiles, not configurable client overrides.
+Chat Completions is explicit for every profile except Luna. Luna alone uses the
+OpenAI Responses API (use_responses_api=True) with reasoning.effort='max' —
+owner decision 2026-09-26, live-verified through the fixed LangSmith Gateway
+route to keep tool calling with maximum reasoning (Chat Completions only allows
+tools at effort='none' for this model). DeepSeek thinking=disabled remains a
+deliberate non-reasoning profile, not a configurable client override.
 
 For Sonnet, count_input uses the provider's exact counter. For text Luna, the
 official tiktoken mapping for the fixed model ID tokenizes the complete wire JSON;
@@ -155,7 +159,13 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
             raise ModelAdapterError('Клиент выбранного провайдера не создан.') from None
     options = dict(use_responses_api=False, stream_usage=False)
     if profile == 'luna':
-        options.update(reasoning_effort='none', store=False)
+        # gpt-6-luna: Chat Completions only allows function calling with
+        # reasoning_effort='none'; the Responses API supports tools at every
+        # reasoning tier (developers.openai.com/api/docs/models/gpt-6-luna).
+        # Live-verified 2026-09-26 through this exact LangSmith Gateway route
+        # (POST /openai/v1/responses, effort=max, one tool_call, 200 OK) before
+        # this switch; owner decision: maximum reasoning for the Brain lead.
+        options.update(use_responses_api=True, reasoning={'effort': 'max'}, store=False)
     elif profile in ('sol', 'sol6'):
         # Sol 6 is admitted only as a bound analyst; never as a lead.
         options.update(reasoning_effort='medium', store=False)

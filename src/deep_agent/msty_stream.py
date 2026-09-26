@@ -18,6 +18,12 @@ PROTOCOL = 'msty-text-delta-v1'
 MAX_TEXT_BYTES = 256 * 1024
 KNOWN_FINISH = frozenset(('stop', 'tool_calls', 'function_call', 'end_turn', 'tool_use', 'stop_sequence',
     'max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'))
+# OpenAI Responses API streaming (Luna, use_responses_api=True) has no
+# finish_reason/stop_reason field; the final chunk carries `status` instead
+# (langchain_openai _construct_lc_result_from_responses_api). Map the two
+# terminal statuses onto the existing Chat-Completions-shaped vocabulary above
+# instead of widening KNOWN_FINISH with provider-specific values.
+RESPONSES_STATUS_FINISH = {'completed': 'stop', 'incomplete': 'length'}
 
 
 class StreamFailure(RuntimeError):
@@ -95,6 +101,8 @@ class TextStream:
             if aggregate is None:
                 raise StreamFailure('Провайдер не вернул текстовый поток.')
             reason = aggregate.response_metadata.get('stop_reason', aggregate.response_metadata.get('finish_reason'))
+            if reason is None:
+                reason = RESPONSES_STATUS_FINISH.get(aggregate.response_metadata.get('status'))
             if not isinstance(reason, str) or reason not in KNOWN_FINISH:
                 raise StreamFailure('Поток не содержит подтверждения завершения; действия не выданы.')
             return message_chunk_to_message(aggregate)
