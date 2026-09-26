@@ -172,11 +172,26 @@ def summary_messages(state, plan):
                    ensure_ascii=False)}]
 
 
+def _summary_text(content):
+    """Plain text of the summary answer. Luna on the Responses API (#35)
+    returns content as a list of blocks (text plus reasoning), not a str;
+    only the text blocks are the summary."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get('text') for b in content
+                 if isinstance(b, dict) and b.get('type') in ('text', 'output_text')]
+        if parts and all(isinstance(t, str) for t in parts):
+            return ''.join(parts)
+    return None
+
+
 def accept_summary(state, plan, result):
-    if result.tool_calls or result.invalid_tool_calls or not isinstance(result.content, str):
+    text = _summary_text(result.content)
+    if result.tool_calls or result.invalid_tool_calls or text is None:
         raise ExecutionProtocolError('Сводка не прошла проверку; исходники сохранены.')
     try:
-        document = json.loads(result.content)
+        document = json.loads(text)
     except (ValueError, TypeError):
         raise ExecutionProtocolError('Сводка не прошла проверку; исходники сохранены.') from None
     if (not isinstance(document, dict) or set(document) != {'sources', 'summary'} or
