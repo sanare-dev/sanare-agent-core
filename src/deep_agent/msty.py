@@ -518,8 +518,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             'действия не выполнены. Требуется проверить модель провайдера.',
             usage_metadata=msty_models.checked_usage(profile, raw_result),
             response_metadata={'msty_generation': 'rejected_model', 'msty_blocked': True}), budget_check)
-    stop_reason = result.response_metadata.get('stop_reason',
-                                              result.response_metadata.get('finish_reason'))
+    stop_reason = msty_models.finish_reason(result.response_metadata)
     if stop_reason in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'):
         # A parsed prefix is not a completed instruction. Preserve provider
         # termination and measured usage, but never suspend for partial actions.
@@ -598,7 +597,7 @@ async def _compact_step(state, profile, output_limit, policy, plan, round_number
             usage_metadata=msty_models.checked_usage(profile, raw),
             response_metadata={'msty_generation': 'rejected_model', 'msty_blocked': True}), budget_check)
     try:
-        reason = result.response_metadata.get('stop_reason', result.response_metadata.get('finish_reason'))
+        reason = msty_models.finish_reason(result.response_metadata)
         if reason in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'):
             raise msty_execution.ExecutionProtocolError('Сводка не завершена; исходники сохранены.')
         update = msty_compaction.accept_summary(state, plan, result)
