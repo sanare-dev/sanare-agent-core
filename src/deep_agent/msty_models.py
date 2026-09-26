@@ -124,6 +124,12 @@ MAX_TOOLS = 256
 #: Completions: 128). A legacy path that binds every client schema is refused
 #: above it before any paid call instead of receiving a provider 400.
 MAX_MODEL_TOOLS = 128
+#: OpenAI Responses API hard floor (live-proven 2026-09-26: 400
+#: integer_below_min_value below this). Chat Completions has no such floor, so
+#: only the Responses-API luna profile needs the clamp; every other profile's
+#: requested max_tokens (as low as 1, e.g. a near-exhausted compaction budget)
+#: is passed through unchanged.
+RESPONSES_MIN_OUTPUT_TOKENS = 16
 
 
 def _profile(profile: str) -> Profile:
@@ -165,6 +171,10 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
         # Live-verified 2026-09-26 through this exact LangSmith Gateway route
         # (POST /openai/v1/responses, effort=max, one tool_call, 200 OK) before
         # this switch; owner decision: maximum reasoning for the Brain lead.
+        # Live-proven 2026-09-26: the Responses API rejects max_output_tokens
+        # below 16 (BadRequestError, integer_below_min_value); floor it so a
+        # near-exhausted output budget (e.g. compaction) still completes.
+        common['max_tokens'] = max(common['max_tokens'], RESPONSES_MIN_OUTPUT_TOKENS)
         options.update(use_responses_api=True, reasoning={'effort': 'max'}, store=False)
     elif profile in ('sol', 'sol6'):
         # Sol 6 is admitted only as a bound analyst; never as a lead.
