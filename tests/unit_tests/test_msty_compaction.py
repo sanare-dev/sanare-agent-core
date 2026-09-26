@@ -394,3 +394,16 @@ def test_many_small_bundles_are_combined_without_crossing_owner_message():
     assert [m for m in projection if m['role'] in ('user', 'system')] == [
         m for m in state['messages'] if m['role'] in ('user', 'system')]
     assert projection[-4:] == state['messages'][-4:]
+
+
+def test_luna_responses_block_content_summary_is_accepted():
+    # Luna on the Responses API (#35) answers with a list of blocks
+    # (reasoning + text); the summary is the text blocks, not a refusal.
+    state = history()
+    plan = compact.make_plan(state)
+    blocks = [{'type': 'reasoning', 'id': 'rs_1', 'summary': []},
+              {'type': 'text', 'text': summary(state)}]
+    accepted = compact.accept_summary(state, plan, AIMessage(content=blocks))
+    assert accepted['compaction_stage']['status'] == 'ready'
+    with pytest.raises(compact.ExecutionProtocolError):
+        compact.accept_summary(state, plan, AIMessage(content=[{'type': 'reasoning', 'id': 'rs_2'}]))
