@@ -263,6 +263,24 @@ def _openai_content(message: BaseMessage):
         kind = block.get('type')
         copy = deepcopy(block)
         copy.pop('cache_control', None)
+        if kind == 'function_call' and isinstance(message, AIMessage):
+            # Luna's Responses API function_call output items (langchain_openai
+            # _construct_lc_result_from_responses_api) use OpenAI's own shape —
+            # call_id/name/arguments as a JSON string — not the Anthropic-style
+            # tool_use block (id/name/input dict) this history normally speaks
+            # and the rest of this function validates. Live-discovered
+            # 2026-09-26: replaying a tool-call turn after an interrupt/resume
+            # raised "этот блок истории нельзя безопасно перенести" because this
+            # shape fell through to the catch-all rejection below. Normalize it
+            # onto the existing tool_use path instead of adding a parallel one.
+            try:
+                arguments = (json.loads(block['arguments']) if isinstance(block.get('arguments'), str)
+                            else None)
+            except (TypeError, ValueError):
+                arguments = None
+            block = copy = {'type': 'tool_use', 'id': block.get('call_id'),
+                            'name': block.get('name'), 'input': arguments}
+            kind = 'tool_use'
         if kind == 'text' and isinstance(block.get('text'), str):
             blocks.append(copy)
         elif kind == 'thinking' and isinstance(message, AIMessage) and isinstance(block.get('thinking'), str):
@@ -460,6 +478,38 @@ def count_method(profile, messages):
             if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'image_url' for b in content):
                 return LUNA_IMAGE_COUNT_METHOD
     return COUNT_METHODS[profile]
+
+
+#: Chat Completions/Anthropic expose finish_reason/stop_reason directly; the
+#: OpenAI Responses API (luna, since 2026-09-26) has neither field at all —
+#: only a terminal `status`, plus `incomplete_details.reason` when truncated
+#: (langchain_openai _construct_lc_result_from_responses_api, live-verified).
+#: Unrecognized incomplete reasons fall back to 'length' (the conservative,
+#: blocking choice) rather than being silently treated as a clean finish.
+RESPONSES_INCOMPLETE_REASON = MappingProxyType({'max_output_tokens': 'length', 'content_filter': 'content_filter'})
+
+
+def finish_reason(metadata):
+    """Terminal reason across both wire shapes, or None if truly unknown.
+
+    Every safety gate that used to read
+    `metadata.get('stop_reason', metadata.get('finish_reason'))` directly must
+    use this instead, or it stops seeing luna's truncation/refusal state under
+    the Responses API (status is never 'max_tokens'/'length'/etc.).
+    """
+    if not isinstance(metadata, dict):
+        return None
+    reason = metadata.get('stop_reason', metadata.get('finish_reason'))
+    if reason is not None:
+        return reason
+    status = metadata.get('status')
+    if status == 'completed':
+        return 'stop'
+    if status == 'incomplete':
+        details = metadata.get('incomplete_details')
+        code = details.get('reason') if isinstance(details, dict) else None
+        return RESPONSES_INCOMPLETE_REASON.get(code, 'length')
+    return None
 
 
 def checked_usage(profile: str, result: AIMessage):

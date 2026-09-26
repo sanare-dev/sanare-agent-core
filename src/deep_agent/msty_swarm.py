@@ -356,7 +356,7 @@ async def _worker_call(swarm_id: str, goal: str, sub: dict, emit: Callable,
             usage = None  # неизвестный расход, не ноль
         stamped = msty_models.stamp_usage(sub['profile'], raw)
         metadata = stamped.response_metadata
-        reason = metadata.get('finish_reason', metadata.get('stop_reason'))
+        reason = msty_models.finish_reason(metadata)
         text = _content_text(stamped.content).strip()
         if reason in ('length', 'max_tokens'):
             status = 'incomplete'

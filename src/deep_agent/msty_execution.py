@@ -12,6 +12,7 @@ import uuid
 
 from langgraph.types import interrupt
 
+from . import msty_models
 
 PROTOCOL = 'msty-local-tools-v1'
 # Owner-approved task ceiling. Native and external counters remain cumulative;
@@ -113,7 +114,7 @@ def execution_after(state, update):
         raise ExecutionProtocolError('Некорректный счётчик шагов Msty.')
     result = update['result']
     meta = result.get('response_metadata') or {}
-    reason = meta.get('stop_reason', meta.get('finish_reason'))
+    reason = msty_models.finish_reason(meta)
     calls = result.get('tool_calls') or []
     status = 'answered'
     pending = None

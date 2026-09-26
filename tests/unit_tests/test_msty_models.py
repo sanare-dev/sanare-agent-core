@@ -68,6 +68,26 @@ def test_luna_output_floor_matches_responses_api_minimum(requested, monkeypatch)
     assert obj.max_tokens == max(requested, adapter.RESPONSES_MIN_OUTPUT_TOKENS)
 
 
+@pytest.mark.parametrize('metadata,expected', [
+    ({'finish_reason': 'stop'}, 'stop'),
+    ({'stop_reason': 'end_turn'}, 'end_turn'),
+    # gpt-6-luna via the Responses API: no finish_reason/stop_reason field at
+    # all (langchain_openai _construct_lc_result_from_responses_api). Every
+    # safety gate that used to read those two keys directly now needs this
+    # instead, or it stops seeing luna's truncation/refusal state entirely.
+    ({'status': 'completed'}, 'stop'),
+    ({'status': 'incomplete'}, 'length'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'}}, 'length'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'content_filter'}}, 'content_filter'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'something_new'}}, 'length'),
+    ({'status': 'failed'}, None),
+    ({}, None),
+    (None, None),
+])
+def test_finish_reason_bridges_chat_completions_and_responses_api(metadata, expected):
+    assert adapter.finish_reason(metadata) == expected
+
+
 def test_missing_provider_key_never_falls_back(monkeypatch):
     monkeypatch.delenv('DEEPSEEK_API_KEY')
     with pytest.raises(adapter.ModelAdapterError, match='Ключ'):
@@ -428,3 +448,31 @@ def test_luna_responses_reasoning_blocks_are_dropped_from_replayed_history():
     msg = AIMessage(content=[{'type': 'reasoning', 'id': 'rs_1', 'summary': []},
                              {'type': 'text', 'text': 'готово'}])
     assert msty_models._openai_content(msg).content == [{'type': 'text', 'text': 'готово'}]
+
+
+def test_luna_responses_function_call_blocks_replay_as_tool_use():
+    # Live 26.09 (after the finish_reason fix, #38): approving a Luna tool call
+    # and resuming raised the same "этот блок истории нельзя безопасно
+    # перенести" on the model's OWN function_call output item — the Responses
+    # API's call_id/name/arguments(JSON string) shape
+    # (langchain_openai._construct_lc_result_from_responses_api), never
+    # recognized as the Anthropic-style tool_use (id/name/input dict) this
+    # history validator expects.
+    from langchain_core.messages import AIMessage
+    from deep_agent import msty_models
+    msg = AIMessage(content=[{'type': 'function_call', 'id': 'fc_1', 'call_id': 'call_1',
+                              'name': 'fetch', 'arguments': '{"url": "https://x.invalid"}',
+                              'status': 'completed'}],
+                    tool_calls=[{'type': 'tool_call', 'name': 'fetch',
+                                 'args': {'url': 'https://x.invalid'}, 'id': 'call_1'}])
+    assert msty_models._openai_content(msg).content == [{'type': 'tool_use', 'id': 'call_1',
+        'name': 'fetch', 'input': {'url': 'https://x.invalid'}}]
+
+
+def test_luna_responses_malformed_function_call_is_rejected_not_dropped():
+    from langchain_core.messages import AIMessage
+    from deep_agent import msty_models
+    msg = AIMessage(content=[{'type': 'function_call', 'call_id': 'call_1', 'name': 'fetch',
+                              'arguments': 'not-json'}])
+    with pytest.raises(msty_models.ModelAdapterError, match='Некорректный исторический вызов'):
+        msty_models._openai_content(msg)
