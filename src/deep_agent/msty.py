@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, conve
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
-from . import msty_breaker, msty_evidence, msty_taxonomy
+from . import msty_breaker, msty_effort, msty_evidence, msty_taxonomy
 from . import msty_execution, msty_models, msty_compaction, msty_task, msty_stream, msty_memory
 from .msty_prompts import ANALYST_POLICY, POLICY
 
@@ -341,10 +341,13 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         cap = 2048 if state.get('brain_task_role') == 'analyst' else 8192
         output_limit = min(max(int(state.get('max_tokens') or 4096), 1), cap)
         msty_execution.validate_binding(state, profile, output_limit)
+        # Per-task reasoning level (owner order 2026-09-26): deterministic, from
+        # the latest owner message, so every tool-loop step of a turn reuses it.
+        effort = msty_effort.choose_effort(state)
         model = (ChatAnthropic(model='claude-sonnet-4-6', max_tokens=output_limit,
                                base_url='https://api.anthropic.com', timeout=120, max_retries=0)
                  if profile == 'sonnet' and not msty_models.msty_gateway.enabled()
-                 else msty_models.make_model(profile, output_limit))
+                 else msty_models.make_model(profile, output_limit, effort['level']))
         policy = (ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else
                   native_system_prompt if native_system_prompt is not None else
                   policy_for_tools(tools) + '\n\n' + msty_memory.system_context())
@@ -518,6 +521,9 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             'действия не выполнены. Требуется проверить модель провайдера.',
             usage_metadata=msty_models.checked_usage(profile, raw_result),
             response_metadata={'msty_generation': 'rejected_model', 'msty_blocked': True}), budget_check)
+    result = result.model_copy(update={'response_metadata': {
+        **result.response_metadata,
+        msty_effort.METADATA_KEY: msty_models.effort_record(profile, effort, output_limit)}})
     stop_reason = msty_models.finish_reason(result.response_metadata)
     if stop_reason in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'):
         # A parsed prefix is not a completed instruction. Preserve provider
@@ -573,7 +579,7 @@ async def _compact_step(state, profile, output_limit, policy, plan, round_number
     """
     cap = min(msty_compaction.SUMMARY_OUTPUT_CAP, output_limit)
     try:
-        model = msty_models.make_model(profile, cap)
+        model = msty_models.make_model(profile, cap, msty_effort.COMPACTION_LEVEL)
         messages = [SystemMessage(content=policy), *convert_to_messages(
             msty_compaction.summary_messages(state, plan))]
         messages = msty_models.prepare_messages(profile, messages, [])

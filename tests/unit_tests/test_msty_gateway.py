@@ -31,7 +31,7 @@ def test_fixed_endpoint_key_headers_and_wire(profile, path, selector, monkeypatc
         seen.append(request)
         if profile == 'luna':
             # gpt-6-luna rides the OpenAI Responses API (use_responses_api=True,
-            # reasoning.effort='max'); its wire shape differs from Chat
+            # per-task reasoning.effort; medium fits 100 tokens only as low); its wire shape differs from Chat
             # Completions entirely (live-verified 2026-09-26).
             return httpx.Response(200, json={'id': 'synthetic', 'object': 'response',
                 'created_at': 1, 'status': 'completed', 'model': models.PROFILES[profile].model,
@@ -62,7 +62,7 @@ def test_fixed_endpoint_key_headers_and_wire(profile, path, selector, monkeypatc
     assert model.http_client.follow_redirects is False
     assert model.http_async_client.follow_redirects is False
     if profile == 'luna':
-        assert wire['reasoning'] == {'effort': 'max'} and wire['store'] is False
+        assert wire['reasoning'] == {'effort': 'low'} and wire['store'] is False
         assert 'reasoning_effort' not in wire
     else:
         assert wire['thinking'] == {'type':'disabled'}
@@ -127,7 +127,8 @@ def test_gateway_requires_reported_model_identity():
 def test_consult_profiles_wire(profile, selector, monkeypatch):
     monkeypatch.setenv('OPENAI_BASE_URL', 'https://untrusted.invalid')
     monkeypatch.setenv('LANGSMITH_GATEWAY_BASE_URL', 'https://untrusted.invalid')
-    model = models.make_model(profile, 100)
+    # Analyst output cap 2048: the default medium level fits it unchanged.
+    model = models.make_model(profile, 2048)
     seen = []
     async def respond(request):
         seen.append(request)

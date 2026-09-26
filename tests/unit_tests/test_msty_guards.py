@@ -28,7 +28,7 @@ def call(arguments, *, name='inspect', identifier='call-1'):
     return {'id': identifier, 'name': name, 'args': arguments}
 
 
-def stamped_sonnet(response):
+def stamped_sonnet(response, level='low', reason='short_question'):
     """Exact new publication contract; independent of the implementation helper."""
     expected = response.model_dump()
     expected['response_metadata'] = {
@@ -37,6 +37,9 @@ def stamped_sonnet(response):
         'msty_model_name': 'claude-sonnet-4-6',
         'msty_model_profile': 'sonnet',
         'msty_model_provider': 'anthropic',
+        # Per-task effort record (short owner text -> low); Sonnet ignores it.
+        'msty_reasoning_effort': {'version': 1, 'level': level, 'reason': reason,
+                                  'profile': 'sonnet', 'provider_value': None},
     }
     return expected
 
@@ -118,7 +121,7 @@ def test_arguments_are_validated_against_full_schema(monkeypatch, schema, argume
 def test_valid_arguments_and_local_refs_are_unchanged(monkeypatch, schema, arguments):
     seen, response = install_model(monkeypatch, [call(arguments)])
     result = asyncio.run(msty.respond({'messages': [], 'tools': [tool(schema)]}))
-    assert result['result'] == stamped_sonnet(response)
+    assert result['result'] == stamped_sonnet(response, 'medium', 'no_owner_text')
     assert seen['generations'] == 1
 
 
@@ -162,7 +165,7 @@ def test_missing_parameters_keeps_existing_unconstrained_schema_contract(monkeyp
     _, response = install_model(monkeypatch, [call({'path': 'README.md'})])
     result = asyncio.run(msty.respond({'messages': [], 'tools': [
         {'type': 'function', 'function': {'name': 'inspect'}}]}))
-    assert result['result'] == stamped_sonnet(response)
+    assert result['result'] == stamped_sonnet(response, 'medium', 'no_owner_text')
 
 
 @pytest.mark.parametrize('stage', ['get_writer', 'write'])

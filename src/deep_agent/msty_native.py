@@ -26,7 +26,7 @@ from langgraph.types import Command, interrupt
 from langmem import create_search_memory_tool
 
 from . import msty, msty_compaction, msty_execution, msty_guard, msty_models, msty_prompts, msty_task, msty_tool_routing
-from . import consolidator, msty_breaker, msty_registry, msty_subagents, msty_swarm, msty_taxonomy
+from . import consolidator, msty_breaker, msty_effort, msty_registry, msty_subagents, msty_swarm, msty_taxonomy
 from .msty_native_memory import (
     CANDIDATES_NAMESPACE, backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware,
 )
@@ -808,7 +808,9 @@ class NativeMstyMiddleware(AgentMiddleware):
             return usage
 
         def model_factory(schemas):
-            model = msty_models.make_model(profile, 2048)
+            # Role-based level: operator=low, researcher=medium, auditor=high.
+            model = msty_models.make_model(profile, 2048, msty_effort.SUBAGENT_LEVELS.get(
+                str(args.get('role') or ''), msty_effort.DEFAULT_LEVEL))
             return _MeteredModel(msty_models.bind_tools(profile, model, schemas, 'auto'))
 
         try:

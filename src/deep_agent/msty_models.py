@@ -10,8 +10,8 @@ https://github.com/openai/tiktoken/blob/main/tiktoken/model.py
 https://github.com/openai/tiktoken/blob/main/LICENSE
 
 Chat Completions is explicit for every profile except Luna. Luna alone uses the
-OpenAI Responses API (use_responses_api=True) with reasoning.effort='max' —
-owner decision 2026-09-26, live-verified through the fixed LangSmith Gateway
+OpenAI Responses API (use_responses_api=True); reasoning.effort is chosen per
+task (msty_effort, owner order 2026-09-26; was fixed 'max' since #35), live-verified through the fixed LangSmith Gateway
 route to keep tool calling with maximum reasoning (Chat Completions only allows
 tools at effort='none' for this model). DeepSeek thinking=disabled remains a
 deliberate non-reasoning profile, not a configurable client override.
@@ -54,7 +54,7 @@ from langchain_core.messages import (
     convert_to_openai_messages,
 )
 from langchain_openai import ChatOpenAI as _ChatOpenAI
-from deep_agent import msty_gateway
+from deep_agent import msty_effort, msty_gateway
 
 
 class ModelAdapterError(ValueError):
@@ -138,10 +138,59 @@ def _profile(profile: str) -> Profile:
     return PROFILES[profile]
 
 
-def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
+#: Per-task reasoning level -> the provider's own per-call value (owner order
+#: 2026-09-26: effort follows the task, see msty_effort). Only values documented
+#: for the fixed model are used. gpt-6-luna Responses API: none/low/medium/high/
+#: xhigh/max (developers.openai.com/api/docs/models/gpt-6-luna, 2026-09-26).
+#: Sol keeps the standard low/medium/high triad (its prior verified medium tier
+#: included); max is capped at high. Profiles absent here ignore the level:
+#: DeepSeek thinking=enabled needs every reasoning_content passed back in tool
+#: loops (else 400, api-docs.deepseek.com/guides/thinking_mode) and counts the
+#: chain of thought in max_tokens, which this adapter does not do; Anthropic
+#: extended thinking needs budget_tokens < max_tokens and thinking-block replay.
+#: Astra keeps its fixed minimal 'low'.
+EFFORT_VALUES = MappingProxyType({
+    'luna': MappingProxyType({'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'max'}),
+    'sol': MappingProxyType({'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'high'}),
+    'sol6': MappingProxyType({'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'high'}),
+})
+
+
+def effort_value(profile: str, level: str | None, max_tokens: int | None = None) -> str | None:
+    """The provider value sent for this level, or None when ignored.
+
+    With ``max_tokens`` the level first steps down to what fits that output
+    limit (msty_effort.fit): reasoning is spent inside the same limit.
+    """
+    _profile(profile)
+    if level is None:
+        level = msty_effort.DEFAULT_LEVEL
+    if level not in msty_effort.LEVELS:
+        raise ModelAdapterError('Недопустимый уровень рассуждения.')
+    values = EFFORT_VALUES.get(profile)
+    if values is None:
+        return None
+    return values[level if max_tokens is None else msty_effort.fit(level, max_tokens)]
+
+
+def effort_record(profile: str, choice: dict | None, max_tokens: int | None = None) -> dict:
+    """Response-metadata record of the chosen level and what was sent."""
+    choice = choice or {'version': 1, 'level': msty_effort.DEFAULT_LEVEL, 'reason': 'default'}
+    record = {**choice, 'profile': profile,
+              'provider_value': effort_value(profile, choice['level'], max_tokens)}
+    if max_tokens is not None and EFFORT_VALUES.get(profile) is not None:
+        applied = msty_effort.fit(choice['level'], max_tokens)
+        if applied != choice['level']:
+            record['applied_level'] = applied
+            record['output_limit'] = max_tokens
+    return record
+
+
+def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096, effort: str | None = None):
     config = _profile(profile)
     if type(max_tokens) is not int or not 1 <= max_tokens <= 8192:
         raise ModelAdapterError('Недопустимый предел ответа модели.')
+    reasoning = effort_value(profile, effort, max_tokens)
     # Explicit key + endpoint prevent generic SDK base-url environment overrides
     # from accidentally sending this provider's credential elsewhere.
     try:
@@ -170,15 +219,16 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
         # reasoning tier (developers.openai.com/api/docs/models/gpt-6-luna).
         # Live-verified 2026-09-26 through this exact LangSmith Gateway route
         # (POST /openai/v1/responses, effort=max, one tool_call, 200 OK) before
-        # this switch; owner decision: maximum reasoning for the Brain lead.
+        # this switch. Since the same day's owner order the effort is per task
+        # (msty_effort.choose_effort), no longer fixed at max.
         # Live-proven 2026-09-26: the Responses API rejects max_output_tokens
         # below 16 (BadRequestError, integer_below_min_value); floor it so a
         # near-exhausted output budget (e.g. compaction) still completes.
         common['max_tokens'] = max(common['max_tokens'], RESPONSES_MIN_OUTPUT_TOKENS)
-        options.update(use_responses_api=True, reasoning={'effort': 'max'}, store=False)
+        options.update(use_responses_api=True, reasoning={'effort': reasoning}, store=False)
     elif profile in ('sol', 'sol6'):
         # Sol 6 is admitted only as a bound analyst; never as a lead.
-        options.update(reasoning_effort='medium', store=False)
+        options.update(reasoning_effort=reasoning, store=False)
     elif profile == 'astra':
         # gpt-6-astra has no 'none' tier; 'low' is its minimal reasoning effort.
         options.update(reasoning_effort='low', store=False)
