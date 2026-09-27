@@ -186,12 +186,29 @@ def _summary_text(content):
     return None
 
 
+def _json_body(text):
+    """The JSON object of the summary answer. Models often wrap it in a
+    ```json fence or add a line around it; only the object itself is checked
+    (the strict key/source/size validation below is unchanged)."""
+    body = text.strip()
+    if body.startswith('```'):
+        body = body.split('\n', 1)[1] if '\n' in body else ''
+        if body.rstrip().endswith('```'):
+            body = body.rstrip()[:-3]
+    body = body.strip()
+    if not body.startswith('{'):
+        start, end = body.find('{'), body.rfind('}')
+        if start != -1 and end > start:
+            body = body[start:end + 1]
+    return body
+
+
 def accept_summary(state, plan, result):
     text = _summary_text(result.content)
     if result.tool_calls or result.invalid_tool_calls or text is None:
         raise ExecutionProtocolError('Сводка не прошла проверку; исходники сохранены.')
     try:
-        document = json.loads(text)
+        document = json.loads(_json_body(text))
     except (ValueError, TypeError):
         raise ExecutionProtocolError('Сводка не прошла проверку; исходники сохранены.') from None
     if (not isinstance(document, dict) or set(document) != {'sources', 'summary'} or
