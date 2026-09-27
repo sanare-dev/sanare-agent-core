@@ -163,6 +163,27 @@ def _last_user(messages):
     raise ExecutionProtocolError('Не найдено исходное обращение текущего шага.')
 
 
+def _tool_drift(before, after):
+    """Counts only (audit 27.09.2026): «38 → 0» tells a client that dropped its
+    tools from one that edited a schema, without echoing names or schemas."""
+    def names(tools):
+        out = []
+        for tool in tools or []:
+            function = tool.get('function') if isinstance(tool, dict) else None
+            name = function.get('name') if isinstance(function, dict) else None
+            if not isinstance(name, str) and isinstance(tool, dict):
+                name = tool.get('name')
+            out.append(name if isinstance(name, str) else None)
+        return out
+    old, new = names(before), names(after)
+    old_set, new_set = set(old), set(new)
+    changed = len(old_set & new_set) if len(old) == len(new) and old_set == new_set else None
+    detail = f' (было {len(old)}, стало {len(new)}; добавлено {len(new_set - old_set)}, убрано {len(old_set - new_set)}'
+    if changed is not None:
+        detail += '; изменены описания или порядок'
+    return detail + ')'
+
+
 def validate_resume(state, resume):
     """Bind the one pending batch to canonical client IDs, preserving observations.
 
@@ -201,7 +222,8 @@ def validate_resume(state, resume):
         if incoming.get(immutable) != state.get(immutable):
             raise ExecutionProtocolError('Протокол и бюджет задачи нельзя менять при продолжении.')
     if canonical_digest(incoming.get('tools') or []) != canonical_digest(state.get('tools') or []):
-        raise ExecutionProtocolError('Набор инструментов изменён внутри ожидающего шага.')
+        raise ExecutionProtocolError('Набор инструментов изменён внутри ожидающего шага' +
+                                     _tool_drift(state.get('tools'), incoming.get('tools')) + '.')
     maximum = incoming.get('max_tokens')
     previous_maximum = state.get('max_tokens') or 4096
     if type(maximum) is not int or not 1 <= maximum <= min(previous_maximum, 8192):
