@@ -407,3 +407,17 @@ def test_luna_responses_block_content_summary_is_accepted():
     assert accepted['compaction_stage']['status'] == 'ready'
     with pytest.raises(compact.ExecutionProtocolError):
         compact.accept_summary(state, plan, AIMessage(content=[{'type': 'reasoning', 'id': 'rs_2'}]))
+
+
+def test_fenced_json_summary_is_accepted():
+    # Live 27.09: Luna wrapped the summary in a ```json fence and every
+    # compaction was rejected («Сводка не прошла проверку»).
+    state = history()
+    plan = compact.make_plan(state)
+    fenced = '```json\n' + summary(state) + '\n```'
+    blocks = [{'type': 'text', 'text': fenced}]
+    assert compact.accept_summary(state, plan, AIMessage(content=blocks))['compaction_stage']['status'] == 'ready'
+    wrapped = 'Вот сводка:\n' + summary(state)
+    assert compact.accept_summary(state, plan, AIMessage(content=wrapped))['compaction_stage']['status'] == 'ready'
+    with pytest.raises(compact.ExecutionProtocolError):
+        compact.accept_summary(state, plan, AIMessage(content='```json\n{"summary": "x"}\n```'))
