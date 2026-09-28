@@ -182,6 +182,18 @@ def consult_name(name: str) -> bool:
     return isinstance(name, str) and name.endswith('msty_brain_consult')
 
 
+def consultation_limit() -> int:
+    """Server-owned cap for optional paid analyst calls; disabled by default."""
+    raw = os.getenv('MSTY_CONSULT_LIMIT', '0')
+    try:
+        limit = int(raw)
+    except ValueError as error:
+        raise msty_models.ModelAdapterError('Недопустимый лимит консультаций.') from error
+    if not 0 <= limit <= 2:
+        raise msty_models.ModelAdapterError('Лимит консультаций должен быть от 0 до 2.')
+    return limit
+
+
 def consultation_count(state: State) -> int:
     if msty_execution.enabled(state):
         count = (state.get('execution') or {}).get('consultations', 0)
@@ -546,6 +558,18 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             raise msty_execution.ExecutionProtocolError('Сжатие требует checkpoint-протокола Msty.')
         profile = selected_profile(state)
         consultations = consultation_count(state)
+        choice = state.get("tool_choice") or "auto"
+        tools_disabled = choice == 'none' or (isinstance(choice, dict) and choice.get('type') == 'none')
+        has_consult_tool = any(consult_name(name) for name in tool_names(tools))
+        consult_limit = (consultation_limit()
+                         if has_consult_tool and state.get('brain_task_role') != 'analyst' else 2)
+        # Do not offer paid consultations to the lead when the server disables
+        # them or when this task has already used its explicit allowance.
+        model_tools = (tools if tools_disabled or consultations < consult_limit else [
+            tool for tool in tools
+            if not (isinstance(tool, dict) and isinstance(tool.get('function'), dict)
+                    and consult_name(tool['function'].get('name')))
+        ])
         cap = 2048 if state.get('brain_task_role') == 'analyst' else msty_models.max_output(profile)
         output_limit = min(max(int(state.get('max_tokens') or 4096), 1), cap)
         msty_execution.validate_binding(state, profile, output_limit)
@@ -563,10 +587,13 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                  if reasoning_live else msty_models.make_model(profile, first_limit, effort['level']))
         policy = (ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else
                   native_system_prompt if native_system_prompt is not None else
-                  policy_for_tools(tools) + '\n\n' + msty_memory.system_context())
-        if consultations >= 2:
-            policy += '\nЛимит консультаций исчерпан. Продолжай своими инструментами; не вызывай консультанта снова.'
-        if any(msty_task._named(name, msty_task.PLAN_SUFFIX) for name in tool_names(tools)):
+                  policy_for_tools(model_tools) + '\n\n' + msty_memory.system_context())
+        if (has_consult_tool and state.get('brain_task_role') != 'analyst'
+                and consultations >= consult_limit):
+            policy += ('\nКонсультации аналитика отключены настройкой сервера; продолжай без них.'
+                       if consult_limit == 0 else
+                       '\nЛимит консультаций исчерпан. Продолжай без новых консультаций.')
+        if any(msty_task._named(name, msty_task.PLAN_SUFFIX) for name in tool_names(model_tools)):
             policy += ('\nДля поручения с изменениями проверяемых локальных артефактов используй msty_task_plan '
                 'с требованиями и конкретными read-only проверками, затем реальные рабочие инструменты. '
                 'Для простого ответа, обсуждения или просьбы только составить план запуск проверок не нужен. '
@@ -586,8 +613,8 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             if policy_fallback is not None:
                 messages = _without_images(messages)
             full = [SystemMessage(content=policy), *messages]
-            return (cache_system_prefix(full, tools) if profile == 'sonnet'
-                    else msty_models.prepare_messages(profile, full, tools))
+            return (cache_system_prefix(full, model_tools) if profile == 'sonnet'
+                    else msty_models.prepare_messages(profile, full, model_tools))
         full_messages = assemble(msty_compaction.project_messages(state))
     except (msty_models.ModelAdapterError, msty_models.msty_gateway.GatewayConfigurationError,
             msty_execution.ExecutionProtocolError) as error:
@@ -596,7 +623,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     # Count the exact complete messages and schemas used for generation below.
     def wire_bytes(full):
         return len(json.dumps({'messages': [m.model_dump(mode='json') for m in full],
-                               'tools': tools}, ensure_ascii=False).encode('utf-8'))
+                               'tools': model_tools}, ensure_ascii=False).encode('utf-8'))
 
     async def count_tokens(full):
         """Exact count, or a rejection dict (never raises provider details)."""
@@ -607,9 +634,9 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                 if isinstance(formatted_system, list):
                     count_options['system'] = formatted_system
                 counted = await asyncio.to_thread(
-                    model.get_num_tokens_from_messages, full, tools=tools, **count_options)
+                    model.get_num_tokens_from_messages, full, tools=model_tools, **count_options)
             else:
-                counted = await msty_models.count_input(profile, model, full, tools)
+                counted = await msty_models.count_input(profile, model, full, model_tools)
             if isinstance(counted, bool) or not isinstance(counted, int) or counted < 0:
                 raise ValueError('Invalid token count')
             return counted
@@ -659,14 +686,12 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                         'limit': limit, 'window_admission': True,
                         'method': msty_models.count_method(profile, full_messages),
                         'model_profile': profile}
-    choice = state.get("tool_choice") or "auto"
-    tools_disabled = choice == 'none' or (isinstance(choice, dict) and choice.get('type') == 'none')
-    if profile != 'sonnet':
+    if profile != 'sonnet' and model_tools:
         try:
-            model = msty_models.bind_tools(profile, model, tools, choice)
+            model = msty_models.bind_tools(profile, model, model_tools, choice)
         except msty_models.ModelAdapterError as error:
             return rejected_context_budget(str(error), state=state)
-    elif tools:
+    elif model_tools:
         if tools_disabled:
             # Keep the schemas required by historical tool_use/tool_result
             # blocks. This SDK interprets the string "none" as a tool name.
@@ -675,7 +700,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             choice = "any"
         elif isinstance(choice, dict) and choice.get("type") == "function":
             choice = choice["function"]["name"]
-        model = model.bind_tools(tools, tool_choice=choice)
+        model = model.bind_tools(model_tools, tool_choice=choice)
     # TAU L4 circuit breaker: единственные удалённые вызовы графа — генерация
     # модели по серверным профилям. Открытый контур даёт детерминированный отказ
     # без обращения к провайдеру (без расхода и без нагрузки на лежащий сервис).
@@ -782,10 +807,15 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                            'Модель запросила неподключённый или некорректный инструмент; вызов не выполнен.')
         result = result.model_copy(update={'content': explanation, 'tool_calls': [],
                                           'invalid_tool_calls': [], 'additional_kwargs': {}})
-    if consultations + sum(consult_name(c['name']) for c in result.tool_calls) > 2:
-        result = result.model_copy(update={'content': 'Лимит двух консультаций этого хода исчерпан; '
+    requested_consults = sum(consult_name(c['name']) for c in result.tool_calls)
+    if requested_consults and consultations + requested_consults > consult_limit:
+        reason = ('Консультации аналитика отключены настройкой сервера; '
+                  if consult_limit == 0 else
+                  f'Лимит консультаций этого хода ({consult_limit}) исчерпан; ')
+        result = result.model_copy(update={'content': reason +
             'новые вызовы не выполнены. Нужна работа основного Brain с имеющимися доказательствами.',
-            'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {}})
+            'tool_calls': [call for call in result.tool_calls if not consult_name(call['name'])],
+            'invalid_tool_calls': [], 'additional_kwargs': {}})
     result = msty_task.gate_final(state, result, tools, tools_disabled)
     if not valid_tool_calls(result, tools):
         result = result.model_copy(update={'content': 'Схема проверки плана не подтверждена; действие не выдано.',
