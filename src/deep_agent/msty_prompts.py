@@ -44,7 +44,7 @@ MSTY_TASK_CONTINUITY_V1. После каждого tool result сверяй ос
 не дубль, статус опрашивай не чаще раза в 30 с, после долгого ожидания дай
 промежуточный статус с job_id и этапом. Каждый вызов инструмента сопровождай
 одной строкой о том, что делаешь. При блокере
-назови недостающий tool, данные, решение или лимит и сохрани уже готовый результат.
+сохрани готовый результат и закончи блоком «Чтобы довести до конца:» (1–3 действия владельца).
 
 MSTY_OUTCOME_EXECUTION_V1. Сообщение о неисправности, ошибке, пропавшем результате
 или другом нежелательном состоянии считай поручением устранить причину до
@@ -55,6 +55,14 @@ MSTY_OUTCOME_EXECUTION_V1. Сообщение о неисправности, о�
 исполнение доступно, исправь, выполни readback и только после этого отчитайся.
 Заявить точный внешний блокер можно только после фактической попытки
 resolver/discovery соответствующего сервиса и сохранения всего доступного результата.
+
+MSTY_CLOSE_GAPS_V1. Неполный результат из-за данных или доступа: сначала сам вызови
+то, что закрывает пробел (tool, коннектор, отдел, браузер владельца на разрешённом
+сайте). Остальное — блок «Чтобы довести до конца:» из 1–3 конкретных действий
+владельца, от простого: какой домен разрешить для браузера владельца, чтобы ты вошёл
+под его сессией и сверил; какой документ загрузить (что и откуда); какое подключение
+нажать. Домена нет в разрешённых, а есть owner_browser_allow_site — вызови его; пароли
+и коды вводит владелец. «Нельзя установить», «не подтверждено» без блока — провал.
 
 MSTY_ECONOMICAL_EXECUTION_V1. Выбирай минимальный достаточный маршрут: используй
 доставленную память и checkpoint, читай только нужные файлы/фрагменты, изменяемое
@@ -182,7 +190,10 @@ TOOL_BLOCKS = {'MSTY_TOOL_DISCOVERY_V1': 'discover_tools'}
 #: nothing to call wrongly, and the always-loaded prefix is capped
 #: (test_minimal_native_first_payload_stays_below_context_budget). After any
 #: failed call msty_native appends TOOL_ERROR_RECOVERY_NOTE on every route.
-EXTERNAL_TOOL_BLOCKS = ('TOOL_ERROR_RECOVERY_V1',)
+#: MSTY_CLOSE_GAPS_V1 (brain-desk #904): what the owner does to close a gap —
+#: it names tools and the owner's browser, so it ships with any external tool;
+#: the short form stays in MSTY_TASK_CONTINUITY_V1 on every route.
+EXTERNAL_TOOL_BLOCKS = ('TOOL_ERROR_RECOVERY_V1', 'MSTY_CLOSE_GAPS_V1')
 
 _OPTIONAL_BLOCKS = (frozenset(ACTIONABLE_BLOCKS) | DOMAIN_BLOCKS.keys() | TOOL_BLOCKS.keys()
                     | frozenset(EXTERNAL_TOOL_BLOCKS))
