@@ -489,6 +489,30 @@ unified change journal. Offline passing tests alone do not prove deployment,
 business completion or broad model quality. Earlier dated sections below describe
 the inherited Sonnet implementation where their model/counting details differ.
 
+### Out-of-limit recovery — 28 September 2026
+
+Responses API `max_output_tokens` includes reasoning; `gpt-6-luna` documents a
+1,050,000 context and 128,000 max output (checked 28.09). The graph now accepts
+Luna limits up to 128,000 (`msty_models.MAX_OUTPUT_TOKENS`; other profiles keep
+8192), but the bridge's task binding still sets the stage limit (8192 today).
+
+A reasoning lead stage (`luna`/`sol`, limit >= 8192, not a consultation, not a
+policy fallback, not an explicit `!max`) runs its first call with the bound limit
+minus a recovery reserve (`max(2048, limit // 4)`: 8192 → 6144 + 2048). Only when
+that call ends `incomplete`/`max_output_tokens` with no visible and no streamed
+text, within 100 s, the same stage makes exactly one retry: the same messages
+(already collected tool results) plus a service note, `tool_choice='none'`,
+effort one level lower (`msty_effort.retry_level`, lower still if the reserve is
+small), output = stage limit − measured first output. Both inputs are counted
+and must fit the stage input limit. One `validated_result` is published with
+the summed usage (an upper estimate, never cheaper), so the settled stage stays
+within the bridge reservation. A failed retry publishes unknown usage. If the
+retry is empty too, the reply is an honest refusal with `finish_reason=length`
+(Brain Desk offers «Продолжить»). Partial text is kept; unstreamed partial text
+gets an explicit «обрезан лимитом» mark, streamed text is never rewritten.
+Record: `response_metadata.msty_outlimit_retry`. Tests:
+`tests/unit_tests/test_msty_outlimit_retry.py`.
+
 ## Msty Brain restoration — 19 September 2026
 
 The `msty` graph is the main Msty route (`team.brain`), distinct from the local

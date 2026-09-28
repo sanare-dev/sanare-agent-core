@@ -52,10 +52,19 @@ def test_unknown_profile_rejected_without_sdk(profile, monkeypatch):
         adapter.make_model(profile)
 
 
-@pytest.mark.parametrize('limit', [0, -1, 8193, True, 2.5, '200'])
+@pytest.mark.parametrize('limit', [0, -1, 128001, True, 2.5, '200'])
 def test_output_bound_is_strict(limit):
     with pytest.raises(adapter.ModelAdapterError):
         adapter.make_model('luna', limit)
+
+
+def test_output_ceiling_is_per_profile():
+    # gpt-6-luna documents 128,000 max output (reasoning included); the rest
+    # keep the rollout's 8192.
+    assert adapter.max_output('luna') == 128000
+    assert adapter.max_output('deepseek') == adapter.max_output('sonnet') == 8192
+    with pytest.raises(adapter.ModelAdapterError):
+        adapter.make_model('deepseek', 8193)
 
 
 @pytest.mark.parametrize('requested', [1, 8, 15, 16, 40])

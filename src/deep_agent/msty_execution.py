@@ -21,6 +21,9 @@ MAX_ACTIONS = 200
 # Должна совпадать с PROFILE_PRICE_VERSION моста (brain_accounting): иначе
 # validate_binding отклоняет каждую задачу Brain с бюджетом.
 PRICING_VERSION = '2026-09-23-brain-model-profiles-v4-luna6'
+#: Highest output limit a resume may keep (= msty_models luna ceiling); it can
+#: never grow above the limit the checkpointed step started with.
+MAX_STAGE_OUTPUT = 128000
 # Profiles a budget binding may pin: admitted lead profiles (Luna/DeepSeek)
 # plus the server-allowlisted analyst set. The bridge pins one profile per task.
 BINDING_PROFILES = frozenset(('luna', 'deepseek', 'sol6', 'opus5'))
@@ -227,7 +230,7 @@ def validate_resume(state, resume):
                                      _tool_drift(state.get('tools'), incoming.get('tools')) + '.')
     maximum = incoming.get('max_tokens')
     previous_maximum = state.get('max_tokens') or 4096
-    if type(maximum) is not int or not 1 <= maximum <= min(previous_maximum, 8192):
+    if type(maximum) is not int or not 1 <= maximum <= min(previous_maximum, MAX_STAGE_OUTPUT):
         raise ExecutionProtocolError('Лимит ответа нельзя увеличить при продолжении.')
     if state.get('task_budget_binding') is not None and maximum != previous_maximum:
         raise ExecutionProtocolError('Привязанный лимит ответа должен сохраняться при продолжении.')
