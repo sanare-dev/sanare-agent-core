@@ -114,7 +114,7 @@ def test_default_luna_one_generation_ignores_client_model_endpoint(monkeypatch):
     assert result['result']['response_metadata'] == {
         'model_name': 'gpt-6-luna', 'msty_model_name': 'gpt-6-luna',
         'msty_model_profile': 'luna', 'msty_model_provider': 'openai',
-        'msty_reasoning_effort': {'version': 1, 'level': 'high', 'reason': 'deep_work',
+        'msty_reasoning_effort': {'version': 1, 'level': 'high', 'reason': 'deep_work', 'step': 'plan',
                                   'profile': 'luna', 'provider_value': 'low',
                                   'applied_level': 'low', 'output_limit': 64}}
     assert result['result']['usage_metadata'] == USAGE

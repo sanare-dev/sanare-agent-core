@@ -4,8 +4,9 @@ Owner order 2026-09-26: the reasoning level of every model is chosen by the
 task instead of being fixed (Luna had effort='max' for every turn since #35, so
 a bare «привет» reasoned for minutes). ``choose_effort`` reads only signals the
 graph already has: the latest owner message, the Brain role and the Brain Desk
-agent persona of the first system message. Tool-loop follow-up steps of the
-same turn see the same latest owner message and therefore reuse its level.
+agent persona of the first system message. That turn level is kept for the
+plan; ``step_effort`` lowers the steps that only continue a
+simple tool chain (owner order 2026-09-28, see below).
 
 Levels are abstract (low < medium < high < max); ``msty_models.make_model``
 maps them to each provider's own parameter, and providers without a safe
@@ -13,6 +14,7 @@ per-call parameter ignore them (recorded as ``provider_value=None``).
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -107,6 +109,118 @@ def choose_effort(state: dict) -> dict:
     messages = state.get('messages') or []
     level, reason = classify(latest_owner_text(messages), architect=_architect(messages))
     return {'version': 1, 'level': level, 'reason': reason}
+
+
+
+# ---------------------------------------------------------------------------
+# Per-step level (owner order 2026-09-28, «тупит нереально»): the turn level of
+# choose_effort is right for the plan and the final answer, not for every step
+# of a browser/tool chain. Live 28.09 (Brain Desk, owner_browser_* chain): each
+# find → fill_form → click → snapshot step re-reasoned at the turn's 'high',
+# 1–2 min per step, 8 min for 7 steps. A step that only continues a chain after
+# a simple tool result runs at STEP_LEVEL; the turn level is kept for the plan
+# (no tool result yet), after a non-simple tool and for an explicit owner
+# force. Two failed tool batches in a
+# row ask for rethinking at FAILURE_LEVEL. gpt-6-luna documents none/low/
+# medium/high/xhigh/max: no 'minimal' tier, and 'none' drops reasoning
+# entirely, so 'low' is the floor here.
+STEP_LEVEL = 'low'
+FAILURE_LEVEL = 'medium'
+FAILURE_STREAK = 2
+_SIMPLE_TOOL = re.compile(
+    r'(?:^|[_.])(?:owner_browser_[a-z0-9_]+|browser_[a-z0-9_]+|web_read|web_search'
+    r'|brain_desk_read_tool_result)$')
+_READ_METHODS = frozenset(('GET', 'HEAD'))
+
+
+def _call_parts(call: Any) -> tuple[Any, Any, Any]:
+    """(id, name, args) of one assistant tool call in dict or LangChain form."""
+    if not isinstance(call, dict):
+        return None, None, None
+    function = call.get('function') if isinstance(call.get('function'), dict) else {}
+    name = call.get('name', function.get('name'))
+    args = call.get('args', function.get('arguments'))
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = None
+    return call.get('id'), name, args
+
+
+def simple_tool(name: Any, args: Any = None) -> bool:
+    """A tool whose result needs no deep re-planning to take the next step."""
+    if not isinstance(name, str):
+        return False
+    if _SIMPLE_TOOL.search(name):
+        return True
+    if name == 'service_call' or name.endswith('_service_call'):
+        method = args.get('method') if isinstance(args, dict) else None
+        return isinstance(method, str) and method.upper() in _READ_METHODS
+    return False
+
+
+def _field(message: Any, key: str) -> Any:
+    return message.get(key) if isinstance(message, dict) else getattr(message, key, None)
+
+
+def _failed(message: Any) -> bool:
+    if _field(message, 'status') == 'error':
+        return True
+    from . import msty_taxonomy  # lazy: taxonomy imports the registry
+    return msty_taxonomy.classify_tool_text(_content(message)) is not None
+
+
+def tool_batches(messages: list[Any]) -> list[dict]:
+    """Tool batches after the latest owner message, oldest first."""
+    start = 0
+    for index, message in enumerate(messages or []):
+        if _role(message) in ('user', 'human'):
+            start = index + 1
+    batches, current = [], None
+    for message in (messages or [])[start:]:
+        role = _role(message)
+        if role in ('assistant', 'ai'):
+            calls = [_call_parts(c) for c in (_field(message, 'tool_calls') or [])]
+            current = {'calls': {c[0]: (c[1], c[2]) for c in calls}, 'results': []} if calls else None
+            if current is not None:
+                batches.append(current)
+        elif role == 'tool' and current is not None:
+            current['results'].append(message)
+    return [b for b in batches if b['results']]
+
+
+def step_effort(state: dict, task: dict) -> dict:
+    """This step's level from the turn level ``task`` and the tool chain so far.
+
+    Returns the choice dict of choose_effort plus 'step' (plan | tool_chain |
+    failure_rethink | task) and, when lowered or raised, 'task_level' and
+    'task_reason' (the turn level, visible in the LangSmith trace).
+    """
+    messages = state.get('messages') or []
+    batches = tool_batches(messages)
+    last = messages[-1] if messages else None
+    if not batches or _role(last) != 'tool':
+        return {**task, 'step': 'plan' if not batches else 'task'}
+    choice = state.get('tool_choice')
+    if (task.get('reason') == 'owner_force' or choice == 'none' or
+            (isinstance(choice, dict) and choice.get('type') == 'none')):
+        return {**task, 'step': 'task'}
+    streak = 0
+    for batch in reversed(batches):
+        if not any(_failed(m) for m in batch['results']):
+            break
+        streak += 1
+    base = {'version': 1, 'task_level': task['level'], 'task_reason': task['reason'],
+            'chain_steps': len(batches)}
+    if streak >= FAILURE_STREAK:
+        return {**base, 'level': FAILURE_LEVEL, 'reason': 'tool_failures', 'step': 'failure_rethink'}
+    batch = batches[-1]
+    names = [batch['calls'].get(_field(m, 'tool_call_id'), (None, None)) for m in batch['results']]
+    if all(simple_tool(name, args) for name, args in names) and \
+            LEVELS.index(task['level']) > LEVELS.index(STEP_LEVEL):
+        return {**base, 'level': STEP_LEVEL, 'reason': 'tool_chain', 'step': 'tool_chain'}
+    return {**task, 'step': 'task'}
 
 
 #: Reasoning tokens are billed inside the output limit (Responses API
