@@ -550,8 +550,12 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         output_limit = min(max(int(state.get('max_tokens') or 4096), 1), cap)
         msty_execution.validate_binding(state, profile, output_limit)
         # Per-task reasoning level (owner order 2026-09-26): deterministic, from
-        # the latest owner message, so every tool-loop step of a turn reuses it.
+        # the latest owner message. Per step (owner order 2026-09-28): a step
+        # that only continues a simple tool chain runs low; the plan, a step
+        # after a non-simple tool and rethinking after failures keep or raise it.
         effort = msty_effort.choose_effort(state)
+        if msty_models.EFFORT_VALUES.get(profile) is not None:
+            effort = msty_effort.step_effort(state, effort)
         # output_limit stays the stage's bound total; the first call leaves the
         # recovery reserve unused unless it ends truncated without text.
         reserve = retry_reserve(state, profile, effort, output_limit)

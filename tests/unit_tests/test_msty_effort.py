@@ -127,7 +127,7 @@ def _graph(monkeypatch, text, max_tokens=4096):
 def test_graph_greeting_runs_low_and_records_it(monkeypatch):
     created, record = _graph(monkeypatch, 'привет')
     assert created == [('luna', 4096, 'low')]
-    assert record == {'version': 1, 'level': 'low', 'reason': 'greeting',
+    assert record == {'version': 1, 'level': 'low', 'reason': 'greeting', 'step': 'plan',
                       'profile': 'luna', 'provider_value': 'low'}
 
 
