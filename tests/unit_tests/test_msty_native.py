@@ -443,6 +443,51 @@ def test_existing_compaction_keeps_native_count_and_uses_own_resume_ticket(monke
     asyncio.run(run())
 
 
+def test_paid_compaction_counts_across_native_steps_of_one_request(monkeypatch):
+    # brain-desk #899: native tool steps are the same bridge request; after
+    # its one paid compaction the next steps must see round 1 (fit without a
+    # model), and only the request's final answer resets it.
+    seen = []
+
+    async def step(state, **kwargs):
+        seen.append(deepcopy(state))
+        if len(seen) == 1:
+            summary = answer('')
+            summary.response_metadata['msty_stage'] = 'compaction'
+            return {**msty.publish_result(summary, None),
+                'context_memory': {'version': 1, 'segments': []},
+                'compaction_stage': {'version': 1, 'status': 'ready', 'stage_id': 'paid-once',
+                    'source_sha256': 'a' * 64, 'summary_sha256': 'b' * 64},
+                'compaction_round': 1}
+        if len(seen) == 2:
+            assert state['compaction_round'] == 1
+            return msty.publish_result(answer('', [call('native_ls', {'path': '/'})]), None)
+        assert len(seen) == 3 and state['compaction_round'] == 1
+        return msty.publish_result(answer(), None)
+
+    monkeypatch.setattr(msty, '_respond_step', step)
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'paid-once'}}
+        data = initial()
+        data['compaction_protocol'] = msty_compaction.PROTOCOL
+        first, _ = await invoke(graph, data, config)
+        compact = first.tasks[0].interrupts[0]
+        resume = {key: value for key, value in compact.value.items() if key != 'result_sha256'}
+        resume['type'] = 'msty_compaction_resume'
+        second, _ = await invoke(graph, Command(resume={compact.id: resume}), config)
+        assert second.values['execution']['status'] == 'waiting_native'
+        assert second.values['compaction_round'] == 1
+        ticket = second.tasks[0].interrupts[0]
+        final, _ = await invoke(graph, Command(resume={ticket.id: {
+            **ticket.value, 'type': 'msty_native_resume'}}), config)
+        assert final.values['execution']['status'] == 'answered'
+        assert final.values['compaction_round'] == 0
+        assert len(seen) == 3
+    asyncio.run(run())
+
+
 def test_real_guarded_step_consumes_native_schemas_and_prompt_without_network(monkeypatch):
     seen = []
 
