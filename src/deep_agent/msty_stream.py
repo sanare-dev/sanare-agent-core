@@ -29,6 +29,10 @@ MAX_REASONING_BYTES = 64 * 1024
 #: this size), so a credential-shaped token is never split across two events
 #: and always reaches the secret filter whole.
 REASONING_FLUSH_BYTES = 2048
+#: Luna streams its summary word by word (live 28.09.2026: 73 deltas for one
+#: short answer). Coalesce to a line or ~a sentence per event so the bridge and
+#: the window get a few events per second, not one per word.
+REASONING_MIN_CHARS = 120
 KNOWN_FINISH = frozenset(('stop', 'tool_calls', 'function_call', 'end_turn', 'tool_use', 'stop_sequence',
     'max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'))
 
@@ -120,6 +124,8 @@ class ReasoningRelay:
         if self.stopped or not text:
             return
         self.pending += text
+        if '\n' not in self.pending and len(self.pending) < REASONING_MIN_CHARS:
+            return
         cut = max(self.pending.rfind(' '), self.pending.rfind('\n'))
         if cut < 0 and len(self.pending.encode('utf-8')) < REASONING_FLUSH_BYTES:
             return
@@ -156,6 +162,14 @@ def text_content(content):
                    isinstance(block, dict) and block.get('type') == 'text' and isinstance(block.get('text'), str))
 
 
+def uses_responses_api(model):
+    """True for a (tool-bound) ChatOpenAI configured for the Responses API."""
+    seen = 0
+    while hasattr(model, 'bound') and seen < 8:  # RunnableBinding from bind_tools
+        model, seen = model.bound, seen + 1
+    return getattr(model, 'use_responses_api', None) is True
+
+
 class TextStream:
     def __init__(self, state, *, text=True):
         # text=False: only the reasoning relay (native harness withholds text).
@@ -187,7 +201,11 @@ class TextStream:
         try:
             # Explicit usage is required with custom Gateway base URLs, where
             # ChatOpenAI does not enable it by default. Sonnet accepts this too.
-            async for chunk in model.astream(messages, stream_usage=True):
+            # Not on the Responses API: langchain-openai 1.1.11 forwards the
+            # kwarg into responses.create() (TypeError before any request, prod
+            # 28.09.2026); that wire always reports usage in response.completed.
+            options = {} if uses_responses_api(model) else {'stream_usage': True}
+            async for chunk in model.astream(messages, **options):
                 if not isinstance(chunk, AIMessageChunk):
                     raise StreamFailure('Провайдер вернул некорректный фрагмент потока.')
                 if 'token_usage' in chunk.response_metadata:
@@ -198,6 +216,8 @@ class TextStream:
                 if self.reasoning is not None:
                     self.reasoning.feed(reasoning_text(chunk))
                 text = text_content(chunk.content)
+                if text and self.reasoning is not None:
+                    self.reasoning.flush()  # thinking is over once the answer starts
                 if text:
                     self.bytes += len(text.encode('utf-8'))
                     if self.bytes > MAX_TEXT_BYTES:
