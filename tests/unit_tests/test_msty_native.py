@@ -239,10 +239,10 @@ def test_requested_tool_becomes_visible_same_run_no_new_owner_message(monkeypatc
     asyncio.run(run())
 
 
-def test_tool_beyond_routed_28_is_callable_same_run(monkeypatch):
+def test_tool_beyond_routed_cap_is_callable_same_run(monkeypatch):
     """brain-desk 26.09 (owner: «доводи до конца»): with more schemas than the
-    router hands the model (MAX_SELECTED_TOOLS = 28), the 40th tool is not on
-    the first step's wire, but native_request_tools makes it a real schema on
+    router hands the model (MAX_SELECTED_TOOLS, #867: 48), the 60th tool is not
+    on the first step's wire, but native_request_tools makes it a real schema on
     the next model step of the same run and its call is dispatched there."""
     from deep_agent import msty_tool_routing
     monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
@@ -250,20 +250,20 @@ def test_tool_beyond_routed_28_is_callable_same_run(monkeypatch):
         'name': f'external_filler_{i:02d}',
         'description': 'Read one synthetic external item.',
         'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}}
-        for i in range(39)]
+        for i in range(59)]
     target = 'external_hidden'
     seen = scripted(monkeypatch, [
-        answer('', [call('native_request_tools', {'names': [target]}, 'req-40')]),
-        answer('', [call(target, {}, 'hidden-40')]),
+        answer('', [call('native_request_tools', {'names': [target]}, 'req-60')]),
+        answer('', [call(target, {}, 'hidden-60')]),
         answer()])
 
     async def run():
         saver, store = InMemorySaver(), InMemoryStore()
         data = initial()
         data['tools'] = filler + [deepcopy(_HIDDEN_TOOL)]
-        assert len(data['tools']) == 40 > msty_tool_routing.MAX_SELECTED_TOOLS
+        assert len(data['tools']) == 60 > msty_tool_routing.MAX_SELECTED_TOOLS
         graph = msty_native.build_graph(checkpointer=saver, store=store)
-        config = {'configurable': {'thread_id': 'dispatcher-beyond-28'}}
+        config = {'configurable': {'thread_id': 'dispatcher-beyond-cap'}}
         first, _ = await invoke(graph, data, config)
         first_names = msty.tool_names(seen[0]['state']['tools'])
         assert target not in first_names
@@ -278,6 +278,78 @@ def test_tool_beyond_routed_28_is_callable_same_run(monkeypatch):
         assert target in msty.tool_names(seen[1]['state']['tools'])
         assert second.values['execution']['status'] == 'waiting_tools'
         assert [c['name'] for c in events[0]['tool_calls']] == [target]
+    asyncio.run(run())
+
+
+_LATE_TOOL = {'type': 'function', 'function': {'name': 'external_late',
+    'description': 'Admitted by the bridge only at resume time.',
+    'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}}
+
+
+def test_requested_schema_appended_at_external_resume_is_on_the_wire_same_step(monkeypatch):
+    """brain-desk #866 (native harness): модель запросила инструмент, которого не
+    было в исходном наборе клиента; окно прикладывает его схему к resume внешнего
+    прерывания — validate_resume принимает строгое добавление, состояние
+    расширяется, и схема на проводе уже в ближайшей генерации этого же шага."""
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    seen = scripted(monkeypatch, [
+        answer('', [call('native_request_tools', {'names': ['external_late']}, 'req-late')]),
+        answer('', [call('external_read', {'name': 'fixture'}, 'ext-1')]),
+        answer('', [call('external_late', {}, 'late-1')]),
+        answer()])
+
+    async def run():
+        saver, store = InMemorySaver(), InMemoryStore()
+        # Скрытый инструмент в исходном наборе — чтобы каталог MSTY_TOOL_CATALOG_V1
+        # был непустым и схема native_request_tools реально выдавалась модели.
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        config = {'configurable': {'thread_id': 'instant-schema-native'}}
+        first, _ = await invoke(graph, initial_with_hidden_tool(), config)
+        # Запрошенного инструмента нет в исходном наборе клиента: серверный
+        # диспетчер честно отвечает, что подключить пока нечего.
+        assert first.values['execution']['status'] == 'waiting_native'
+        pending = first.tasks[0].interrupts[0]
+        assert pending.value['type'] == 'msty_native_continue'
+        second, _ = await invoke(graph, Command(resume={pending.id: {
+            **pending.value, 'type': 'msty_native_resume'}}), config)
+        assert second.values['execution']['status'] == 'waiting_tools'
+        assert [c['name'] for c in second.values['execution']['pending']['calls']] == ['external_read']
+        # Окно исполнило внешний вызов и прикладывает к resume запрошенную
+        # ранее схему — мост её уже принял.
+        resume = external_resume(second.values)
+        resume['input']['tools'] = deepcopy(second.values['tools']) + [deepcopy(_LATE_TOOL)]
+        external = second.tasks[0].interrupts[0]
+        third, events = await invoke(graph, Command(resume={external.id: resume}), config)
+        assert len(seen) == 3
+        # Схема принята в состояние и выдана модели на проводе этого же шага.
+        assert 'external_late' in msty.tool_names(third.values['tools'])
+        assert 'external_late' in msty.tool_names(seen[2]['state']['tools'])
+        assert third.values['execution']['status'] == 'waiting_tools'
+        assert [c['name'] for c in events[0]['tool_calls']] == ['external_late']
+        late = third.tasks[0].interrupts[0]
+        final, _ = await invoke(graph, Command(resume={late.id: external_resume(third.values)}), config)
+        assert final.values['execution']['status'] == 'answered'
+        assert not final.next
+    asyncio.run(run())
+
+
+def test_external_resume_with_unrequested_appended_schema_is_rejected(monkeypatch):
+    """brain-desk #866: добавка схемы, которую модель НЕ запрашивала в этом ходе,
+    отклоняется вместе с resume — прежняя байт-в-байт дисциплина для дрейфа."""
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    seen = scripted(monkeypatch, [answer('', [call('external_read', {'name': 'fixture'}, 'ext-1')])])
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'instant-schema-drift-native'}}
+        first, _ = await invoke(graph, initial(), config)
+        assert first.values['execution']['status'] == 'waiting_tools'
+        resume = external_resume(first.values)
+        resume['input']['tools'] = deepcopy(first.values['tools']) + [deepcopy(_LATE_TOOL)]
+        external = first.tasks[0].interrupts[0]
+        with pytest.raises(msty_execution.ExecutionProtocolError, match='Набор инструментов изменён'):
+            await invoke(graph, Command(resume={external.id: resume}), config)
+        assert len(seen) == 1
     asyncio.run(run())
 
 

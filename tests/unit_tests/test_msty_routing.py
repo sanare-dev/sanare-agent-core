@@ -233,11 +233,13 @@ def test_role_cannot_be_changed_in_callback_before_next_generation(monkeypatch):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('profile,canonical,method', [
-    ('luna', 'gpt-6-luna', 'tiktoken-admission-v1'),
-    ('deepseek', 'deepseek-flash', 'conservative-text-v1'),
+@pytest.mark.parametrize('profile,canonical,method,limit', [
+    # brain-desk #865: без binding допуск — окно профиля минус резерв на ответ
+    # (16384) и ~10% на схемы/политику (msty_execution.default_input_limit).
+    ('luna', 'gpt-6-luna', 'tiktoken-admission-v1', 928616),
+    ('deepseek', 'deepseek-flash', 'conservative-text-v1', 883616),
 ])
-def test_count_receipt_identifies_method_and_model_without_changing_usage(monkeypatch, profile, canonical, method):
+def test_count_receipt_identifies_method_and_model_without_changing_usage(monkeypatch, profile, canonical, method, limit):
     monkeypatch.setenv('MSTY_MODEL_PROFILE', profile)
     seen = models(monkeypatch, [reply()])
     counts = []
@@ -249,7 +251,7 @@ def test_count_receipt_identifies_method_and_model_without_changing_usage(monkey
     monkeypatch.setattr(msty_models, 'count_input', count)
     result = asyncio.run(msty.graph.ainvoke(initial(context_budget='msty-model-count-v1')))
     assert result['context_budget_check'] == {
-        'version': 1, 'status': 'accepted', 'input_tokens': 42, 'limit': 180000, 'window_admission': True,
+        'version': 1, 'status': 'accepted', 'input_tokens': 42, 'limit': limit, 'window_admission': True,
         'method': method, 'model_profile': profile}
     assert counts[0][0] == profile
     assert counts[0][1] == seen['invocations'][0][1]

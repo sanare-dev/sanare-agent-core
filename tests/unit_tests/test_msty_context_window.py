@@ -25,13 +25,39 @@ def test_window_limits_leave_output_and_count_reserve():
     assert set(execution.BINDING_PROFILES) <= set(execution.CONTEXT_WINDOWS)
 
 
-def test_input_limit_reads_only_a_sane_binding():
+def test_input_limit_reads_only_a_sane_binding(monkeypatch):
+    monkeypatch.delenv('MSTY_MODEL_PROFILE', raising=False)
     assert execution.input_limit(None) == execution.LEGACY_INPUT_LIMIT
-    assert execution.input_limit({}) == execution.LEGACY_INPUT_LIMIT
+    # brain-desk #865: без binding допуск следует за окном профиля шага
+    # (по умолчанию Luna 1,05M): 1050000 - 16384 (ответ) - 105000 (~10% на
+    # схемы/политику). Повреждённый binding — консервативный legacy fail-safe.
+    assert execution.input_limit({}) == 928616
     assert execution.input_limit(bound()) == 936000
     assert execution.input_limit(bound(limit=True)) == execution.LEGACY_INPUT_LIMIT
     assert execution.input_limit(bound(limit=10**7)) == execution.LEGACY_INPUT_LIMIT
     assert execution.input_limit(bound(profile='opus')) == execution.LEGACY_INPUT_LIMIT
+
+
+def test_default_limit_follows_the_step_profile_window(monkeypatch):
+    """brain-desk #865: дефолтный допуск — окно профиля минус резервы; fail-safe 180K."""
+    monkeypatch.delenv('MSTY_MODEL_PROFILE', raising=False)
+    assert execution.default_input_limit({'lead_profile': 'luna'}) == 928616
+    assert execution.default_input_limit({'lead_profile': 'deepseek'}) == 883616
+    # Окна 200K не опускаются ниже исторического legacy-порога.
+    assert execution.default_input_limit({'lead_profile': 'sonnet'}) == 180000
+    assert execution.default_input_limit({'brain_task_role': 'analyst',
+                                          'consult_profile': 'opus5'}) == 180000
+    # Аналитик без явного профиля консультанта — DeepSeek, как selected_profile.
+    assert execution.default_input_limit({'brain_task_role': 'analyst'}) == 883616
+    # Серверная развязка по умолчанию — через MSTY_MODEL_PROFILE.
+    monkeypatch.setenv('MSTY_MODEL_PROFILE', 'deepseek')
+    assert execution.default_input_limit({}) == 883616
+    # Неизвестный профиль, мусорная роль и повреждённое состояние — fail-safe.
+    monkeypatch.delenv('MSTY_MODEL_PROFILE', raising=False)
+    assert execution.default_input_limit({'lead_profile': 'unknown-model'}) == 180000
+    assert execution.default_input_limit({'brain_task_role': 'bogus'}) == 180000
+    assert execution.default_input_limit(None) == 180000
+    assert execution.default_input_limit({'lead_profile': 42}) == 180000
 
 
 def test_bound_window_admits_large_input_and_attests_that_limit(monkeypatch):

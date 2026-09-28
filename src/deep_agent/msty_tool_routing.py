@@ -17,18 +17,14 @@ from . import msty_registry, msty_semantic
 
 
 ROUTE_VERSION = 2
-# brain-agency-audit-2026-09-26 #2: kept at 28, not raised to 40-60. The real
-# friction the audit found was never the cap itself — it is that a tool
-# outside it used to read as a one-turn-late "ask and wait for the owner"
-# protocol. test_requested_tool_becomes_visible_same_run_no_new_owner_message
-# (test_msty_native.py) proves that is not how it works: native_request_tools
-# is a server-executed tool gated by the same gateway-admission resume as any
-# other native call, so a requested schema is on the wire on the NEXT model
-# step of the SAME run, with no fresh owner message in between. Given that,
-# raising the cap would add schema tokens to every step (routed or not) for a
-# latency that is already zero at the turn level — pure cost, no benefit. Stays
-# well under MAX_MODEL_TOOLS (128, the provider's per-call function limit).
-MAX_SELECTED_TOOLS = 28
+# brain-desk #867 (аудит 28.09, зажим №3): кап поднят 28 → 48. Вход каждого шага
+# дороже (больше схем на проводе), но модель реже начинает с шага «поиск
+# инструмента» через native_request_tools: промах regex-роутера — это полный
+# лишний LLM-круг, который дороже двадцати лишних схем. Вместе с #866
+# (запрошенная схема выдаётся в том же шаге при resume) остаточная цена промаха
+# маршрута минимальна. Всё ещё далеко под MAX_MODEL_TOOLS (128, провайдерский
+# предел функций на один вызов).
+MAX_SELECTED_TOOLS = 48
 
 # fullmatch against a fixed list meant that any extra word broke it: "Делай, не
 # спрашивай", "И фикси", "бери и делай" and "перенастраивай" all failed to be
@@ -86,8 +82,8 @@ _CHECK_SYSTEM = re.compile(
 
 # Диспетчер инструментов (живой дефект 2026-09-23: 116 переданных схем, модели
 # выдано 4, ответ «нет инструментов»). Модель получает каталог всех переданных
-# схем и серверный инструмент подключения; запрошенное становится видимым со
-# следующего шага этого же хода.
+# схем и серверный инструмент подключения; запрошенное становится вызываемым в
+# этом же ходе — при resume того же прерывания (#866) или со следующего шага.
 REQUEST_TOOL = "native_request_tools"
 # «Установи / разверни / запусти бота» на Mac владельца: узкого коннектора нет,
 # исполнитель — одна Codex job (терминал, файлы, браузер), не отказ.
@@ -526,6 +522,15 @@ def _explicit_requests(messages: list[Any]) -> set[str]:
     return names
 
 
+def turn_requested_names(messages: list[Any]) -> set[str]:
+    """Имена, явно запрошенные моделью через native_request_tools в текущем ходе.
+
+    Публичная обёртка для валидации resume (msty_execution, brain-desk #866):
+    только схемы с такими именами окно может ДОБАВИТЬ к набору при продолжении.
+    """
+    return _explicit_requests(messages)
+
+
 #: Каталог перечисляет каждую невыданную схему входа (msty_models.MAX_TOOLS),
 #: иначе инструменты сверх предела были бы молча недоступны для запроса.
 MAX_CATALOG = 256
@@ -548,7 +553,8 @@ def catalog_prompt(tools: list[dict], selected: list[str], limit: int = MAX_CATA
         return ""
     return ("MSTY_TOOL_CATALOG_V1: у тебя ЕСТЬ и другие инструменты владельца, не показанные "
             "на этом шаге. Если для задачи нужен любой из них — вызови native_request_tools "
-            "с их точными именами (до 20), и они станут доступны на следующем шаге. "
+            "с их точными именами (до 20), и они станут вызываемыми в этом же ходе сразу после "
+            "подтверждения моста, без нового обращения владельца. "
             "Никогда не отвечай «нет инструментов», не проверив этот каталог. "
             "Для широкой работы на Mac (найти, установить, запустить) есть msty_codex_start, "
             "карта системы — msty_admin_system_map.\n" + "\n".join(lines))
@@ -558,7 +564,8 @@ def request_tools_schema() -> dict:
     return {"type": "function", "function": {
         "name": REQUEST_TOOL,
         "description": ("Подключить инструменты владельца из MSTY_TOOL_CATALOG_V1 по точным "
-                        "именам; они станут видимы со следующего шага этого хода."),
+                        "именам; они станут вызываемыми в этом же ходе сразу после "
+                        "подтверждения моста."),
         "parameters": {"type": "object", "properties": {
             "names": {"type": "array", "items": {"type": "string"},
                       "minItems": 1, "maxItems": MAX_REQUESTED},

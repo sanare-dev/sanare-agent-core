@@ -1,4 +1,4 @@
-"""Предел входа 256 схем при маршрутизации <=28 к модели (brain-desk #183).
+"""Предел входа 256 схем при маршрутизации <=48 к модели (brain-desk #183, #867).
 
 Офлайн: провайдер лида подменён без сети; настоящие abefore_agent, роутер,
 адаптер схем (msty_models) и valid_tool_calls. Успех тестов не доказывает
@@ -40,7 +40,9 @@ def tools(count):
 def test_limits_keep_input_above_provider_cap_and_routing_below_it():
     assert msty_models.MAX_TOOLS == 256
     assert msty_models.MAX_MODEL_TOOLS == 128
-    assert msty_tool_routing.MAX_SELECTED_TOOLS == 28 < msty_models.MAX_MODEL_TOOLS
+    # brain-desk #867: кап маршрута 28 → 48 (вход дороже, меньше шагов «поиск
+    # инструмента»); всё ещё ниже провайдерского предела функций на вызов.
+    assert msty_tool_routing.MAX_SELECTED_TOOLS == 48 < msty_models.MAX_MODEL_TOOLS
     assert msty_tool_routing.MAX_CATALOG >= msty_models.MAX_TOOLS
 
 

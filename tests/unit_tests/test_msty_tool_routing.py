@@ -261,7 +261,8 @@ def test_a_bare_word_without_a_job_id_gets_no_executor_bundle():
         assert not (names & job_only), text
 
 
-BROAD = "опубликуй job site-" + "c" * 32 + " и проверь базу и файлы и браузер и блог"
+BROAD = ("опубликуй job site-" + "c" * 32 + " и проверь базу supabase и файлы и браузер и блог, "
+         "почту, заказы amazon, налоги UK и что пишут на github про msty brain")
 
 
 def _selected(order):

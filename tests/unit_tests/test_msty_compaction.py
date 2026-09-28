@@ -80,10 +80,23 @@ def resume(first):
                 for k in ('stage_id', 'source_sha256', 'summary_sha256')}}
 
 
+def test_trigger_follows_the_admission_limit(monkeypatch):
+    """brain-desk #865: триггер сжатия = допуск входа минус запас, не зашитые 120K."""
+    monkeypatch.delenv('MSTY_MODEL_PROFILE', raising=False)
+    headroom = compact.TRIGGER_HEADROOM_TOKENS
+    # Закреплённый мостом допуск 180K → триггер 180K - запас.
+    assert compact.trigger_tokens(initial()) == 180000 - headroom
+    # Без binding — от окна профиля шага (по умолчанию Luna, из состояния DeepSeek).
+    assert compact.trigger_tokens({}) == 928616 - headroom
+    assert compact.trigger_tokens({'lead_profile': 'deepseek'}) == 883616 - headroom
+    # Неизвестный профиль — fail-safe к legacy-допуску.
+    assert compact.trigger_tokens({'lead_profile': 'unknown-model'}) == 180000 - headroom
+
+
 def test_two_separate_graph_runs_each_publish_one_generation_and_keep_originals(monkeypatch):
     state = history()
     originals = deepcopy(state['messages'])
-    seen = install(monkeypatch, [summary(state), 'Finished answer'], [150000, 60000, 90000])
+    seen = install(monkeypatch, [summary(state), 'Finished answer'], [170000, 60000, 90000])
     async def scenario():
         graph = msty.builder.compile(checkpointer=InMemorySaver())
         cfg = {'configurable': {'thread_id': 'summary-stage'}}
@@ -144,7 +157,7 @@ def test_no_second_compaction_or_generation_when_projection_still_too_big(monkey
     AIMessage(content='', tool_calls=[{'id': 'evil', 'name': 'write', 'args': {}}], usage_metadata=USAGE)])
 def test_invalid_summary_preserves_paid_usage_and_does_not_commit_or_retry(monkeypatch, bad):
     state = history()
-    seen = install(monkeypatch, [bad], [150000, 60000])
+    seen = install(monkeypatch, [bad], [170000, 60000])
     result = asyncio.run(msty.graph.ainvoke(state))
     assert len(seen['requests']) == 1
     assert result['result']['usage_metadata'] == USAGE
@@ -188,7 +201,7 @@ def test_protected_history_and_pending_pairs_never_compacted():
 
 def test_compaction_resume_tamper_fails_before_extra_inference(monkeypatch):
     state = history()
-    seen = install(monkeypatch, [summary(state)], [150000, 60000])
+    seen = install(monkeypatch, [summary(state)], [170000, 60000])
     async def scenario():
         graph = msty.builder.compile(checkpointer=InMemorySaver())
         cfg = {'configurable': {'thread_id': 'tamper-compact'}}
@@ -362,7 +375,7 @@ def test_fourth_compaction_round_declines_gracefully_without_charge(monkeypatch)
                 # Round 4 would still find a real plan (the 4th cluster), but
                 # the cap is already reached: only the outer trigger count is
                 # consumed, no model call, no fourth compaction stage.
-                counts.append(150000)
+                counts.append(170000)
             current = await graph.ainvoke(
                 Command(resume={current['__interrupt__'][0].id: resume(current)}), cfg)
         assert current['execution']['status'] == 'blocked'

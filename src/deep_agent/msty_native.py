@@ -724,6 +724,11 @@ class NativeMstyMiddleware(AgentMiddleware):
                    for observation in observations}
         continuation = {key: resumed.get(key) for key in
                         ('tool_choice', 'max_tokens', 'context_budget', 'context_budget_check', 'text_stream_protocol')}
+        # brain-desk #866: окно могло ДОБАВИТЬ запрошенные моделью схемы к набору
+        # при продолжении (validate_resume принимает только такие добавки).
+        # Принимаем расширенный набор в состояние: ближайшая генерация этого же
+        # шага уже видит схему на проводе, без лишнего круга через окно.
+        continuation['tools'] = resumed.get('tools') or []
         return {**continuation, 'execution': {**resumed['execution'], 'native_actions': _native_actions(state)},
                 'task_contract': resumed.get('task_contract'), 'native_needs_admission': False,
                 'native_external_observations': results}
@@ -892,7 +897,8 @@ class NativeMstyMiddleware(AgentMiddleware):
             enabled = [name for name in names if name in available]
             missing = [name for name in names if name not in available]
             text = ('Подключено: ' + (', '.join(enabled) or 'ничего') +
-                    '. Эти инструменты доступны со следующего шага; вызывай их напрямую.')
+                    '. Эти инструменты вызываемы в этом же ходе сразу после подтверждения '
+                    'моста; вызывай их напрямую.')
             if missing:
                 text += (' Нет в тулсете владельца: ' + ', '.join(missing) +
                          ' — выбери из MSTY_TOOL_CATALOG_V1 или используй msty_codex_start.')

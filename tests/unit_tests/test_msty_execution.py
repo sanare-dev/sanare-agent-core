@@ -319,3 +319,127 @@ def test_tool_drift_is_rejected_with_counts_only(monkeypatch, mutation, detail):
         assert len(seen) == 1
 
     asyncio.run(scenario())
+
+
+# brain-desk #866: окно/мост может приложить к resume того же прерывания схемы,
+# которые модель сама запросила через native_request_tools в этом ходе.
+_EXTRA_TOOL = {'type': 'function', 'function': {'name': 'extra_tool',
+    'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}}
+
+
+def _initial_with_dispatcher():
+    """Старый harness: схема диспетчера приходит от клиента (мост допускает её
+    в серверном исполнении), иначе valid_tool_calls отклонит сам запрос."""
+    from deep_agent import msty_tool_routing
+    state = initial()
+    state['tools'] = deepcopy(TOOLS) + [msty_tool_routing.request_tools_schema()]
+    return state
+
+
+def _request_answer(names, identifier='model-req'):
+    return AIMessage(content='', tool_calls=[{'id': identifier,
+        'name': 'native_request_tools', 'args': {'names': names}}],
+        usage_metadata={'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110})
+
+
+def test_resume_accepts_appended_requested_schema_and_it_is_callable_same_step(monkeypatch):
+    """#866: запрошенная схема вызываема в ближайшей генерации того же шага."""
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    seen = model_sequence(monkeypatch, [
+        _request_answer(['extra_tool']),
+        AIMessage(content='', tool_calls=[{'id': 'model-two', 'name': 'extra_tool', 'args': {}}],
+                  usage_metadata={'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110}),
+        AIMessage(content='Done')])
+
+    async def scenario():
+        graph = msty.builder.compile(checkpointer=InMemorySaver())
+        config = {'configurable': {'thread_id': 'instant-schema'}}
+        first = await graph.ainvoke(_initial_with_dispatcher(), config)
+        assert first['execution']['status'] == 'waiting_tools'
+        assert first['execution']['pending']['calls'][0]['name'] == 'native_request_tools'
+        resume = resume_value(first)
+        # Окно прикладывает запрошенную схему к тому же resume.
+        resume['input']['tools'] = deepcopy(first['tools']) + [deepcopy(_EXTRA_TOOL)]
+        second = await graph.ainvoke(Command(resume={first['__interrupt__'][0].id: resume}), config)
+        # Набор принят и расширен; вызов по новой схеме допущен — тот же шаг,
+        # без нового обращения владельца и без ожидания «следующего шага».
+        assert {t['function']['name'] for t in second['tools']} == {
+            'read_fixture', 'native_request_tools', 'extra_tool'}
+        assert second['execution']['status'] == 'waiting_tools'
+        assert second['execution']['pending']['calls'][0]['name'] == 'extra_tool'
+        assert len(seen) == 2
+        final = await graph.ainvoke(Command(resume={second['__interrupt__'][0].id:
+            resume_value(second, '2')}), config)
+        assert final['execution']['status'] == 'answered'
+        assert final['result']['content'] == 'Done'
+        assert len(seen) == 3
+
+    asyncio.run(scenario())
+
+
+def _request_then_resume(monkeypatch, mutate_tools, requested=('extra_tool',)):
+    """Шаг с запросом схем и resume с изменённым набором инструментов."""
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    seen = model_sequence(monkeypatch, [_request_answer(list(requested))])
+
+    async def scenario():
+        graph = msty.builder.compile(checkpointer=InMemorySaver())
+        config = {'configurable': {'thread_id': 'instant-schema-drift'}}
+        first = await graph.ainvoke(_initial_with_dispatcher(), config)
+        resume = resume_value(first)
+        resume['input']['tools'] = mutate_tools(deepcopy(first['tools']))
+        with pytest.raises(execution.ExecutionProtocolError) as caught:
+            await graph.ainvoke(Command(resume={first['__interrupt__'][0].id: resume}), config)
+        assert str(caught.value).startswith('Набор инструментов изменён внутри ожидающего шага')
+        assert len(seen) == 1
+
+    return scenario
+
+
+def test_resume_rejects_requested_schema_inserted_in_the_middle(monkeypatch):
+    """#866: только ДОБАВЛЕНИЕ в конец — прежний набор неизменный префикс
+    (стабильность кэша провайдера); вставка в середину отклоняется."""
+    asyncio.run(_request_then_resume(
+        monkeypatch, lambda tools: [deepcopy(_EXTRA_TOOL), *tools])())
+
+
+def test_resume_rejects_appended_schema_in_native_namespace(monkeypatch):
+    """#866: добавка не может занять серверное native_-пространство имён."""
+    native_named = {'type': 'function', 'function': {'name': 'native_evil',
+        'parameters': {'type': 'object', 'properties': {}}}}
+    asyncio.run(_request_then_resume(
+        monkeypatch, lambda tools: tools + [native_named], requested=('native_evil',))())
+
+
+def test_resume_rejects_more_than_max_requested_appended_schemas(monkeypatch):
+    """#866: добавок не больше MAX_REQUESTED за ход, как у самого диспетчера
+    (схема запроса принимает до MAX_REQUESTED имён за вызов — два вызова)."""
+    from deep_agent import msty_tool_routing
+    count = msty_tool_routing.MAX_REQUESTED + 1
+    names = [f'extra_tool_{index}' for index in range(count)]
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    seen = model_sequence(monkeypatch, [AIMessage(content='', tool_calls=[
+        {'id': 'model-req-1', 'name': 'native_request_tools', 'args': {'names': names[:20]}},
+        {'id': 'model-req-2', 'name': 'native_request_tools', 'args': {'names': names[20:]}}],
+        usage_metadata={'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110})])
+
+    async def scenario():
+        graph = msty.builder.compile(checkpointer=InMemorySaver())
+        config = {'configurable': {'thread_id': 'instant-schema-over-max'}}
+        first = await graph.ainvoke(_initial_with_dispatcher(), config)
+        assert len(first['execution']['pending']['calls']) == 2
+        resume = resume_value(first)
+        resume['input']['tools'] = deepcopy(first['tools']) + [
+            {'type': 'function', 'function': {'name': name,
+             'parameters': {'type': 'object', 'properties': {}}}} for name in names]
+        with pytest.raises(execution.ExecutionProtocolError, match='Набор инструментов изменён'):
+            await graph.ainvoke(Command(resume={first['__interrupt__'][0].id: resume}), config)
+        assert len(seen) == 1
+
+    asyncio.run(scenario())
+
+
+def test_resume_rejects_duplicate_appended_schema_names(monkeypatch):
+    """#866: дубликат имени среди добавок делает вызов неоднозначным — отказ."""
+    asyncio.run(_request_then_resume(
+        monkeypatch, lambda tools: tools + [deepcopy(_EXTRA_TOOL), deepcopy(_EXTRA_TOOL)])())

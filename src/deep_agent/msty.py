@@ -437,7 +437,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                 'Контекст сохранён без обрезки; требуется восстановить проверку его размера.', state=state)
         compaction_round = state.get('compaction_round', 0)
         if (compaction_enabled and compaction_round is not None and
-                tokens >= msty_compaction.TRIGGER_TOKENS):
+                tokens >= msty_compaction.trigger_tokens(state)):
             plan = msty_compaction.make_plan(state)
             if plan is not None:
                 if compaction_round < msty_compaction.MAX_COMPACTIONS_PER_TURN:

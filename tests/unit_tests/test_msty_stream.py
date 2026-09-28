@@ -161,7 +161,7 @@ def test_known_incomplete_terminal_preserves_partial_text_usage_and_finish(monke
 def test_compaction_stays_one_nonstream_generation(monkeypatch):
     state = history()
     state['text_stream_protocol'] = PROTOCOL
-    seen = install(monkeypatch, [], legacy=summary(state), counts=[150000, 60000])
+    seen = install(monkeypatch, [], legacy=summary(state), counts=[170000, 60000])
     result = asyncio.run(events(state))
     assert [event['type'] for event in custom(result)] == ['validated_result']
     assert value(result)['result']['response_metadata']['msty_stage'] == 'compaction'

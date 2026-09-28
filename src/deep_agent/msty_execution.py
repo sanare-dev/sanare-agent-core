@@ -8,6 +8,7 @@ from copy import deepcopy
 from types import MappingProxyType
 import hashlib
 import json
+import os
 import uuid
 
 from langgraph.types import interrupt
@@ -36,6 +37,14 @@ CONTEXT_WINDOWS = MappingProxyType({
     'opus': 200_000, 'fable': 200_000, 'sonnet': 200_000,
     # #58 analysts; windows match brain_accounting._PROFILES 'context'.
     'sol6': 1_050_000, 'opus5': 200_000})
+# brain-desk #865 (аудит 28.09, зажим №1): допуск БЕЗ budget-binding считается от
+# реального окна профиля шага, а не от legacy 180K: окно минус резерв на ответ
+# (16384) и минус ~10% на схемы инструментов/политику, которые считает тот же
+# вход. Потолок для binding (window_input_limit) НЕ менялся: уже выданные мостом
+# закрепления остаются допустимыми, перерасход бюджета невозможен — мост
+# резервирует ровно закреплённый вход.
+OUTPUT_RESERVE_TOKENS = 16384
+SCHEMA_POLICY_RESERVE_PERCENT = 10
 
 
 def window_input_limit(profile):
@@ -44,14 +53,57 @@ def window_input_limit(profile):
     return max(LEGACY_INPUT_LIMIT, window - min(64_000, window // 10))
 
 
+def _state_profile(state):
+    """Профиль модели этого шага: та же развязка, что msty.selected_profile, но
+    без импорта msty (цикл) и fail-safe — любое несоответствие даёт None, а не
+    исключение: допуск входа не имеет права ронять шаг, который сгенерирует
+    настоящая проверка профиля."""
+    if not isinstance(state, dict):
+        return None
+    role = state.get('brain_task_role', 'lead')
+    if role == 'analyst':
+        profile = state.get('consult_profile') or 'deepseek'
+    elif role == 'lead':
+        profile = state.get('lead_profile')
+        if profile is None:
+            # Как selected_profile: серверная развязка по умолчанию.
+            profile = os.getenv('MSTY_MODEL_PROFILE', msty_models.DEFAULT_PROFILE)
+    else:
+        return None
+    return profile if isinstance(profile, str) else None
+
+
+def default_input_limit(state):
+    """Допуск входа без budget-binding: окно профиля шага минус резервы (#865).
+
+    Профиль неизвестен или состояние повреждено → LEGACY_INPUT_LIMIT (fail-safe).
+    Для окон 200K (Sonnet-era) резервы дали бы меньше legacy-порога: допуск не
+    опускается ниже 180K, чтобы старые чаты без binding не сломались.
+    """
+    try:
+        profile = _state_profile(state)
+    except Exception:
+        profile = None
+    if profile not in CONTEXT_WINDOWS:
+        return LEGACY_INPUT_LIMIT
+    window = CONTEXT_WINDOWS[profile]
+    reserve = OUTPUT_RESERVE_TOKENS + window * SCHEMA_POLICY_RESERVE_PERCENT // 100
+    return max(LEGACY_INPUT_LIMIT, window - reserve)
+
+
 def input_limit(state):
-    """Admission limit of this request: the bound task's, else the legacy one."""
+    """Admission limit of this request: the bound task's, else the profile's."""
     binding = state.get('task_budget_binding') if isinstance(state, dict) else None
-    if isinstance(binding, dict) and binding.get('profile') in CONTEXT_WINDOWS:
-        value = binding.get('input_limit')
-        if type(value) is int and LEGACY_INPUT_LIMIT <= value <= window_input_limit(binding['profile']):
-            return value
-    return LEGACY_INPUT_LIMIT
+    if binding is not None:
+        # Закреплённый бюджет: принимаем только целое значение в окне профиля.
+        # Повреждённый binding — консервативный legacy fail-safe, не расширение
+        # сверх закреплённого мостом бюджета.
+        if isinstance(binding, dict) and binding.get('profile') in CONTEXT_WINDOWS:
+            value = binding.get('input_limit')
+            if type(value) is int and LEGACY_INPUT_LIMIT <= value <= window_input_limit(binding['profile']):
+                return value
+        return LEGACY_INPUT_LIMIT
+    return default_input_limit(state)
 
 
 class ExecutionProtocolError(ValueError):
@@ -184,12 +236,58 @@ def _tool_drift(before, after):
     return detail + ')'
 
 
+def _requested_appended_tools(state, incoming):
+    """brain-desk #866: единственное допустимое изменение набора схем при
+    продолжении — строгое ДОБАВЛЕНИЕ в конец схем, которые модель сама
+    запросила в текущем ходе через native_request_tools. Окно/мост прикладывает
+    их к resume того же прерывания, и запрошенная схема вызываема уже в
+    ближайшей генерации этого же шага, а не «со следующего».
+
+    True same-call выдача невозможна: набор схем фиксируется до генерации, а
+    модель уже сгенерировала tool_calls. Поэтому минимальный безопасный путь —
+    авто-resume с расширенным набором в рамках того же прерывания, без нового
+    обращения владельца и без лишнего круга через окно.
+
+    Возвращает новый набор, если он допустим; иначе None. Проверки:
+    прежние схемы — неизменный префикс (стабильность кэша провайдера; удаление,
+    подмена и перестановка отклоняются), добавок не больше MAX_REQUESTED, имена
+    уникальны и вне серверного native_-пространства, каждая добавка запрошена
+    моделью в текущем ходе (при включённом диспетчере).
+    """
+    old = state.get('tools') or []
+    new = incoming.get('tools') or []
+    if canonical_digest(new) == canonical_digest(old):
+        return new  # прежний путь: набор не менялся
+    from . import msty_tool_routing
+    if len(new) <= len(old) or len(new) - len(old) > msty_tool_routing.MAX_REQUESTED:
+        return None
+    for index, tool in enumerate(old):
+        if canonical_digest(new[index]) != canonical_digest(tool):
+            return None
+    names = []
+    for tool in new[len(old):]:
+        function = tool.get('function') if isinstance(tool, dict) else None
+        name = function.get('name') if isinstance(function, dict) else None
+        if not isinstance(name, str) or not name:
+            return None
+        names.append(name)
+    if len(set(names)) != len(names) or any(name.startswith('native_') for name in names):
+        return None
+    messages = incoming.get('messages')
+    requested = msty_tool_routing.turn_requested_names(messages if isinstance(messages, list) else [])
+    if not all(name in requested for name in names):
+        return None
+    return new
+
+
 def validate_resume(state, resume):
     """Bind the one pending batch to canonical client IDs, preserving observations.
 
     Local SessionStore owns b1 mappings and replay protection; the remote check
     is defense in depth. It is not authentication of mutable Msty tool text.
-    Never accept a new task, new tools or a larger output cap through resume.
+    Never accept a new task or a larger output cap through resume. Tool schemas
+    may only be APPENDED, and only ones the model itself requested this turn
+    (#866, _requested_appended_tools); removal/substitution stay rejected.
     """
     execution = state['execution']
     pending = execution['pending']
@@ -221,7 +319,8 @@ def validate_resume(state, resume):
                       'consult_profile', 'lead_profile'):
         if incoming.get(immutable) != state.get(immutable):
             raise ExecutionProtocolError('Протокол и бюджет задачи нельзя менять при продолжении.')
-    if canonical_digest(incoming.get('tools') or []) != canonical_digest(state.get('tools') or []):
+    accepted_tools = _requested_appended_tools(state, incoming)
+    if accepted_tools is None:
         raise ExecutionProtocolError('Набор инструментов изменён внутри ожидающего шага' +
                                      _tool_drift(state.get('tools'), incoming.get('tools')) + '.')
     maximum = incoming.get('max_tokens')
