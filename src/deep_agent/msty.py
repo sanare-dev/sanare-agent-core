@@ -144,6 +144,7 @@ class State(TypedDict):
     compaction_round: int
     task_contract: dict | None
     text_stream_protocol: str | None
+    reasoning_stream_protocol: str | None
     project_memory_delivery: dict
     consult_profile: str | None
     lead_profile: str | None
@@ -357,6 +358,9 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     policy_fallback = state.get(POLICY_FALLBACK_KEY)
     try:
         incremental = msty_stream.enabled(state)
+        # Live reasoning summary (owner 28.09.2026): streams the model call even
+        # where answer text stays withheld (native harness).
+        reasoning_live = msty_stream.reasoning_enabled(state)
     except ValueError as error:
         return rejected_context_budget(str(error), state=state)
     try:
@@ -377,7 +381,8 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         model = (ChatAnthropic(model='claude-sonnet-4-6', max_tokens=output_limit,
                                base_url='https://api.anthropic.com', timeout=120, max_retries=0)
                  if profile == 'sonnet' and not msty_models.msty_gateway.enabled()
-                 else msty_models.make_model(profile, output_limit, effort['level']))
+                 else msty_models.make_model(profile, output_limit, effort['level'], reasoning_live)
+                 if reasoning_live else msty_models.make_model(profile, output_limit, effort['level']))
         policy = (ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else
                   native_system_prompt if native_system_prompt is not None else
                   policy_for_tools(tools) + '\n\n' + msty_memory.system_context())
@@ -494,7 +499,8 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
     stream = None
     policy_rejection = None
     try:
-        stream = msty_stream.TextStream(state) if incremental else None
+        stream = (msty_stream.TextStream(state) if incremental else
+                  msty_stream.TextStream(state, text=False) if reasoning_live else None)
         try:
             raw_result = (await stream.invoke(model, full_messages) if stream else
                           await model.ainvoke(full_messages))

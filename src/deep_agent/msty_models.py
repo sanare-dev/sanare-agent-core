@@ -186,7 +186,8 @@ def effort_record(profile: str, choice: dict | None, max_tokens: int | None = No
     return record
 
 
-def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096, effort: str | None = None):
+def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096, effort: str | None = None,
+               reasoning_summary: bool = False):
     config = _profile(profile)
     if type(max_tokens) is not int or not 1 <= max_tokens <= 8192:
         raise ModelAdapterError('Недопустимый предел ответа модели.')
@@ -225,7 +226,13 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096, effort: s
         # below 16 (BadRequestError, integer_below_min_value); floor it so a
         # near-exhausted output budget (e.g. compaction) still completes.
         common['max_tokens'] = max(common['max_tokens'], RESPONSES_MIN_OUTPUT_TOKENS)
-        options.update(use_responses_api=True, reasoning={'effort': reasoning}, store=False)
+        # reasoning_summary: the owner's window shows Luna's live reasoning
+        # summary (owner 28.09.2026). 'auto' = the provider's most detailed
+        # summarizer available for the model; it summarises reasoning already
+        # generated and billed, so it adds no reasoning of its own. Opt-in by
+        # the bridge (msty-reasoning-delta-v1); compaction and sub-agents stay off.
+        options.update(use_responses_api=True, store=False, reasoning={
+            'effort': reasoning, **({'summary': 'auto'} if reasoning_summary else {})})
     elif profile in ('sol', 'sol6'):
         # Sol 6 is admitted only as a bound analyst; never as a lead.
         options.update(reasoning_effort=reasoning, store=False)
