@@ -1,9 +1,14 @@
 """Live reasoning summary relay (msty-reasoning-delta-v1): offline, no keys or inference."""
 import asyncio
 from copy import deepcopy
+import json as _json
+import pathlib as _pathlib
 
+import httpx
 import pytest
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
 
 from deep_agent import msty_models, msty_native, msty_stream
 from tests.unit_tests.test_msty_compaction import initial, USAGE
@@ -135,3 +140,102 @@ def test_native_progress_names_tool_and_filters_plan(monkeypatch):
     assert sent[0]['plan'][1]['status'] == 'pending' and len(sent[0]['plan'][1]['content']) == 200
     assert sent[1] == {'type': 'step_progress', 'version': 1, 'tool': 'delegate', 'status': 'start'}
     assert len(sent) == 2
+
+
+# --- Real Responses API wire (prod regression 28.09.2026) -------------------
+# Recorded live through the LangSmith Gateway (gpt-6-luna, effort=medium,
+# summary=auto → "detailed"); encrypted reasoning blobs shortened. The first
+# prod turn with the protocol on failed before any request: langchain-openai
+# forwarded astream(stream_usage=True) into responses.create() → TypeError →
+# «Поток модели не завершён». These tests drive the real ChatOpenAI + openai
+# SDK parser over that exact byte stream.
+FIXTURE = _pathlib.Path(__file__).with_name('fixtures_luna_responses_stream_20260928.sse')
+
+
+def recorded_summary():
+    text = ''
+    for line in FIXTURE.read_text().splitlines():
+        if line.startswith('data:'):
+            event = _json.loads(line[5:])
+            if event.get('type') == 'response.reasoning_summary_text.delta':
+                text += event['delta']
+    return text
+
+
+def real_luna(monkeypatch, requests):
+    """make_model's own ChatOpenAI, only the HTTP transport replaced."""
+    monkeypatch.setenv('OPENAI_API_KEY', 'synthetic-offline-not-a-real-key')
+    monkeypatch.setenv('MSTY_LLM_GATEWAY_ENABLED', '0')
+
+    def handler(request):
+        requests.append(_json.loads(request.content))
+        return httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                              content=FIXTURE.read_bytes())
+    original = msty_models.ChatOpenAI
+    monkeypatch.setattr(msty_models, 'ChatOpenAI', lambda **kwargs: original(
+        **{**kwargs, 'http_async_client': httpx.AsyncClient(transport=httpx.MockTransport(handler))}))
+
+
+def test_real_responses_stream_relays_summary_without_stream_usage_kwarg(monkeypatch):
+    requests, emitted = [], []
+    real_luna(monkeypatch, requests)
+    monkeypatch.setattr(msty_stream, 'get_stream_writer', lambda: emitted.append)
+    model = msty_models.bind_tools('luna', msty_models.make_model('luna', 1024, 'medium', True), [], 'auto')
+    stream = msty_stream.TextStream({'reasoning_stream_protocol': REASONING}, text=False)
+    final = asyncio.run(stream.invoke(model, [{'role': 'user', 'content': 'Сколько будет 17*23?'}]))
+    assert len(requests) == 1 and requests[0]['stream'] is True
+    assert 'stream_usage' not in requests[0]
+    assert requests[0]['reasoning'] == {'effort': 'medium', 'summary': 'auto'}
+    assert msty_stream.text_content(final.content) == '391'
+    assert final.usage_metadata['output_tokens'] == 27  # summary text is not billed output
+    relayed = [e for e in emitted if e['type'] == 'reasoning_delta']
+    assert ''.join(e['text'] for e in relayed) == recorded_summary()
+    assert 1 < len(relayed) < 10  # coalesced, not one event per word (73 deltas)
+
+
+def test_chat_completions_profiles_still_request_stream_usage():
+    class Chat:
+        use_responses_api = False
+    class Bound:
+        bound = Chat()
+    assert not msty_stream.uses_responses_api(Bound())
+    Chat.use_responses_api = True
+    assert msty_stream.uses_responses_api(Bound())
+
+
+def test_native_harness_real_responses_stream_with_protocol_on(monkeypatch):
+    """The exact prod path: msty_native graph, Luna, protocol on, real wire."""
+    requests = []
+    real_luna(monkeypatch, requests)
+    monkeypatch.setenv('MSTY_MODEL_PROFILE', 'luna')
+    for name in ('LANGSMITH_TRACING', 'LANGCHAIN_TRACING', 'LANGCHAIN_TRACING_V2'):
+        monkeypatch.setenv(name, 'false')
+
+    async def count(*args):
+        return 100
+    monkeypatch.setattr(msty_models, 'count_input', count)
+    from deep_agent import msty_execution, msty_native
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'real-responses-stream'}}
+        value = {'messages': [{'role': 'user', 'content': 'Сколько будет 17*23?'}],
+                 'tools': [], 'max_tokens': 1024, 'tool_choice': 'auto', 'result': {},
+                 'context_budget': None, 'context_budget_check': None,
+                 'execution_protocol': msty_execution.PROTOCOL, 'execution': {},
+                 'reasoning_stream_protocol': REASONING}
+        items = [item async for item in graph.astream(value, config, stream_mode=['custom', 'values'],
+                                                        durability='sync')]
+        return items, await graph.aget_state(config)
+    items, state = asyncio.run(run())
+    events = custom(items)
+    kinds = [e['type'] for e in events]
+    assert 'text_delta' not in kinds  # native harness still withholds answer text
+    assert kinds[-1] == 'validated_result'
+    assert ''.join(e['text'] for e in events if e['type'] == 'reasoning_delta') == recorded_summary()
+    result = events[-1]['message']
+    assert msty_stream.text_content(result['content']) == '391', result['content']
+    assert not result['response_metadata'].get('msty_blocked')
+    assert state.values['execution']['status'] == 'answered'
+    assert 'stream_usage' not in requests[0] and requests[0]['reasoning']['summary'] == 'auto'
+    assert isinstance(AIMessage.model_validate(result), AIMessage)
