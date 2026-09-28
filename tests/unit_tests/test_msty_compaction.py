@@ -25,6 +25,36 @@ def initial(**changes):
             'compaction_protocol': compact.PROTOCOL, **changes}
 
 
+def test_compaction_trigger_scales_from_bound_window_but_keeps_legacy_trigger():
+    assert compact.trigger_tokens({}) == compact.TRIGGER_TOKENS
+
+    state = initial()
+    state['task_budget_binding']['input_limit'] = execution.window_input_limit('luna')
+    assert compact.trigger_tokens(state) == execution.window_input_limit('luna') * 4 // 5
+
+    # Existing 180K bindings retain room for generation and count variance.
+    legacy_bound = initial()
+    assert compact.trigger_tokens(legacy_bound) == 144000
+
+
+@pytest.mark.parametrize(('tokens', 'compacts'), [(700000, False), (800000, True)])
+def test_compaction_waits_for_scaled_bound_window_threshold(monkeypatch, tokens, compacts):
+    state = history()
+    state['task_budget_binding']['input_limit'] = execution.window_input_limit('luna')
+    replies = [summary(state)] if compacts else ['Finished answer']
+    counts = [tokens, 60000] if compacts else [tokens]
+    seen = install(monkeypatch, replies, counts)
+    result = asyncio.run(msty.graph.ainvoke(state))
+
+    assert len(seen['requests']) == 1
+    assert (result['execution']['status'] == 'waiting_compaction') is compacts
+    if compacts:
+        assert result['result']['response_metadata']['msty_stage'] == 'compaction'
+    else:
+        assert result['execution']['status'] == 'answered'
+        assert not result.get('context_memory')
+
+
 def history():
     state = initial()
     for index in range(4):

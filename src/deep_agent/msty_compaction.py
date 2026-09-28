@@ -18,10 +18,15 @@ import uuid
 
 from langgraph.types import interrupt
 
-from .msty_execution import ExecutionProtocolError, canonical_digest, task_id
+from .msty_execution import ExecutionProtocolError, canonical_digest, input_limit, task_id
 
 PROTOCOL = 'msty-compaction-v1'
 TRIGGER_TOKENS = 120000
+# Bound chats can admit more than the legacy 180K. Start compaction at 80% of
+# that task's immutable input limit, leaving room for the latest turn and count
+# variance. Unbound/legacy checkpoints retain the original trigger.
+COMPACTION_TRIGGER_FRACTION_NUMERATOR = 4
+COMPACTION_TRIGGER_FRACTION_DENOMINATOR = 5
 MAX_SOURCE_BYTES = 400000
 # brain-desk #899 (28.09.2026): a long chat accumulates one segment per
 # isolated tool run; 8 made the mechanical fit stop early. Validation stays
@@ -46,6 +51,16 @@ Preserve exact identifiers, important findings, failures, unresolved questions a
 Return only JSON with exactly two keys: "sources" (the supplied SHA256 list in order)
 and "summary" (a nonempty string). Do not add recommendations or invent evidence.
 The complete original observations remain archived; this memory is not a verification receipt.'''
+
+
+def trigger_tokens(state):
+    """Return the trigger for this task's bound input window, or the legacy cap."""
+    binding = state.get('task_budget_binding') if isinstance(state, dict) else None
+    if not isinstance(binding, dict):
+        return TRIGGER_TOKENS
+    limit = input_limit(state)
+    scaled = limit * COMPACTION_TRIGGER_FRACTION_NUMERATOR // COMPACTION_TRIGGER_FRACTION_DENOMINATOR
+    return max(TRIGGER_TOKENS, scaled)
 
 
 def enabled(state):
