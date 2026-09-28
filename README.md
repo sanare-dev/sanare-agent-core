@@ -300,6 +300,33 @@ provider/Gateway support. See `test_msty_stream.py`; sources:
 [LangGraph custom writer](https://reference.langchain.com/python/langgraph/config/get_stream_writer),
 [LangChain OpenAI streaming](https://github.com/langchain-ai/langchain/blob/master/libs/partners/openai/langchain_openai/chat_models/base.py).
 
+## Live reasoning summary and step progress — 28 September 2026
+
+`reasoning_stream_protocol=msty-reasoning-delta-v1` (set by the bridge, owner
+order 28.09.2026: the window showed only «Думаю… 1 мин 45 с») streams the
+model call and relays the model's own reasoning summary, independent of
+`text_stream_protocol`. It also works in the native harness, where answer text
+stays withheld until the guarded `validated_result`. Luna then requests
+`reasoning.summary="auto"` from the Responses API; other profiles are
+unchanged (DeepSeek keeps `thinking` disabled). One extractor
+(`msty_stream.reasoning_text`) reads every provider's field: Responses summary
+blocks, LangChain `reasoning`, Anthropic `thinking`, `reasoning_content`
+(DeepSeek/Qwen/vLLM) and `thought`. Encrypted reasoning is never text.
+Without the flag nothing changes (single `ainvoke`, no summary requested).
+
+```json
+{"type":"reasoning_delta","version":1,"seq":0,"text":"Сначала проверю счета. "}
+{"type":"step_progress","version":1,"tool":"native_write_todos","status":"start","plan":[{"content":"…","status":"in_progress"}]}
+```
+
+Reasoning pieces are cut at whitespace (a credential is never split) and pass
+the same `SECRET_TOKEN_PATTERN` filter as other published surfaces; 64 KiB per
+step, then the relay stops silently. `step_progress` names a server-side
+tool when it starts; only `native_write_todos` adds its plan items (≤20, 200
+characters each, filtered). Both are display-only: never the answer, tool
+calls, history replay, acceptance or proof. Replayed history drops reasoning
+blocks (#37), so summaries add no input tokens to later steps.
+
 ## Bounded task criteria and metered compaction — 20 September 2026
 
 This source increment requires the matching gateway and native Admin MCP release.

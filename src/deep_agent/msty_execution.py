@@ -201,7 +201,7 @@ def validate_resume(state, resume):
     permitted = {'messages', 'tools', 'tool_choice', 'max_tokens', 'result',
                  'context_budget', 'context_budget_check', 'execution_protocol', 'brain_task_role',
                  'execution_task_id', 'task_budget_binding', 'compaction_protocol', 'text_stream_protocol',
-                 'consult_profile', 'lead_profile',
+                 'reasoning_stream_protocol', 'consult_profile', 'lead_profile',
                  # Рой только предлагает инструмент; допуск всегда даёт мост.
                  'swarm_protocol'}
     if not isinstance(incoming, dict) or set(incoming) - permitted:
@@ -213,6 +213,7 @@ def validate_resume(state, resume):
     from . import msty_stream
     try:
         msty_stream.enabled(incoming)
+        msty_stream.reasoning_enabled(incoming)
     except ValueError as error:
         raise ExecutionProtocolError(str(error)) from None
     if incoming.get('brain_task_role', 'lead') != state.get('brain_task_role', 'lead'):
@@ -302,6 +303,7 @@ def validate_resume(state, resume):
     contract = msty_task.observe(state, client_calls, new_results)
     return {**deepcopy(incoming), 'messages': messages,
             'text_stream_protocol': incoming.get('text_stream_protocol'),
+            'reasoning_stream_protocol': incoming.get('reasoning_stream_protocol'),
             'execution': {**execution, 'status': 'running', 'pending': None},
             'task_contract': contract}
 
