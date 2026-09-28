@@ -216,8 +216,63 @@ def accept_summary(state, plan, result):
             not isinstance(document['summary'], str) or not document['summary'].strip() or
             len(document['summary'].encode('utf-8')) > min(16000, plan['source_bytes'] // 2)):
         raise ExecutionProtocolError('Сводка не прошла проверку полноты ссылок или размера; исходники сохранены.')
+    return _commit(state, plan, document['summary'])
+
+
+def summary_limit(plan):
+    return min(16000, plan['source_bytes'] // 2)
+
+
+def _clip(value, limit):
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    text = ' '.join(text.split())
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
+def _clip_bytes(text, limit):
+    data = text.encode('utf-8')
+    if len(data) <= limit:
+        return text
+    return data[:max(0, limit - 3)].decode('utf-8', 'ignore') + '…'
+
+
+def mechanical_summary(plan, reason):
+    """Deterministic memory of the archived bundles, no model involved.
+
+    Live 28.09 (brain-desk thread a6dd00e8): the model's summary failed
+    accept_summary, the respond step published «Сводка не прошла проверку;
+    исходники сохранены.» as the whole answer and the owner's turn ended with
+    no action. The paid summary call stays charged as the compaction stage;
+    its text is replaced by this verbatim extract (tool names, arguments, the
+    beginning of each result), so the turn continues on the same sources.
+    """
+    lines = ['[Механическая выжимка: модельная сводка не прошла проверку (' + _clip(reason, 160) +
+             '). Ниже — вызовы и начала их результатов; полные исходники остаются в checkpoint '
+             + plan['source_sha256'] + '.]']
+    for message in plan['source']:
+        role = message.get('role')
+        if role == 'assistant':
+            for call in message.get('tool_calls') or []:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get('function') if isinstance(call.get('function'), dict) else {}
+                name = function.get('name') or call.get('name') or '?'
+                args = function.get('arguments') if 'arguments' in function else call.get('args', '')
+                lines.append(f'- {name}({_clip(args, 160)}) id={call.get("id")}')
+        elif role == 'tool':
+            lines.append(f'  → {message.get("tool_call_id")}: {_clip(message.get("content", ""), 280)}')
+    return _clip_bytes('\n'.join(lines), summary_limit(plan))
+
+
+def accept_mechanical(state, plan, reason):
+    return _commit(state, plan, mechanical_summary(plan, reason))
+
+
+def _commit(state, plan, summary):
+    if not isinstance(summary, str) or not summary.strip() or len(summary.encode('utf-8')) > summary_limit(plan):
+        raise ExecutionProtocolError('Сводка не прошла проверку полноты ссылок или размера; исходники сохранены.')
     segment = {k: plan[k] for k in ('start', 'end', 'source_sha256')}
-    segment.update(summary=document['summary'], summary_sha256=canonical_digest(document['summary']))
+    segment.update(summary=summary, summary_sha256=canonical_digest(summary))
     segments = sorted([*deepcopy(_segments(state)), segment], key=lambda s: s['start'])
     stage = {'version': 1, 'status': 'ready', 'stage_id': str(uuid.uuid4()),
              'source_sha256': segment['source_sha256'], 'summary_sha256': segment['summary_sha256']}

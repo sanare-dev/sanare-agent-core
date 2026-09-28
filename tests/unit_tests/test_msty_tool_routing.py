@@ -480,3 +480,39 @@ def test_window_skill_catalog_gets_skills_get_on_a_plain_task():
     foreign = {"role": "system", "content": "[Brain Desk · каталог навыков] …"}
     selected, _, _ = routing.select_tools([foreign, {"role": "user", "content": text}], tools)
     assert "skills_get" not in {tool["function"]["name"] for tool in selected}
+
+
+SERVICE = {"service_list", "service_call", "service_configure"}
+
+
+def _desk(text, extra=()):
+    messages = [{"role": "system", "content": "[Brain Desk · правая рука владельца] правила окна"},
+                {"role": "user", "content": text}]
+    tools = TOOLS + [schema(name) for name in sorted(SERVICE)] + [schema(name) for name in extra]
+    selected, value, _ = routing.select_tools(messages, tools)
+    return {tool["function"]["name"] for tool in selected}, value
+
+
+def test_brain_desk_working_turn_always_gets_the_service_api_set():
+    # Live 28.09 (brain-desk thread a6dd00e8): «подключи InvoiceXpress из
+    # сохранённого ключа» matched none of the service tools, they stayed in the
+    # catalog only, and Brain answered «service_configure отсутствует».
+    for text in ("подключи InvoiceXpress из сохранённого ключа", "делай"):
+        names, value = _desk(text)
+        assert SERVICE <= names, (text, value["selected_names"])
+
+
+def test_service_api_set_survives_truncation():
+    filler = [f"zz_vendor_op_{index}" for index in range(60)]
+    names, value = _desk("подключи и проверь сервис: vendor op ключ " + " ".join(filler), filler)
+    assert value["selected_count"] <= routing.MAX_SELECTED_TOOLS
+    assert SERVICE <= names
+
+
+def test_service_api_set_is_not_added_outside_brain_desk_or_for_small_talk():
+    selected, _, _ = routing.select_tools(
+        [{"role": "user", "content": "подключи InvoiceXpress из сохранённого ключа"}],
+        TOOLS + [schema(name) for name in sorted(SERVICE)])
+    assert not SERVICE & {tool["function"]["name"] for tool in selected}
+    names, _ = _desk("привет")
+    assert not SERVICE & names

@@ -246,6 +246,15 @@ _ORG_TOOLS = frozenset({"org_structure", "delegate", "delegate_many", "review"})
 # and the connector finder are always at hand for a working turn, whatever
 # the words («решай проблему» routed to route_request + system_map only).
 _WINDOW_TOOLS = frozenset({"connector_search", "connector_propose"})
+# Brain Desk Service API (brain-desk #650/#734/#862): three small tools that
+# work as a set — service_list names what is missing (account, a key saved
+# under another id → adoptable_secret_ids) and service_configure fixes it.
+# Live 28.09 (thread a6dd00e8, «подключи InvoiceXpress из сохранённого
+# ключа»): the words matched none of them, the window's 160 schemas reached
+# the graph but only the catalog carried them, and Brain answered
+# «service_configure отсутствует». Like the org tools, they are handed over on
+# every working Brain Desk turn and never truncated away.
+_SERVICE_TOOLS = frozenset({"service_list", "service_call", "service_configure"})
 # Remote Windows servers over the window's SSH connector (ssh-mcp, brain-desk
 # #343): live 24.09 «подключись и реши вопрос» about Crin-Barbu got no SSH
 # schemas — the router had no remote domain, and the owner's short follow-up
@@ -586,7 +595,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         chosen = {item for item in prior_route.get("selected_names", []) if item in available}
         source = "continued"
         if _from_brain_desk(messages):
-            chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
+            chosen.update((_WINDOW_TOOLS | _SERVICE_TOOLS | _WEB) & available.keys())
             chosen.discard("msty_project_resolve")
             if _REMOTE.search(_recent_user_text(messages)):
                 chosen.update(_SSH_TOOLS & available.keys())
@@ -638,7 +647,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         if intent != "direct":
             chosen.update(_ORG_TOOLS & available.keys())
             if _from_brain_desk(messages):
-                chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
+                chosen.update((_WINDOW_TOOLS | _SERVICE_TOOLS | _WEB) & available.keys())
                 chosen.discard("msty_project_resolve")
                 if _REMOTE.search(_recent_user_text(messages)):
                     chosen.update(_SSH_TOOLS & available.keys())
@@ -725,6 +734,10 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
             if use_codex:
                 explicit_names = {name for name in chosen if name.lower() in lowered}
                 chosen = explicit_names | _CODEX
+                # «Подключи InvoiceXpress и проверь» is a service setup, not a
+                # Codex job on the Mac: the window's Service API set stays.
+                if _from_brain_desk(messages):
+                    chosen.update(_SERVICE_TOOLS & available.keys())
 
             # Generic future connectors get a small lexical projection. Known
             # connectors stay policy-routed above, avoiding broad "project" hits.
@@ -798,7 +811,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
     if tool_choice == "none" or (isinstance(tool_choice, dict) and tool_choice.get("type") == "none"):
         chosen = historical
 
-    protected = historical | required | requested | (_ORG_TOOLS & chosen) | (skill_open & chosen)
+    protected = (historical | required | requested | (_ORG_TOOLS & chosen) | (skill_open & chosen) |
+                 ((_SERVICE_TOOLS & chosen) if _from_brain_desk(messages) else set()))
     ordered = [name for name in available if name in chosen]
     if len(ordered) > MAX_SELECTED_TOOLS:
         keep = [name for name in ordered if name in protected]

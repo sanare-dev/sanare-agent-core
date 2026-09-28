@@ -637,7 +637,14 @@ async def _compact_step(state, profile, output_limit, policy, plan, round_number
         reason = msty_models.finish_reason(result.response_metadata)
         if reason in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'):
             raise msty_execution.ExecutionProtocolError('Сводка не завершена; исходники сохранены.')
-        update = msty_compaction.accept_summary(state, plan, result)
+        try:
+            update = msty_compaction.accept_summary(state, plan, result)
+        except msty_execution.ExecutionProtocolError as rejected:
+            # The call completed normally but its text is unusable (not JSON,
+            # wrong sources, too long, tool calls). Publishing the rejection
+            # ended the owner's turn with no action (live 28.09): keep the
+            # paid stage and continue on a deterministic extract instead.
+            update = msty_compaction.accept_mechanical(state, plan, str(rejected))
     except msty_execution.ExecutionProtocolError as error:
         blocked = result.model_copy(update={'content': str(error), 'tool_calls': [],
             'invalid_tool_calls': [], 'additional_kwargs': {},
