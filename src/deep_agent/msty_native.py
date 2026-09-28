@@ -22,11 +22,12 @@ from langchain.agents.middleware.types import (
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, convert_to_openai_messages
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 from langmem import create_search_memory_tool
 
 from . import msty, msty_compaction, msty_execution, msty_guard, msty_models, msty_prompts, msty_task, msty_tool_routing
-from . import consolidator, msty_breaker, msty_registry, msty_subagents, msty_swarm, msty_taxonomy
+from . import consolidator, msty_breaker, msty_effort, msty_registry, msty_stream, msty_subagents, msty_swarm, msty_taxonomy
 from .msty_native_memory import (
     CANDIDATES_NAMESPACE, backend_factory, ApprovedMemoryMiddleware, ApprovedSkillsMiddleware,
 )
@@ -381,9 +382,10 @@ class State(AgentState, total=False):
     compaction_protocol: str | None
     context_memory: dict
     compaction_stage: dict | None
-    compaction_skip_once: bool
+    compaction_round: int
     task_contract: dict | None
     text_stream_protocol: str | None
+    reasoning_stream_protocol: str | None
     consult_profile: str | None
     lead_profile: str | None
     # Рой (msty-swarm-v1): протокол выставляет только мост; допуск роя приходит
@@ -514,6 +516,46 @@ def _swarm_on(state) -> bool:
     """Рой выдаётся лиду при протоколе моста, один раз за ход владельца."""
     return msty_swarm.enabled(state) and _calls_this_turn(state.get('messages'), msty_swarm.TOOL) == 0
 
+
+
+#: A plan item the owner's window can show; longer text is cut, never sent whole.
+PLAN_ITEM_CHARS = 200
+PLAN_MAX_ITEMS = 20
+
+
+def _publish_progress(state, call):
+    """Live «what Brain is doing» for the owner's window (owner 28.09.2026).
+
+    Same opt-in as the reasoning relay (msty-reasoning-delta-v1). Carries the
+    server-side tool's name and, for native_write_todos, the plan items after
+    the credential filter — never other arguments or results. Display only:
+    a lost event never fails the tool call.
+    """
+    try:
+        if not msty_stream.reasoning_enabled(state):
+            return
+        writer = get_stream_writer()
+    except (ValueError, RuntimeError):
+        return
+    event = {'type': 'step_progress', 'version': 1, 'tool': str(call.get('name') or '')[:128],
+             'status': 'start'}
+    if call.get('name') == 'native_write_todos':
+        todos = (call.get('args') or {}).get('todos')
+        items = []
+        for item in todos if isinstance(todos, list) else []:
+            if not isinstance(item, dict) or not isinstance(item.get('content'), str):
+                continue
+            status = item.get('status') if item.get('status') in (
+                'pending', 'in_progress', 'completed') else 'pending'
+            items.append({'content': msty_stream.redact_secrets(item['content'])[:PLAN_ITEM_CHARS],
+                          'status': status})
+            if len(items) >= PLAN_MAX_ITEMS:
+                break
+        event['plan'] = items
+    try:
+        writer(event)
+    except Exception:  # noqa: BLE001 — display only
+        pass
 
 class NativeMstyMiddleware(AgentMiddleware):
     state_schema = State
@@ -673,7 +715,12 @@ class NativeMstyMiddleware(AgentMiddleware):
             native_tool_route=tool_route, tau_errors=tau_errors, tau_evidence=tau_evidence,
             native_needs_admission=execution['status'] == 'waiting_native')
         if not compacted:
-            update.update(compaction_skip_once=False, compaction_stage=None)
+            # brain-desk #899: native tool steps stay inside the same bridge
+            # request, so a paid compaction already made in it keeps counting
+            # (one paid pass per request); a new request starts from 0.
+            keep = execution['status'] == 'waiting_native'
+            update.update(compaction_round=(state.get('compaction_round') or 0) if keep else 0,
+                          compaction_stage=None)
         return ExtendedModelResponse(model_response=ModelResponse(
             result=[] if compacted else [AIMessage.model_validate(result)]), command=Command(update=update))
 
@@ -723,7 +770,8 @@ class NativeMstyMiddleware(AgentMiddleware):
         results = {by_client[observation['tool_call_id']]: deepcopy(observation['content'])
                    for observation in observations}
         continuation = {key: resumed.get(key) for key in
-                        ('tool_choice', 'max_tokens', 'context_budget', 'context_budget_check', 'text_stream_protocol')}
+                        ('tool_choice', 'max_tokens', 'context_budget', 'context_budget_check', 'text_stream_protocol',
+                         'reasoning_stream_protocol')}
         return {**continuation, 'execution': {**resumed['execution'], 'native_actions': _native_actions(state)},
                 'task_contract': resumed.get('task_contract'), 'native_needs_admission': False,
                 'native_external_observations': results}
@@ -808,7 +856,9 @@ class NativeMstyMiddleware(AgentMiddleware):
             return usage
 
         def model_factory(schemas):
-            model = msty_models.make_model(profile, 2048)
+            # Role-based level: operator=low, researcher=medium, auditor=high.
+            model = msty_models.make_model(profile, 2048, msty_effort.SUBAGENT_LEVELS.get(
+                str(args.get('role') or ''), msty_effort.DEFAULT_LEVEL))
             return _MeteredModel(msty_models.bind_tools(profile, model, schemas, 'auto'))
 
         try:
@@ -878,6 +928,7 @@ class NativeMstyMiddleware(AgentMiddleware):
 
     async def awrap_tool_call(self, request, handler):
         call = request.tool_call
+        _publish_progress(request.state, call)
         errors = request.state.get('tau_errors') or []
         # Бюджет попыток — в пределах хода владельца, не всего треда.
         turn = msty_taxonomy.turn_of(request.state.get('messages'))
@@ -892,7 +943,7 @@ class NativeMstyMiddleware(AgentMiddleware):
             text = ('Подключено: ' + (', '.join(enabled) or 'ничего') +
                     '. Эти инструменты доступны со следующего шага; вызывай их напрямую.')
             if missing:
-                text += (' Нет в тулсете владельца: ' + ', '.join(missing) +
+                text += (' Нет среди инструментов владельца: ' + ', '.join(missing) +
                          ' — выбери из MSTY_TOOL_CATALOG_V1 или используй msty_codex_start.')
             return ToolMessage(content=text, name=call['name'], tool_call_id=call['id'],
                                status='success' if enabled else 'error')

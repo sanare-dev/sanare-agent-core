@@ -12,6 +12,7 @@ import uuid
 
 from langgraph.types import interrupt
 
+from . import msty_models
 
 PROTOCOL = 'msty-local-tools-v1'
 # Owner-approved task ceiling. Native and external counters remain cumulative;
@@ -20,6 +21,9 @@ MAX_ACTIONS = 200
 # Должна совпадать с PROFILE_PRICE_VERSION моста (brain_accounting): иначе
 # validate_binding отклоняет каждую задачу Brain с бюджетом.
 PRICING_VERSION = '2026-09-23-brain-model-profiles-v4-luna6'
+#: Highest output limit a resume may keep (= msty_models luna ceiling); it can
+#: never grow above the limit the checkpointed step started with.
+MAX_STAGE_OUTPUT = 128000
 # Profiles a budget binding may pin: admitted lead profiles (Luna/DeepSeek)
 # plus the server-allowlisted analyst set. The bridge pins one profile per task.
 BINDING_PROFILES = frozenset(('luna', 'deepseek', 'sol6', 'opus5'))
@@ -113,7 +117,7 @@ def execution_after(state, update):
         raise ExecutionProtocolError('Некорректный счётчик шагов Msty.')
     result = update['result']
     meta = result.get('response_metadata') or {}
-    reason = meta.get('stop_reason', meta.get('finish_reason'))
+    reason = msty_models.finish_reason(meta)
     calls = result.get('tool_calls') or []
     status = 'answered'
     pending = None
@@ -144,6 +148,15 @@ def next_node(state):
     return '__end__'
 
 
+def _turn_form(message):
+    """The owner's turn in the form the native harness checkpoints."""
+    from langchain_core.messages import convert_to_openai_messages
+    try:
+        return convert_to_openai_messages([message])[0]
+    except (ValueError, TypeError, KeyError, NotImplementedError):
+        raise ExecutionProtocolError('Некорректное исходное обращение текущего шага.') from None
+
+
 def _last_user(messages):
     if not isinstance(messages, list) or any(not isinstance(m, dict) for m in messages):
         raise ExecutionProtocolError('Некорректная история продолжения Msty.')
@@ -151,6 +164,27 @@ def _last_user(messages):
         if messages[index].get('role') == 'user':
             return index, messages[index]
     raise ExecutionProtocolError('Не найдено исходное обращение текущего шага.')
+
+
+def _tool_drift(before, after):
+    """Counts only (audit 27.09.2026): «38 → 0» tells a client that dropped its
+    tools from one that edited a schema, without echoing names or schemas."""
+    def names(tools):
+        out = []
+        for tool in tools or []:
+            function = tool.get('function') if isinstance(tool, dict) else None
+            name = function.get('name') if isinstance(function, dict) else None
+            if not isinstance(name, str) and isinstance(tool, dict):
+                name = tool.get('name')
+            out.append(name if isinstance(name, str) else None)
+        return out
+    old, new = names(before), names(after)
+    old_set, new_set = set(old), set(new)
+    changed = len(old_set & new_set) if len(old) == len(new) and old_set == new_set else None
+    detail = f' (было {len(old)}, стало {len(new)}; добавлено {len(new_set - old_set)}, убрано {len(old_set - new_set)}'
+    if changed is not None:
+        detail += '; изменены описания или порядок'
+    return detail + ')'
 
 
 def validate_resume(state, resume):
@@ -170,7 +204,7 @@ def validate_resume(state, resume):
     permitted = {'messages', 'tools', 'tool_choice', 'max_tokens', 'result',
                  'context_budget', 'context_budget_check', 'execution_protocol', 'brain_task_role',
                  'execution_task_id', 'task_budget_binding', 'compaction_protocol', 'text_stream_protocol',
-                 'consult_profile', 'lead_profile',
+                 'reasoning_stream_protocol', 'consult_profile', 'lead_profile',
                  # Рой только предлагает инструмент; допуск всегда даёт мост.
                  'swarm_protocol'}
     if not isinstance(incoming, dict) or set(incoming) - permitted:
@@ -182,6 +216,7 @@ def validate_resume(state, resume):
     from . import msty_stream
     try:
         msty_stream.enabled(incoming)
+        msty_stream.reasoning_enabled(incoming)
     except ValueError as error:
         raise ExecutionProtocolError(str(error)) from None
     if incoming.get('brain_task_role', 'lead') != state.get('brain_task_role', 'lead'):
@@ -191,10 +226,11 @@ def validate_resume(state, resume):
         if incoming.get(immutable) != state.get(immutable):
             raise ExecutionProtocolError('Протокол и бюджет задачи нельзя менять при продолжении.')
     if canonical_digest(incoming.get('tools') or []) != canonical_digest(state.get('tools') or []):
-        raise ExecutionProtocolError('Набор инструментов изменён внутри ожидающего шага.')
+        raise ExecutionProtocolError('Набор инструментов изменён внутри ожидающего шага' +
+                                     _tool_drift(state.get('tools'), incoming.get('tools')) + '.')
     maximum = incoming.get('max_tokens')
     previous_maximum = state.get('max_tokens') or 4096
-    if type(maximum) is not int or not 1 <= maximum <= min(previous_maximum, 8192):
+    if type(maximum) is not int or not 1 <= maximum <= min(previous_maximum, MAX_STAGE_OUTPUT):
         raise ExecutionProtocolError('Лимит ответа нельзя увеличить при продолжении.')
     if state.get('task_budget_binding') is not None and maximum != previous_maximum:
         raise ExecutionProtocolError('Привязанный лимит ответа должен сохраняться при продолжении.')
@@ -215,7 +251,12 @@ def validate_resume(state, resume):
         model_ids.add(model_id)
     start, last_user = _last_user(incoming.get('messages'))
     _, original_user = _last_user(state.get('messages'))
-    if canonical_digest(last_user) != canonical_digest(original_user):
+    # Native harness keeps the checkpointed turn in OpenAI form
+    # (convert_to_openai_messages joins text parts), while the client resends
+    # its original parts — e.g. the owner's text + an attachment (brain-desk
+    # #537, LangSmith 25.09 16:39 UTC). Compare both in that one canonical
+    # form: the same content passes, any change of the turn still fails.
+    if canonical_digest(_turn_form(last_user)) != canonical_digest(_turn_form(original_user)):
         raise ExecutionProtocolError('Новый пользовательский ход не является результатом инструмента.')
     observed_calls, observed_results = set(), set()
     new_results = []
@@ -265,6 +306,7 @@ def validate_resume(state, resume):
     contract = msty_task.observe(state, client_calls, new_results)
     return {**deepcopy(incoming), 'messages': messages,
             'text_stream_protocol': incoming.get('text_stream_protocol'),
+            'reasoning_stream_protocol': incoming.get('reasoning_stream_protocol'),
             'execution': {**execution, 'status': 'running', 'pending': None},
             'task_contract': contract}
 

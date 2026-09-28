@@ -56,7 +56,7 @@ def providers(monkeypatch, behaviour):
                 raise outcome
             return deepcopy(outcome)
 
-    def construct(profile, max_tokens):
+    def construct(profile, max_tokens, effort=None):
         seen['created'].append(profile)
         return Model(profile)
 

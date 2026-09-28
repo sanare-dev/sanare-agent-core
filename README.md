@@ -300,6 +300,33 @@ provider/Gateway support. See `test_msty_stream.py`; sources:
 [LangGraph custom writer](https://reference.langchain.com/python/langgraph/config/get_stream_writer),
 [LangChain OpenAI streaming](https://github.com/langchain-ai/langchain/blob/master/libs/partners/openai/langchain_openai/chat_models/base.py).
 
+## Live reasoning summary and step progress — 28 September 2026
+
+`reasoning_stream_protocol=msty-reasoning-delta-v1` (set by the bridge, owner
+order 28.09.2026: the window showed only «Думаю… 1 мин 45 с») streams the
+model call and relays the model's own reasoning summary, independent of
+`text_stream_protocol`. It also works in the native harness, where answer text
+stays withheld until the guarded `validated_result`. Luna then requests
+`reasoning.summary="auto"` from the Responses API; other profiles are
+unchanged (DeepSeek keeps `thinking` disabled). One extractor
+(`msty_stream.reasoning_text`) reads every provider's field: Responses summary
+blocks, LangChain `reasoning`, Anthropic `thinking`, `reasoning_content`
+(DeepSeek/Qwen/vLLM) and `thought`. Encrypted reasoning is never text.
+Without the flag nothing changes (single `ainvoke`, no summary requested).
+
+```json
+{"type":"reasoning_delta","version":1,"seq":0,"text":"Сначала проверю счета. "}
+{"type":"step_progress","version":1,"tool":"native_write_todos","status":"start","plan":[{"content":"…","status":"in_progress"}]}
+```
+
+Reasoning pieces are cut at whitespace (a credential is never split) and pass
+the same `SECRET_TOKEN_PATTERN` filter as other published surfaces; 64 KiB per
+step, then the relay stops silently. `step_progress` names a server-side
+tool when it starts; only `native_write_todos` adds its plan items (≤20, 200
+characters each, filtered). Both are display-only: never the answer, tool
+calls, history replay, acceptance or proof. Replayed history drops reasoning
+blocks (#37), so summaries add no input tokens to later steps.
+
 ## Bounded task criteria and metered compaction — 20 September 2026
 
 This source increment requires the matching gateway and native Admin MCP release.
@@ -358,8 +385,13 @@ See `test_msty_compaction.py` and `test_msty_task.py` for offline acceptance.
 ### Unified inference transport
 
 Operator setting `MSTY_LLM_GATEWAY_ENABLED=1` routes all admitted cloud profiles through
-LangSmith Gateway. Luna uses `/openai/v1/chat/completions` with its native model ID;
-DeepSeek uses `/v1/chat/completions` and the saved `custom/Msty%20DeepSeek%20Flash`
+LangSmith Gateway. Luna uses `/openai/v1/responses` (OpenAI Responses API,
+`use_responses_api=True`) with its native model ID — owner decision 26 September 2026,
+live-verified through this exact route: Chat Completions only allows function
+calling at `reasoning_effort='none'`, while the Responses API keeps tool calling at
+every reasoning tier, so Luna now runs at `reasoning={'effort': 'max'}`. Streaming
+reads the Responses API's `status` field (`completed`/`incomplete`), not
+`finish_reason`; DeepSeek uses `/v1/chat/completions` and the saved `custom/Msty%20DeepSeek%20Flash`
 configuration. The latter must match server config ID
 `ae7376e7-fea6-43cb-b50c-97db118c8c47` in
 `MSTY_LLM_GATEWAY_DEEPSEEK_CONFIG_ID`. The Gateway credential is supplied only by
@@ -382,7 +414,8 @@ acceptance evidence live in the owning project's change journal, not this source
 increment. Engine, sandboxes and subscription preferences are unchanged.
 
 The `msty` graph now defaults to server profile `luna` (`gpt-6-luna` since 2026-09-23,
-reasoning `none`). There is no compulsory prompt rewriter, council or hidden
+reasoning `max` via the Responses API since 2026-09-26). There is no compulsory
+prompt rewriter, council or hidden
 second model. Each cloud run performs at most one billed generation; the explicit
 compaction protocol above may require two separately counted runs in one client leg.
 `MSTY_MODEL_PROFILE=sonnet` is an explicit operator rollback, not an automatic
@@ -455,6 +488,30 @@ Deployment and live acceptance are recorded separately in the LLM project's
 unified change journal. Offline passing tests alone do not prove deployment,
 business completion or broad model quality. Earlier dated sections below describe
 the inherited Sonnet implementation where their model/counting details differ.
+
+### Out-of-limit recovery — 28 September 2026
+
+Responses API `max_output_tokens` includes reasoning; `gpt-6-luna` documents a
+1,050,000 context and 128,000 max output (checked 28.09). The graph now accepts
+Luna limits up to 128,000 (`msty_models.MAX_OUTPUT_TOKENS`; other profiles keep
+8192), but the bridge's task binding still sets the stage limit (8192 today).
+
+A reasoning lead stage (`luna`/`sol`, limit >= 8192, not a consultation, not a
+policy fallback, not an explicit `!max`) runs its first call with the bound limit
+minus a recovery reserve (`max(2048, limit // 4)`: 8192 → 6144 + 2048). Only when
+that call ends `incomplete`/`max_output_tokens` with no visible and no streamed
+text, within 100 s, the same stage makes exactly one retry: the same messages
+(already collected tool results) plus a service note, `tool_choice='none'`,
+effort one level lower (`msty_effort.retry_level`, lower still if the reserve is
+small), output = stage limit − measured first output. Both inputs are counted
+and must fit the stage input limit. One `validated_result` is published with
+the summed usage (an upper estimate, never cheaper), so the settled stage stays
+within the bridge reservation. A failed retry publishes unknown usage. If the
+retry is empty too, the reply is an honest refusal with `finish_reason=length`
+(Brain Desk offers «Продолжить»). Partial text is kept; unstreamed partial text
+gets an explicit «обрезан лимитом» mark, streamed text is never rewritten.
+Record: `response_metadata.msty_outlimit_retry`. Tests:
+`tests/unit_tests/test_msty_outlimit_retry.py`.
 
 ## Msty Brain restoration — 19 September 2026
 
@@ -674,6 +731,22 @@ Native tool-bundle compaction (`msty_compaction.TRIGGER_TOKENS` = 120,000) is
 unchanged: it only projects old tool results and keeps long tool chains cheap.
 A larger admitted input is billed as such (Luna doubles input price above
 272K); cross-turn chat compaction stays in the bridge.
+
+One paid compaction pass per request — 28 September 2026 (brain-desk #899).
+A long Brain Desk chat ran three paid summary rounds in one request (≈313K
+tokens) and then declined with «больше 3 сжатий контекста подряд»; a repeated
+request did the same. Now at most one paid summary stage runs per bridge
+request (`msty_compaction.MAX_COMPACTIONS_PER_TURN = 1`; native tool steps of
+the same request keep the count). If the projection is still at or above the
+trigger — or no model plan exists — the respond step fits it without a model
+call: `mechanical_fit` archives every remaining old tool run as a verbatim
+extract and clips the oldest summaries («выжимка выжимок»); these segments are
+persisted, so a following «продолжи» does not pay for them again. Only while
+the input still exceeds the admitted limit, `fit_projection` leaves the oldest
+whole turns out of this one generation and clips the largest text tool results
+(never owner text, never system messages, never the latest owner turn; the
+canonical history is untouched). The turn then generates; a limit refusal
+remains only when nothing is left to drop. Every step is re-counted exactly.
 
 Capability attestation (24.09.2026 incident): every `context_budget_check`
 (accepted or rejected, including the compaction stage) carries

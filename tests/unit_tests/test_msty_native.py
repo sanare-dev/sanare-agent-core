@@ -191,6 +191,96 @@ def test_mixed_native_external_batch_runs_sequentially_without_new_user_command(
     asyncio.run(run())
 
 
+_HIDDEN_TOOL = {'type': 'function', 'function': {'name': 'external_hidden',
+    'description': 'Check a private status endpoint outside default routing.',
+    'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}}
+
+
+def initial_with_hidden_tool():
+    data = initial()
+    data['tools'] = deepcopy(TOOLS) + [deepcopy(_HIDDEN_TOOL)]
+    return data
+
+
+def test_requested_tool_becomes_visible_same_run_no_new_owner_message(monkeypatch):
+    """brain-agency-audit-2026-09-26 #2: a tool outside the routed set is only a
+    text catalog entry until native_request_tools is called; it must become a
+    real schema on the NEXT model step of the SAME run (gateway admission
+    resume only — no fresh message from the owner), not a following turn."""
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    seen = scripted(monkeypatch, [
+        answer('', [call('native_request_tools', {'names': ['external_hidden']}, 'req-1')]),
+        answer('', [call('external_hidden', {}, 'hidden-1')]),
+        answer()])
+
+    async def run():
+        saver, store = InMemorySaver(), InMemoryStore()
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        config = {'configurable': {'thread_id': 'dispatcher-same-run'}}
+        first, events = await invoke(graph, initial_with_hidden_tool(), config)
+        # Step 1: not requested yet, so not on the wire; only the text catalog
+        # (checked at the routing layer in test_msty_dispatcher.py) names it.
+        assert 'external_hidden' not in msty.tool_names(seen[0]['state']['tools'])
+        assert first.values['execution']['status'] == 'waiting_native'
+        pending = first.tasks[0].interrupts[0]
+        assert pending.value['type'] == 'msty_native_continue'
+
+        # The only thing that advances the graph here is the bridge's own
+        # gateway-admission resume (msty_native_continue -> msty_native_resume):
+        # no Command carries a new HumanMessage, and no owner input is read.
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        second, events = await invoke(graph, Command(resume={pending.id: {
+            **pending.value, 'type': 'msty_native_resume'}}), config)
+        assert len(seen) == 2
+        # Step 2, same thread/run, same owner turn: the requested schema is now
+        # a real tool the model can call directly.
+        assert 'external_hidden' in msty.tool_names(seen[1]['state']['tools'])
+        assert second.values['execution']['status'] == 'waiting_tools'
+    asyncio.run(run())
+
+
+def test_tool_beyond_routed_28_is_callable_same_run(monkeypatch):
+    """brain-desk 26.09 (owner: «доводи до конца»): with more schemas than the
+    router hands the model (MAX_SELECTED_TOOLS = 28), the 40th tool is not on
+    the first step's wire, but native_request_tools makes it a real schema on
+    the next model step of the same run and its call is dispatched there."""
+    from deep_agent import msty_tool_routing
+    monkeypatch.setenv('MSTY_TOOL_DISPATCHER', 'on')
+    filler = [{'type': 'function', 'function': {
+        'name': f'external_filler_{i:02d}',
+        'description': 'Read one synthetic external item.',
+        'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False}}}
+        for i in range(39)]
+    target = 'external_hidden'
+    seen = scripted(monkeypatch, [
+        answer('', [call('native_request_tools', {'names': [target]}, 'req-40')]),
+        answer('', [call(target, {}, 'hidden-40')]),
+        answer()])
+
+    async def run():
+        saver, store = InMemorySaver(), InMemoryStore()
+        data = initial()
+        data['tools'] = filler + [deepcopy(_HIDDEN_TOOL)]
+        assert len(data['tools']) == 40 > msty_tool_routing.MAX_SELECTED_TOOLS
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        config = {'configurable': {'thread_id': 'dispatcher-beyond-28'}}
+        first, _ = await invoke(graph, data, config)
+        first_names = msty.tool_names(seen[0]['state']['tools'])
+        assert target not in first_names
+        assert len([n for n in first_names if n.startswith('external_')]) <= \
+            msty_tool_routing.MAX_SELECTED_TOOLS
+        pending = first.tasks[0].interrupts[0]
+        assert pending.value['type'] == 'msty_native_continue'
+        graph = msty_native.build_graph(checkpointer=saver, store=store)
+        second, events = await invoke(graph, Command(resume={pending.id: {
+            **pending.value, 'type': 'msty_native_resume'}}), config)
+        assert len(seen) == 2
+        assert target in msty.tool_names(seen[1]['state']['tools'])
+        assert second.values['execution']['status'] == 'waiting_tools'
+        assert [c['name'] for c in events[0]['tool_calls']] == [target]
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('mode', ['limit', 'duplicate_todos'])
 def test_unsafe_batches_block_before_publication_or_execution(monkeypatch, mode):
     data = initial()
@@ -319,8 +409,9 @@ def test_existing_compaction_keeps_native_count_and_uses_own_resume_ticket(monke
             return {**msty.publish_result(summary, None),
                 'context_memory': {'version': 1, 'segments': []},
                 'compaction_stage': {'version': 1, 'status': 'ready', 'stage_id': 'summary-step',
-                    'source_sha256': 'a' * 64, 'summary_sha256': 'b' * 64}}
-        assert len(seen) == 3 and state['compaction_skip_once'] is True
+                    'source_sha256': 'a' * 64, 'summary_sha256': 'b' * 64},
+                'compaction_round': 1}
+        assert len(seen) == 3 and state['compaction_round'] == 1
         return msty.publish_result(answer(), None)
 
     monkeypatch.setattr(msty, '_respond_step', step)
@@ -349,6 +440,51 @@ def test_existing_compaction_keeps_native_count_and_uses_own_resume_ticket(monke
         assert final.values['execution']['harness_version'] == 'msty-native-v1'
         assert final.values['execution']['status'] == 'answered'
         assert not final.next
+    asyncio.run(run())
+
+
+def test_paid_compaction_counts_across_native_steps_of_one_request(monkeypatch):
+    # brain-desk #899: native tool steps are the same bridge request; after
+    # its one paid compaction the next steps must see round 1 (fit without a
+    # model), and only the request's final answer resets it.
+    seen = []
+
+    async def step(state, **kwargs):
+        seen.append(deepcopy(state))
+        if len(seen) == 1:
+            summary = answer('')
+            summary.response_metadata['msty_stage'] = 'compaction'
+            return {**msty.publish_result(summary, None),
+                'context_memory': {'version': 1, 'segments': []},
+                'compaction_stage': {'version': 1, 'status': 'ready', 'stage_id': 'paid-once',
+                    'source_sha256': 'a' * 64, 'summary_sha256': 'b' * 64},
+                'compaction_round': 1}
+        if len(seen) == 2:
+            assert state['compaction_round'] == 1
+            return msty.publish_result(answer('', [call('native_ls', {'path': '/'})]), None)
+        assert len(seen) == 3 and state['compaction_round'] == 1
+        return msty.publish_result(answer(), None)
+
+    monkeypatch.setattr(msty, '_respond_step', step)
+
+    async def run():
+        graph = msty_native.build_graph(checkpointer=InMemorySaver(), store=InMemoryStore())
+        config = {'configurable': {'thread_id': 'paid-once'}}
+        data = initial()
+        data['compaction_protocol'] = msty_compaction.PROTOCOL
+        first, _ = await invoke(graph, data, config)
+        compact = first.tasks[0].interrupts[0]
+        resume = {key: value for key, value in compact.value.items() if key != 'result_sha256'}
+        resume['type'] = 'msty_compaction_resume'
+        second, _ = await invoke(graph, Command(resume={compact.id: resume}), config)
+        assert second.values['execution']['status'] == 'waiting_native'
+        assert second.values['compaction_round'] == 1
+        ticket = second.tasks[0].interrupts[0]
+        final, _ = await invoke(graph, Command(resume={ticket.id: {
+            **ticket.value, 'type': 'msty_native_resume'}}), config)
+        assert final.values['execution']['status'] == 'answered'
+        assert final.values['compaction_round'] == 0
+        assert len(seen) == 3
     asyncio.run(run())
 
 
@@ -1052,6 +1188,16 @@ def test_tool_error_recovery_block_is_always_on_the_wire_and_reconciles_reuse():
     assert block in msty_prompts.select_policy(full, {'intent': 'direct', 'domains': []},
                                                ['list_tables'])
     reuse = next(b for b in msty.POLICY.split('\n\n') if b.startswith('MSTY_CONTEXT_REUSE_V1'))
-    assert 'кроме случая, когда инструмент отклонил этот id' in reuse
+    # brain-agency-audit-2026-09-26 #1: the two blocks now state one rule instead
+    # of contradicting each other — known/confirmed id reused directly, rejected/
+    # unknown id gets a fresh live check, worded the same way in both blocks.
+    assert 'id отклонён инструментом, неизвестен' in reuse
+    assert 'см. TOOL_ERROR_RECOVERY_V1' in reuse
+    assert 'MSTY_CONTEXT_REUSE_V1' in block.replace('\n', ' ')
+    # 26.09: one condition, same words in both blocks; no «исключение» riddle.
+    for text in (block, reuse):
+        flat = ' '.join(text.split())
+        assert 'только когда id' in flat
+        assert 'исключение' not in flat
     from deep_agent import msty_memory
     assert 'если инструмент отклонил\nproject_id — вызови list_projects' in msty_memory.system_context()

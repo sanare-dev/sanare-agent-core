@@ -9,8 +9,12 @@ https://api-docs.deepseek.com/guides/thinking_mode/
 https://github.com/openai/tiktoken/blob/main/tiktoken/model.py
 https://github.com/openai/tiktoken/blob/main/LICENSE
 
-Chat Completions is explicit. Luna reasoning=none and DeepSeek thinking=disabled
-are deliberate non-reasoning profiles, not configurable client overrides.
+Chat Completions is explicit for every profile except Luna. Luna alone uses the
+OpenAI Responses API (use_responses_api=True); reasoning.effort is chosen per
+task (msty_effort, owner order 2026-09-26; was fixed 'max' since #35), live-verified through the fixed LangSmith Gateway
+route to keep tool calling with maximum reasoning (Chat Completions only allows
+tools at effort='none' for this model). DeepSeek thinking=disabled remains a
+deliberate non-reasoning profile, not a configurable client override.
 
 For Sonnet, count_input uses the provider's exact counter. For text Luna, the
 official tiktoken mapping for the fixed model ID tokenizes the complete wire JSON;
@@ -50,7 +54,7 @@ from langchain_core.messages import (
     convert_to_openai_messages,
 )
 from langchain_openai import ChatOpenAI as _ChatOpenAI
-from deep_agent import msty_gateway
+from deep_agent import msty_effort, msty_gateway
 
 
 class ModelAdapterError(ValueError):
@@ -120,6 +124,12 @@ MAX_TOOLS = 256
 #: Completions: 128). A legacy path that binds every client schema is refused
 #: above it before any paid call instead of receiving a provider 400.
 MAX_MODEL_TOOLS = 128
+#: OpenAI Responses API hard floor (live-proven 2026-09-26: 400
+#: integer_below_min_value below this). Chat Completions has no such floor, so
+#: only the Responses-API luna profile needs the clamp; every other profile's
+#: requested max_tokens (as low as 1, e.g. a near-exhausted compaction budget)
+#: is passed through unchanged.
+RESPONSES_MIN_OUTPUT_TOKENS = 16
 
 
 def _profile(profile: str) -> Profile:
@@ -128,10 +138,75 @@ def _profile(profile: str) -> Profile:
     return PROFILES[profile]
 
 
-def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
+#: Per-task reasoning level -> the provider's own per-call value (owner order
+#: 2026-09-26: effort follows the task, see msty_effort). Only values documented
+#: for the fixed model are used. gpt-6-luna Responses API: none/low/medium/high/
+#: xhigh/max (developers.openai.com/api/docs/models/gpt-6-luna, 2026-09-26).
+#: Sol keeps the standard low/medium/high triad (its prior verified medium tier
+#: included); max is capped at high. Profiles absent here ignore the level:
+#: DeepSeek thinking=enabled needs every reasoning_content passed back in tool
+#: loops (else 400, api-docs.deepseek.com/guides/thinking_mode) and counts the
+#: chain of thought in max_tokens, which this adapter does not do; Anthropic
+#: extended thinking needs budget_tokens < max_tokens and thinking-block replay.
+#: Astra keeps its fixed minimal 'low'.
+EFFORT_VALUES = MappingProxyType({
+    'luna': MappingProxyType({'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'max'}),
+    'sol': MappingProxyType({'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'high'}),
+    'sol6': MappingProxyType({'low': 'low', 'medium': 'medium', 'high': 'high', 'max': 'high'}),
+})
+
+
+def effort_value(profile: str, level: str | None, max_tokens: int | None = None) -> str | None:
+    """The provider value sent for this level, or None when ignored.
+
+    With ``max_tokens`` the level first steps down to what fits that output
+    limit (msty_effort.fit): reasoning is spent inside the same limit.
+    """
+    _profile(profile)
+    if level is None:
+        level = msty_effort.DEFAULT_LEVEL
+    if level not in msty_effort.LEVELS:
+        raise ModelAdapterError('Недопустимый уровень рассуждения.')
+    values = EFFORT_VALUES.get(profile)
+    if values is None:
+        return None
+    return values[level if max_tokens is None else msty_effort.fit(level, max_tokens)]
+
+
+def effort_record(profile: str, choice: dict | None, max_tokens: int | None = None) -> dict:
+    """Response-metadata record of the chosen level and what was sent."""
+    choice = choice or {'version': 1, 'level': msty_effort.DEFAULT_LEVEL, 'reason': 'default'}
+    record = {**choice, 'profile': profile,
+              'provider_value': effort_value(profile, choice['level'], max_tokens)}
+    if max_tokens is not None and EFFORT_VALUES.get(profile) is not None:
+        applied = msty_effort.fit(choice['level'], max_tokens)
+        if applied != choice['level']:
+            record['applied_level'] = applied
+            record['output_limit'] = max_tokens
+    return record
+
+
+#: Provider output ceilings per call, reasoning included (Responses API:
+#: max_output_tokens "including reasoning tokens"). gpt-6-luna: 1,050,000
+#: context, 128,000 max output (developers.openai.com/api/docs/models/gpt-6-luna,
+#: checked 2026-09-28). Other profiles keep the rollout's 8192. The bridge's
+#: task binding still decides the actual limit of a stage; this is only the
+#: upper bound the graph accepts.
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+MAX_OUTPUT_TOKENS = MappingProxyType({'luna': 128000})
+
+
+def max_output(profile: str) -> int:
+    _profile(profile)
+    return MAX_OUTPUT_TOKENS.get(profile, DEFAULT_MAX_OUTPUT_TOKENS)
+
+
+def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096, effort: str | None = None,
+               reasoning_summary: bool = False):
     config = _profile(profile)
-    if type(max_tokens) is not int or not 1 <= max_tokens <= 8192:
+    if type(max_tokens) is not int or not 1 <= max_tokens <= max_output(profile):
         raise ModelAdapterError('Недопустимый предел ответа модели.')
+    reasoning = effort_value(profile, effort, max_tokens)
     # Explicit key + endpoint prevent generic SDK base-url environment overrides
     # from accidentally sending this provider's credential elsewhere.
     try:
@@ -155,10 +230,27 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096):
             raise ModelAdapterError('Клиент выбранного провайдера не создан.') from None
     options = dict(use_responses_api=False, stream_usage=False)
     if profile == 'luna':
-        options.update(reasoning_effort='none', store=False)
+        # gpt-6-luna: Chat Completions only allows function calling with
+        # reasoning_effort='none'; the Responses API supports tools at every
+        # reasoning tier (developers.openai.com/api/docs/models/gpt-6-luna).
+        # Live-verified 2026-09-26 through this exact LangSmith Gateway route
+        # (POST /openai/v1/responses, effort=max, one tool_call, 200 OK) before
+        # this switch. Since the same day's owner order the effort is per task
+        # (msty_effort.choose_effort), no longer fixed at max.
+        # Live-proven 2026-09-26: the Responses API rejects max_output_tokens
+        # below 16 (BadRequestError, integer_below_min_value); floor it so a
+        # near-exhausted output budget (e.g. compaction) still completes.
+        common['max_tokens'] = max(common['max_tokens'], RESPONSES_MIN_OUTPUT_TOKENS)
+        # reasoning_summary: the owner's window shows Luna's live reasoning
+        # summary (owner 28.09.2026). 'auto' = the provider's most detailed
+        # summarizer available for the model; it summarises reasoning already
+        # generated and billed, so it adds no reasoning of its own. Opt-in by
+        # the bridge (msty-reasoning-delta-v1); compaction and sub-agents stay off.
+        options.update(use_responses_api=True, store=False, reasoning={
+            'effort': reasoning, **({'summary': 'auto'} if reasoning_summary else {})})
     elif profile in ('sol', 'sol6'):
         # Sol 6 is admitted only as a bound analyst; never as a lead.
-        options.update(reasoning_effort='medium', store=False)
+        options.update(reasoning_effort=reasoning, store=False)
     elif profile == 'astra':
         # gpt-6-astra has no 'none' tier; 'low' is its minimal reasoning effort.
         options.update(reasoning_effort='low', store=False)
@@ -243,12 +335,37 @@ def _openai_content(message: BaseMessage):
         kind = block.get('type')
         copy = deepcopy(block)
         copy.pop('cache_control', None)
+        if kind == 'function_call' and isinstance(message, AIMessage):
+            # Luna's Responses API function_call output items (langchain_openai
+            # _construct_lc_result_from_responses_api) use OpenAI's own shape —
+            # call_id/name/arguments as a JSON string — not the Anthropic-style
+            # tool_use block (id/name/input dict) this history normally speaks
+            # and the rest of this function validates. Live-discovered
+            # 2026-09-26: replaying a tool-call turn after an interrupt/resume
+            # raised "этот блок истории нельзя безопасно перенести" because this
+            # shape fell through to the catch-all rejection below. Normalize it
+            # onto the existing tool_use path instead of adding a parallel one.
+            try:
+                arguments = (json.loads(block['arguments']) if isinstance(block.get('arguments'), str)
+                            else None)
+            except (TypeError, ValueError):
+                arguments = None
+            block = copy = {'type': 'tool_use', 'id': block.get('call_id'),
+                            'name': block.get('name'), 'input': arguments}
+            kind = 'tool_use'
         if kind == 'text' and isinstance(block.get('text'), str):
             blocks.append(copy)
         elif kind == 'thinking' and isinstance(message, AIMessage) and isinstance(block.get('thinking'), str):
             # Preserve historical text as assistant content; provider signatures
             # are not portable to Chat Completions. Never treat it as a new user.
             blocks.append({'type': 'text', 'text': block['thinking']})
+        elif kind == 'reasoning' and isinstance(message, AIMessage):
+            # Luna runs on the Responses API with store=False (#35): its reasoning
+            # items carry no replayable encrypted state, and the provider never
+            # accepts them back as input. They are the model's own scratchpad,
+            # not owner/tool content, so dropping them from replayed history is
+            # lossless for the conversation (OpenAI reasoning guide).
+            continue
         elif kind == 'tool_use' and isinstance(message, AIMessage):
             if (not isinstance(block.get('id'), str) or not block['id']
                     or not isinstance(block.get('name'), str) or not block['name']
@@ -433,6 +550,38 @@ def count_method(profile, messages):
             if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'image_url' for b in content):
                 return LUNA_IMAGE_COUNT_METHOD
     return COUNT_METHODS[profile]
+
+
+#: Chat Completions/Anthropic expose finish_reason/stop_reason directly; the
+#: OpenAI Responses API (luna, since 2026-09-26) has neither field at all —
+#: only a terminal `status`, plus `incomplete_details.reason` when truncated
+#: (langchain_openai _construct_lc_result_from_responses_api, live-verified).
+#: Unrecognized incomplete reasons fall back to 'length' (the conservative,
+#: blocking choice) rather than being silently treated as a clean finish.
+RESPONSES_INCOMPLETE_REASON = MappingProxyType({'max_output_tokens': 'length', 'content_filter': 'content_filter'})
+
+
+def finish_reason(metadata):
+    """Terminal reason across both wire shapes, or None if truly unknown.
+
+    Every safety gate that used to read
+    `metadata.get('stop_reason', metadata.get('finish_reason'))` directly must
+    use this instead, or it stops seeing luna's truncation/refusal state under
+    the Responses API (status is never 'max_tokens'/'length'/etc.).
+    """
+    if not isinstance(metadata, dict):
+        return None
+    reason = metadata.get('stop_reason', metadata.get('finish_reason'))
+    if reason is not None:
+        return reason
+    status = metadata.get('status')
+    if status == 'completed':
+        return 'stop'
+    if status == 'incomplete':
+        details = metadata.get('incomplete_details')
+        code = details.get('reason') if isinstance(details, dict) else None
+        return RESPONSES_INCOMPLETE_REASON.get(code, 'length')
+    return None
 
 
 def checked_usage(profile: str, result: AIMessage):

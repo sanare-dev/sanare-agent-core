@@ -596,7 +596,7 @@ class Provider:
 def real_lead(monkeypatch, profile, sequence):
     provider = Provider(profile, sequence)
 
-    def make(name, max_tokens):
+    def make(name, max_tokens, effort=None):
         assert name == profile, 'лид вызван не своим профилем'
         return provider
     monkeypatch.setattr(msty.msty_models, 'make_model', make)

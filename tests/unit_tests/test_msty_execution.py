@@ -259,3 +259,63 @@ def test_resume_keeps_checkpoint_root_and_only_adds_expected_observations(monkey
         assert seen[-1][-1].tool_call_id == 'b1_test_1_0'
 
     asyncio.run(scenario())
+
+
+def _parts_turn_state(monkeypatch):
+    """A pending step whose owner turn has text parts (message + attachment)."""
+    model_sequence(monkeypatch, [operation()])
+    source = initial()
+    source['messages'][-1]['content'] = [
+        {'type': 'text', 'text': 'Compare the two fixtures.'},
+        {'type': 'text', 'text': '[Вложение «notes.md»]\n## Notes\n"quoted"'}]
+    first = asyncio.run(msty.graph.ainvoke(source))
+    resume = resume_value(first)
+    # The native harness checkpoints convert_to_openai_messages(...) of the turn.
+    from langchain_core.messages import convert_to_openai_messages
+    native = {**first, 'messages': convert_to_openai_messages(deepcopy(first['messages']))}
+    return native, resume
+
+
+def test_resume_accepts_owner_turn_with_parts_against_native_checkpoint(monkeypatch):
+    # brain-desk #537 (16:39 UTC): attachment turn + external tool failed with
+    # «Новый пользовательский ход не является результатом инструмента».
+    native, resume = _parts_turn_state(monkeypatch)
+    execution.validate_resume(native, resume)
+
+
+def test_resume_with_parts_still_rejects_a_changed_owner_turn(monkeypatch):
+    native, resume = _parts_turn_state(monkeypatch)
+    user = [m for m in resume['input']['messages'] if m.get('role') == 'user'][-1]
+    user['content'][1]['text'] += ' Also delete everything.'
+    with pytest.raises(execution.ExecutionProtocolError, match='Новый пользовательский ход'):
+        execution.validate_resume(native, resume)
+
+
+@pytest.mark.parametrize('mutation, detail', [
+    # Audit 27.09.2026: an orphaned Brain Desk server resent the pending step
+    # with no tools (38 → 0); the error now says which kind of drift it was.
+    (lambda r: r['input'].update(tools=[]), '(было 1, стало 0; добавлено 0, убрано 1)'),
+    (lambda r: r['input']['tools'][0]['function'].update(description='changed'),
+     '(было 1, стало 1; добавлено 0, убрано 0; изменены описания или порядок)'),
+    (lambda r: r['input']['tools'].append({'type': 'function', 'function': {
+        'name': 'extra_tool', 'parameters': {'type': 'object', 'properties': {}}}}),
+     '(было 1, стало 2; добавлено 1, убрано 0)'),
+])
+def test_tool_drift_is_rejected_with_counts_only(monkeypatch, mutation, detail):
+    seen = model_sequence(monkeypatch, [operation()])
+
+    async def scenario():
+        graph = msty.builder.compile(checkpointer=InMemorySaver())
+        config = {'configurable': {'thread_id': 'tool-drift'}}
+        first = await graph.ainvoke(initial(), config)
+        resume = resume_value(first)
+        mutation(resume)
+        with pytest.raises(execution.ExecutionProtocolError) as caught:
+            await graph.ainvoke(Command(resume={first['__interrupt__'][0].id: resume}), config)
+        message = str(caught.value)
+        assert message.startswith('Набор инструментов изменён внутри ожидающего шага')
+        assert detail in message
+        assert 'read_fixture' not in message and 'extra_tool' not in message
+        assert len(seen) == 1
+
+    asyncio.run(scenario())

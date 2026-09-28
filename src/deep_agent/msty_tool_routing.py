@@ -17,6 +17,17 @@ from . import msty_registry, msty_semantic
 
 
 ROUTE_VERSION = 2
+# brain-agency-audit-2026-09-26 #2: kept at 28, not raised to 40-60. The real
+# friction the audit found was never the cap itself — it is that a tool
+# outside it used to read as a one-turn-late "ask and wait for the owner"
+# protocol. test_requested_tool_becomes_visible_same_run_no_new_owner_message
+# (test_msty_native.py) proves that is not how it works: native_request_tools
+# is a server-executed tool gated by the same gateway-admission resume as any
+# other native call, so a requested schema is on the wire on the NEXT model
+# step of the SAME run, with no fresh owner message in between. Given that,
+# raising the cap would add schema tokens to every step (routed or not) for a
+# latency that is already zero at the turn level — pure cost, no benefit. Stays
+# well under MAX_MODEL_TOOLS (128, the provider's per-call function limit).
 MAX_SELECTED_TOOLS = 28
 
 # fullmatch against a fixed list meant that any extra word broke it: "Делай, не
@@ -208,6 +219,18 @@ _JOB_BUNDLES: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
     (re.compile(r"(?i)\bcodex-[0-9a-f]{8,32}\b"), frozenset({"msty_codex_status", "msty_codex_cancel"})),
     (re.compile(r"(?i)\bworker-[0-9a-f]{8,32}\b"), frozenset(_WORKER)),
     (re.compile(r"(?i)\bbrain-[0-9a-f]{8,32}\b"), frozenset(_BRAIN_JOB)),
+    # A removed/deleted window session (the provider's own "rs_<hex>" response
+    # id) is named the same bare way as any other job id ("что с rs_...",
+    # "восстанови rs_..."), with no verb this router knows and no domain word.
+    # Before this entry such a turn fell through to intent=direct with zero
+    # selected tools AND catalog=False (live defect 2026-09-25: new window
+    # tools for removed sessions arrived with no bundle here, so the model got
+    # nothing to work with and no catalog escape hatch to self-request the
+    # actual tool by name). Route it like every other job id: promote to
+    # "read" and hand the core resolvers so the model can look the session up
+    # and, via the now-visible catalog, request whatever removed-session tool
+    # the client actually supplied.
+    (re.compile(r"(?i)\brs_[0-9a-f]{6,64}\b"), frozenset(_CORE_READ)),
 )
 # Установленные операции коннекторов, сознательно не входящие в маршрут по
 # умолчанию (группа known_only манифеста): выбираются точным именем, но не
@@ -229,6 +252,16 @@ _WINDOW_TOOLS = frozenset({"connector_search", "connector_propose"})
 # keeps it whatever the words or the continuation route.
 _TASK_MODE_TOOLS = frozenset({"brain_task_plan", "brain_task_check", "brain_task_ask",
                               "brain_task_finish", "brain_task_save", "brain_task_spawn"})
+
+# Brain Desk Service API (brain-desk #650/#734/#862): three small tools that
+# work as a set — service_list names what is missing (account, a key saved
+# under another id → adoptable_secret_ids) and service_configure fixes it.
+# Live 28.09 (thread a6dd00e8, «подключи InvoiceXpress из сохранённого
+# ключа»): the words matched none of them, the window's 160 schemas reached
+# the graph but only the catalog carried them, and Brain answered
+# «service_configure отсутствует». Like the org tools, they are handed over on
+# every working Brain Desk turn and never truncated away.
+_SERVICE_TOOLS = frozenset({"service_list", "service_call", "service_configure"})
 # Remote Windows servers over the window's SSH connector (ssh-mcp, brain-desk
 # #343): live 24.09 «подключись и реши вопрос» about Crin-Barbu got no SSH
 # schemas — the router had no remote domain, and the owner's short follow-up
@@ -415,8 +448,8 @@ def _route_prompt(route: dict) -> str:
     prompt = (
         f"MSTY_DYNAMIC_ROUTE_V1: intent={route['intent']}; domains={domains}; "
         f"visible_external_tools={route['selected_count']}. Маршрут, предметный контекст и "
-        "инструменты этого шага выбраны автоматически. Не проси владельца выбирать Project, "
-        "Toolset, skill или специальный prompt. Для обычного вопроса отвечай прямо из уже "
+        "инструменты этого шага выбраны автоматически. Не проси владельца выбирать проект, "
+        "набор инструментов, skill или специальный prompt. Для обычного вопроса отвечай прямо из уже "
         "загруженной памяти; для действия используй видимый узкий инструмент и продолжай до "
         "проверенного результата."
     )
@@ -569,7 +602,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         chosen = {item for item in prior_route.get("selected_names", []) if item in available}
         source = "continued"
         if _from_brain_desk(messages):
-            chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
+            chosen.update((_WINDOW_TOOLS | _SERVICE_TOOLS | _WEB) & available.keys())
             chosen.discard("msty_project_resolve")
             if _REMOTE.search(_recent_user_text(messages)):
                 chosen.update(_SSH_TOOLS & available.keys())
@@ -621,7 +654,7 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         if intent != "direct":
             chosen.update(_ORG_TOOLS & available.keys())
             if _from_brain_desk(messages):
-                chosen.update((_WINDOW_TOOLS | _WEB) & available.keys())
+                chosen.update((_WINDOW_TOOLS | _SERVICE_TOOLS | _WEB) & available.keys())
                 chosen.discard("msty_project_resolve")
                 if _REMOTE.search(_recent_user_text(messages)):
                     chosen.update(_SSH_TOOLS & available.keys())
@@ -708,6 +741,10 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
             if use_codex:
                 explicit_names = {name for name in chosen if name.lower() in lowered}
                 chosen = explicit_names | _CODEX
+                # «Подключи InvoiceXpress и проверь» is a service setup, not a
+                # Codex job on the Mac: the window's Service API set stays.
+                if _from_brain_desk(messages):
+                    chosen.update(_SERVICE_TOOLS & available.keys())
 
             # Generic future connectors get a small lexical projection. Known
             # connectors stay policy-routed above, avoiding broad "project" hits.
@@ -784,7 +821,8 @@ def select_tools(messages: list[Any], tools: list[dict], *, prior_route: dict | 
         chosen = historical
 
     protected = (historical | required | requested | (_ORG_TOOLS & chosen) | (skill_open & chosen)
-                 | (task_mode & chosen))
+                 | (task_mode & chosen)
+                 | ((_SERVICE_TOOLS & chosen) if _from_brain_desk(messages) else set()))
     ordered = [name for name in available if name in chosen]
     if len(ordered) > MAX_SELECTED_TOOLS:
         keep = [name for name in ordered if name in protected]

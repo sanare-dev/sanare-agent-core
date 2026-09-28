@@ -40,7 +40,8 @@ def test_access_answers_policy_present_with_and_without_tools():
         assert 'своими credentials' in policy
         assert 'не чтением\nхранилища' in policy
         assert 'оправдание' in policy
-        assert 'пересохранить тулсет' in policy
+        assert 'connector_search/connector_propose' in policy
+        assert 'тулсет' not in policy and 'Msty' not in policy.replace('MSTY', '')
 
 
 def test_continuous_improvement_promotes_only_repeated_verified_work():
@@ -88,7 +89,7 @@ def test_lazy_mcp_discovery_splits_composite_queries_and_continues():
     assert 'вызови describe_tool, затем' in policy
     assert 'сразу используй execute_tool' in policy
     assert 'объединяй в один batch' in policy
-    assert 'Не проси включить Toolset' in policy
+    assert 'Не проси владельца что-то включать' in policy
 
 
 def test_no_tools_policy_is_explicit_and_does_not_advertise_supervisor():

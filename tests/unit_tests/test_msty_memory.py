@@ -52,7 +52,7 @@ def fake_model(monkeypatch):
             return AIMessage(content='Synthetic direct answer.', usage_metadata={
                 'input_tokens': 100, 'output_tokens': 4, 'total_tokens': 104})
 
-    def construct(profile, output_limit):
+    def construct(profile, output_limit, effort=None):
         seen['created'].append((profile, output_limit))
         return Model()
 

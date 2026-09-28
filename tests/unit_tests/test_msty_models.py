@@ -38,9 +38,9 @@ def test_fixed_model_endpoint_and_no_retries(profile, model, endpoint, monkeypat
     assert obj.anthropic_api_url == endpoint if profile == 'sonnet' else obj.openai_api_base == endpoint
     assert obj.temperature is None
     if profile != 'sonnet':
-        assert obj.use_responses_api is False
+        assert obj.use_responses_api is (profile == 'luna')
     if profile == 'luna':
-        assert obj.reasoning_effort == 'none'
+        assert obj.reasoning == {'effort': 'low'}  # default medium, stepped down to fit 123 output tokens
     if profile == 'deepseek':
         assert obj.extra_body == {'thinking': {'type': 'disabled'}, 'max_tokens': 123}
 
@@ -52,10 +52,49 @@ def test_unknown_profile_rejected_without_sdk(profile, monkeypatch):
         adapter.make_model(profile)
 
 
-@pytest.mark.parametrize('limit', [0, -1, 8193, True, 2.5, '200'])
+@pytest.mark.parametrize('limit', [0, -1, 128001, True, 2.5, '200'])
 def test_output_bound_is_strict(limit):
     with pytest.raises(adapter.ModelAdapterError):
         adapter.make_model('luna', limit)
+
+
+def test_output_ceiling_is_per_profile():
+    # gpt-6-luna documents 128,000 max output (reasoning included); the rest
+    # keep the rollout's 8192.
+    assert adapter.max_output('luna') == 128000
+    assert adapter.max_output('deepseek') == adapter.max_output('sonnet') == 8192
+    with pytest.raises(adapter.ModelAdapterError):
+        adapter.make_model('deepseek', 8193)
+
+
+@pytest.mark.parametrize('requested', [1, 8, 15, 16, 40])
+def test_luna_output_floor_matches_responses_api_minimum(requested, monkeypatch):
+    """Live-proven 2026-09-26: Responses API rejects max_output_tokens<16
+    (BadRequestError, integer_below_min_value) — a near-exhausted output budget
+    (e.g. compaction) must still floor up to it, never fail the call outright."""
+    monkeypatch.setenv('OPENAI_BASE_URL', 'https://not-a-provider.invalid')
+    obj = adapter.make_model('luna', requested)
+    assert obj.max_tokens == max(requested, adapter.RESPONSES_MIN_OUTPUT_TOKENS)
+
+
+@pytest.mark.parametrize('metadata,expected', [
+    ({'finish_reason': 'stop'}, 'stop'),
+    ({'stop_reason': 'end_turn'}, 'end_turn'),
+    # gpt-6-luna via the Responses API: no finish_reason/stop_reason field at
+    # all (langchain_openai _construct_lc_result_from_responses_api). Every
+    # safety gate that used to read those two keys directly now needs this
+    # instead, or it stops seeing luna's truncation/refusal state entirely.
+    ({'status': 'completed'}, 'stop'),
+    ({'status': 'incomplete'}, 'length'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'}}, 'length'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'content_filter'}}, 'content_filter'),
+    ({'status': 'incomplete', 'incomplete_details': {'reason': 'something_new'}}, 'length'),
+    ({'status': 'failed'}, None),
+    ({}, None),
+    (None, None),
+])
+def test_finish_reason_bridges_chat_completions_and_responses_api(metadata, expected):
+    assert adapter.finish_reason(metadata) == expected
 
 
 def test_missing_provider_key_never_falls_back(monkeypatch):
@@ -331,6 +370,16 @@ def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeyp
     captured = []
     def handler(request):
         captured.append((str(request.url), json.loads(request.content)))
+        if profile == 'luna':
+            # gpt-6-luna: OpenAI Responses API wire (use_responses_api=True).
+            return httpx.Response(200, json={'id': 'synthetic', 'object': 'response', 'created_at': 1,
+                'status': 'completed', 'model': adapter.PROFILES[profile].model,
+                'output': [{'type': 'message', 'id': 'msg_1', 'role': 'assistant', 'status': 'completed',
+                            'content': [{'type': 'output_text', 'text': '17', 'annotations': []}]}],
+                'parallel_tool_calls': True, 'tool_choice': 'none', 'tools': [],
+                'top_p': 1.0, 'temperature': 1.0,
+                'usage': {'input_tokens': 55, 'output_tokens': 2, 'total_tokens': 57,
+                          'input_tokens_details': {'cached_tokens': 20}}})
         return httpx.Response(200, json={'id': 'synthetic', 'object': 'chat.completion', 'created': 1,
             'model': adapter.PROFILES[profile].model,
             'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': '17'}}],
@@ -354,19 +403,32 @@ def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeyp
     result = adapter.stamp_usage(profile, asyncio.run(execute()))
     assert len(captured) == 1
     url, payload = captured[0]
+    if profile == 'luna':
+        assert url == adapter.PROFILES[profile].endpoint + '/responses'
+        assert payload['model'] == adapter.PROFILES[profile].model
+        assert payload['tool_choice'] == 'none'
+        assert payload['tools'] == [{'type': 'function', 'name': 'read_fixture', 'parameters':
+            TOOLS[0]['function']['parameters']}]
+        assert payload['input'][2] == {'type': 'function_call', 'name': 'read_fixture',
+            'arguments': '{"path": "/synthetic/a"}', 'call_id': 'a'}
+        assert payload['input'][3] == {'type': 'function_call_output', 'output': '17', 'call_id': 'a'}
+        assert payload['reasoning'] == {'effort': 'low'} and payload['max_output_tokens'] == 40
+        assert payload['store'] is False
+        assert 'reasoning_effort' not in payload and 'thinking' not in payload
+        assert 'temperature' not in payload
+        assert result.usage_metadata is not None
+        assert result.usage_metadata['input_token_details']['cache_read'] == 20
+        assert result.usage_metadata['input_tokens'] == 55
+        return
     assert url == adapter.PROFILES[profile].endpoint + '/chat/completions'
     assert payload['model'] == adapter.PROFILES[profile].model
     assert payload['tool_choice'] == 'none' and payload['tools'] == TOOLS
     assert payload['messages'][1]['tool_calls'][0]['id'] == 'a'
     assert payload['messages'][2]['content'] == '17'
     assert 'temperature' not in payload
-    if profile == 'luna':
-        assert payload['reasoning_effort'] == 'none' and payload['max_completion_tokens'] == 40
-        assert 'thinking' not in payload
-    else:
-        assert payload['thinking'] == {'type': 'disabled'} and payload['max_tokens'] == 40
-        assert 'max_completion_tokens' not in payload
-        assert 'reasoning_effort' not in payload
+    assert payload['thinking'] == {'type': 'disabled'} and payload['max_tokens'] == 40
+    assert 'max_completion_tokens' not in payload
+    assert 'reasoning_effort' not in payload
     assert result.usage_metadata is not None, result.response_metadata.get('token_usage')
     assert result.usage_metadata['input_token_details']['cache_read'] == 20
     assert result.usage_metadata['input_tokens'] == 55
@@ -385,3 +447,41 @@ def test_pricing_version_and_luna_model_match_bridge_when_available():
     luna = re.search(r"'luna': \{'model': '([^']+)'", text).group(1)
     assert version == msty_execution.PRICING_VERSION
     assert luna == adapter.PROFILES['luna'].model
+
+
+def test_luna_responses_reasoning_blocks_are_dropped_from_replayed_history():
+    # Live 26.09: after the Responses API switch (#35) the next step failed with
+    # «Этот блок истории нельзя безопасно перенести…» on Luna's own reasoning item.
+    from langchain_core.messages import AIMessage
+    from deep_agent import msty_models
+    msg = AIMessage(content=[{'type': 'reasoning', 'id': 'rs_1', 'summary': []},
+                             {'type': 'text', 'text': 'готово'}])
+    assert msty_models._openai_content(msg).content == [{'type': 'text', 'text': 'готово'}]
+
+
+def test_luna_responses_function_call_blocks_replay_as_tool_use():
+    # Live 26.09 (after the finish_reason fix, #38): approving a Luna tool call
+    # and resuming raised the same "этот блок истории нельзя безопасно
+    # перенести" on the model's OWN function_call output item — the Responses
+    # API's call_id/name/arguments(JSON string) shape
+    # (langchain_openai._construct_lc_result_from_responses_api), never
+    # recognized as the Anthropic-style tool_use (id/name/input dict) this
+    # history validator expects.
+    from langchain_core.messages import AIMessage
+    from deep_agent import msty_models
+    msg = AIMessage(content=[{'type': 'function_call', 'id': 'fc_1', 'call_id': 'call_1',
+                              'name': 'fetch', 'arguments': '{"url": "https://x.invalid"}',
+                              'status': 'completed'}],
+                    tool_calls=[{'type': 'tool_call', 'name': 'fetch',
+                                 'args': {'url': 'https://x.invalid'}, 'id': 'call_1'}])
+    assert msty_models._openai_content(msg).content == [{'type': 'tool_use', 'id': 'call_1',
+        'name': 'fetch', 'input': {'url': 'https://x.invalid'}}]
+
+
+def test_luna_responses_malformed_function_call_is_rejected_not_dropped():
+    from langchain_core.messages import AIMessage
+    from deep_agent import msty_models
+    msg = AIMessage(content=[{'type': 'function_call', 'call_id': 'call_1', 'name': 'fetch',
+                              'arguments': 'not-json'}])
+    with pytest.raises(msty_models.ModelAdapterError, match='Некорректный исторический вызов'):
+        msty_models._openai_content(msg)
