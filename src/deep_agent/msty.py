@@ -544,9 +544,6 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         compaction_enabled = msty_compaction.enabled(state)
         if compaction_enabled and not msty_execution.enabled(state):
             raise msty_execution.ExecutionProtocolError('Сжатие требует checkpoint-протокола Msty.')
-        messages = convert_to_messages(msty_compaction.project_messages(state))
-        if policy_fallback is not None:
-            messages = _without_images(messages)
         profile = selected_profile(state)
         consultations = consultation_count(state)
         cap = 2048 if state.get('brain_task_role') == 'analyst' else msty_models.max_output(profile)
@@ -584,35 +581,38 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                        'если вопрос о картинке, прямо скажи, что её не видно, и попроси описать текстом. '
                        'Если отвечаешь текстом, начни с одной строки: «↪ Ответ резервной модели DeepSeek: '
                        'основная модель OpenAI отклонила запрос фильтром своей политики.»')
-        full_messages = [SystemMessage(content=policy), *messages]
-        full_messages = (cache_system_prefix(full_messages, tools) if profile == 'sonnet'
-                         else msty_models.prepare_messages(profile, full_messages, tools))
+        def assemble(projected):
+            messages = convert_to_messages(projected)
+            if policy_fallback is not None:
+                messages = _without_images(messages)
+            full = [SystemMessage(content=policy), *messages]
+            return (cache_system_prefix(full, tools) if profile == 'sonnet'
+                    else msty_models.prepare_messages(profile, full, tools))
+        full_messages = assemble(msty_compaction.project_messages(state))
     except (msty_models.ModelAdapterError, msty_models.msty_gateway.GatewayConfigurationError,
             msty_execution.ExecutionProtocolError) as error:
         return rejected_context_budget(str(error), state=state)
     # Byte size is only the preflight trigger, never a tokenizer estimate.
     # Count the exact complete messages and schemas used for generation below.
-    input_bytes = len(json.dumps({'messages': [m.model_dump(mode='json') for m in full_messages],
-                                 'tools': tools}, ensure_ascii=False).encode('utf-8'))
-    budget_check = None
-    protocol = state.get('context_budget')
-    if protocol not in (None, CONTEXT_BUDGET_PROTOCOL, MODEL_BUDGET_PROTOCOL):
-        return rejected_context_budget(
-            'Генерация не запущена: неподдерживаемая версия проверки контекста. '
-            'Сообщения и инструкции не сокращались.', state=state)
-    if protocol is not None or state.get('task_budget_binding') is not None or input_bytes > COUNT_TRIGGER_BYTES:
+    def wire_bytes(full):
+        return len(json.dumps({'messages': [m.model_dump(mode='json') for m in full],
+                               'tools': tools}, ensure_ascii=False).encode('utf-8'))
+
+    async def count_tokens(full):
+        """Exact count, or a rejection dict (never raises provider details)."""
         try:
             if profile == 'sonnet':
                 count_options = {'timeout': COUNT_TIMEOUT_SECONDS}
-                formatted_system, _ = _format_messages(full_messages)
+                formatted_system, _ = _format_messages(full)
                 if isinstance(formatted_system, list):
                     count_options['system'] = formatted_system
-                tokens = await asyncio.to_thread(
-                    model.get_num_tokens_from_messages, full_messages, tools=tools, **count_options)
+                counted = await asyncio.to_thread(
+                    model.get_num_tokens_from_messages, full, tools=tools, **count_options)
             else:
-                tokens = await msty_models.count_input(profile, model, full_messages, tools)
-            if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+                counted = await msty_models.count_input(profile, model, full, tools)
+            if isinstance(counted, bool) or not isinstance(counted, int) or counted < 0:
                 raise ValueError('Invalid token count')
+            return counted
         except msty_models.ModelAdapterError as error:
             return rejected_context_budget(str(error), state=state)
         except Exception:
@@ -621,22 +621,34 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             return rejected_context_budget(
                 'Генерация не запущена: проверка размера контекста не завершилась. '
                 'Контекст сохранён без обрезки; требуется восстановить проверку его размера.', state=state)
+
+    input_bytes = wire_bytes(full_messages)
+    budget_check = None
+    memory_update = None
+    protocol = state.get('context_budget')
+    if protocol not in (None, CONTEXT_BUDGET_PROTOCOL, MODEL_BUDGET_PROTOCOL):
+        return rejected_context_budget(
+            'Генерация не запущена: неподдерживаемая версия проверки контекста. '
+            'Сообщения и инструкции не сокращались.', state=state)
+    if protocol is not None or state.get('task_budget_binding') is not None or input_bytes > COUNT_TRIGGER_BYTES:
+        tokens = await count_tokens(full_messages)
+        if isinstance(tokens, dict):
+            return tokens
+        limit = msty_execution.input_limit(state)
         compaction_round = state.get('compaction_round', 0)
         if (compaction_enabled and compaction_round is not None and
                 tokens >= msty_compaction.TRIGGER_TOKENS):
             plan = msty_compaction.make_plan(state)
-            if plan is not None:
-                if compaction_round < msty_compaction.MAX_COMPACTIONS_PER_TURN:
-                    return await _compact_step(state, profile, output_limit, policy, plan, compaction_round + 1)
-                # Cap reached and compaction is still needed: decline gracefully
-                # instead of running a still-oversized turn. No charge, no crash;
-                # the rounds already paid and archived this turn stay intact.
-                return rejected_context_budget(
-                    'Генерация не запущена: этому ходу потребовалось больше '
-                    f'{msty_compaction.MAX_COMPACTIONS_PER_TURN} сжатий контекста подряд. '
-                    'Уже выполненные сжатия сохранены; новый запрос продолжит с этого места.',
-                    tokens, state=state)
-        limit = msty_execution.input_limit(state)
+            if plan is not None and compaction_round < msty_compaction.MAX_COMPACTIONS_PER_TURN:
+                return await _compact_step(state, profile, output_limit, policy, plan, compaction_round + 1)
+            # brain-desk #899: no second paid summary in this request and no
+            # refusal. Fit deterministically (no model call), then generate
+            # while the input is within the admitted limit.
+            fitted = await _fit_without_model(state, tokens, input_bytes, limit, assemble,
+                                              wire_bytes, count_tokens)
+            if isinstance(fitted, dict) and 'result' in fitted:
+                return fitted
+            full_messages, tokens, memory_update = fitted
         if tokens > limit:
             return rejected_context_budget(
                 f'Генерация не запущена: входной контекст превышает безопасный лимит '
@@ -794,7 +806,61 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             **result.response_metadata, POLICY_FALLBACK_KEY: dict(policy_fallback)}})
     if stream:
         stream.finish(result)
-    return publish_result(result, budget_check)
+    published = publish_result(result, budget_check)
+    if memory_update is not None:
+        # Deterministic segments of this step persist, so the next step or
+        # request does not redo (or pay for) the same compaction.
+        published['context_memory'] = memory_update
+    return published
+
+
+FIT_ATTEMPTS = 3
+
+
+async def _fit_without_model(state, tokens, input_bytes, limit, assemble, wire_bytes, count_tokens):
+    """Deterministic fit after the one paid pass (brain-desk #899).
+
+    1. mechanical_fit: old tool runs → verbatim extracts, old summaries →
+       shorter ones, aiming below TARGET_SHARE of the trigger (persisted).
+    2. Only while the input still exceeds the admitted limit: fit_projection
+       drops the oldest turns / clips the largest tool results for this
+       generation only (never persisted, never owner text).
+    Each attempt re-counts exactly; counting is not generation. Returns
+    (full_messages, tokens, context_memory|None) or a rejection dict.
+    """
+    ratio = input_bytes / max(tokens, 1)
+    work = state
+    memory_update = None
+    full_messages = None
+    target = int(msty_compaction.TRIGGER_TOKENS * msty_compaction.TARGET_SHARE)
+    try:
+        memory, _ = msty_compaction.mechanical_fit(work, int((tokens - target) * ratio * 1.15) + 1)
+    except msty_execution.ExecutionProtocolError as error:
+        return rejected_context_budget(str(error), state=state)
+    if memory is not None:
+        memory_update = memory
+        work = {**state, 'context_memory': memory}
+        full_messages = assemble(msty_compaction.project_messages(work))
+        tokens = await count_tokens(full_messages)
+        if isinstance(tokens, dict):
+            return tokens
+    projected = msty_compaction.project_messages(work)
+    for attempt in range(FIT_ATTEMPTS):
+        if tokens <= limit:
+            break
+        target = int(limit * msty_compaction.TARGET_SHARE)
+        need = int((tokens - target) * ratio * 1.15 * (attempt + 1)) + 1
+        projected, saved = msty_compaction.fit_projection(projected, need)
+        if saved <= 0:
+            break  # nothing left to drop or clip: an honest limit refusal follows
+        full_messages = assemble(projected)
+        tokens = await count_tokens(full_messages)
+        if isinstance(tokens, dict):
+            return tokens
+        ratio = wire_bytes(full_messages) / max(tokens, 1)
+    if full_messages is None:
+        full_messages = assemble(projected)
+    return full_messages, tokens, memory_update
 
 
 async def _compact_step(state, profile, output_limit, policy, plan, round_number):

@@ -275,104 +275,127 @@ def multi_cluster_history(clusters):
     return state
 
 
-def test_two_compaction_rounds_in_one_request_use_distinct_stages(monkeypatch):
-    # Owner decision 25.09.2026: one huge upload can need more than one summary
-    # pass before the lead can answer. Two isolated oversized clusters must each
-    # get their own stage_id/source_sha256, resumed back to back, no crash.
-    state = multi_cluster_history(2)
+def test_one_paid_pass_then_deterministic_fit_answers_without_refusal(monkeypatch):
+    # brain-desk #899 (live 28.09, thread a6dd00e8): three paid summary rounds
+    # in one request (313K tokens) and then «больше 3 сжатий» instead of an
+    # answer. Now: one paid pass, the rest is fitted without a model call and
+    # the same request answers.
+    state = multi_cluster_history(4)
+    originals = deepcopy(state['messages'])
     responses, counts = [summary(state)], [190000, 500]
     seen = install(monkeypatch, responses, counts)
     async def scenario():
         graph = msty.builder.compile(checkpointer=InMemorySaver())
-        cfg = {'configurable': {'thread_id': 'two-rounds'}}
+        cfg = {'configurable': {'thread_id': 'one-paid-pass'}}
         first = await graph.ainvoke(state, cfg)
         assert first['execution']['status'] == 'waiting_compaction'
         assert first['compaction_round'] == 1
-        stage1 = first['compaction_stage']
-        responses.append(summary(first))
-        counts.extend([190000, 500])
+        responses.append('Finished after one paid pass.')
+        # still above the trigger after the paid pass → mechanical fit → recount
+        counts.extend([179000, 70000])
         second = await graph.ainvoke(
             Command(resume={first['__interrupt__'][0].id: resume(first)}), cfg)
-        assert second['execution']['status'] == 'waiting_compaction'
-        assert second['compaction_round'] == 2
-        stage2 = second['compaction_stage']
-        # Each round is its own stage: distinct id and distinct compacted source.
-        assert stage1['stage_id'] != stage2['stage_id']
-        assert stage1['source_sha256'] != stage2['source_sha256']
-        assert len(second['context_memory']['segments']) == 2
-        responses.append('Finished after two compactions.')
-        counts.append(90000)
-        third = await graph.ainvoke(
-            Command(resume={second['__interrupt__'][0].id: resume(second)}), cfg)
-        assert third['execution']['status'] == 'answered'
-        assert third['compaction_round'] == 0
-        assert third['result']['content'] == 'Finished after two compactions.'
-        assert not third.get('__interrupt__')
-        assert len(seen['requests']) == 3
+        assert second['execution']['status'] == 'answered'
+        assert second['result']['content'] == 'Finished after one paid pass.'
+        assert second['compaction_round'] == 0
+        assert not second.get('__interrupt__')
+        assert len(seen['requests']) == 2  # one summary + one answer, nothing else paid
+        assert second['context_budget_check']['input_tokens'] == 70000
+        segments = second['context_memory']['segments']
+        assert len(segments) == 4
+        assert sum(s['summary'].startswith('[Механическая выжимка: сжатие без вызова модели')
+                   for s in segments) == 3
+        assert compact.make_plan(second) is None
+        assert second['messages'] == originals
+        # the answering request saw the extracts, never the archived raw bundles
+        answered = seen['requests'][-1]
+        assert not any(('Untrusted fixture. ' * 100) in str(m.content) for m in answered)
+        assert [m.content for m in answered if m.type == 'human'][-1] == originals[-5]['content']
     asyncio.run(scenario())
 
 
-def test_three_compaction_rounds_in_one_request_then_real_answer(monkeypatch):
-    state = multi_cluster_history(3)
-    responses, counts = [summary(state)], [190000, 500]
-    seen = install(monkeypatch, responses, counts)
-    async def scenario():
-        graph = msty.builder.compile(checkpointer=InMemorySaver())
-        cfg = {'configurable': {'thread_id': 'three-rounds'}}
-        current = await graph.ainvoke(state, cfg)
-        for expected_round in (1, 2, 3):
-            assert current['execution']['status'] == 'waiting_compaction'
-            assert current['compaction_round'] == expected_round
-            if expected_round < 3:
-                responses.append(summary(current))
-                counts.extend([190000, 500])
-            else:
-                responses.append('Finished after three compactions.')
-                counts.append(90000)
-            current = await graph.ainvoke(
-                Command(resume={current['__interrupt__'][0].id: resume(current)}), cfg)
-        assert current['execution']['status'] == 'answered'
-        assert current['compaction_round'] == 0
-        assert current['result']['content'] == 'Finished after three compactions.'
-        assert not current.get('__interrupt__')
-        assert len(seen['requests']) == 4
-    asyncio.run(scenario())
-
-
-def test_fourth_compaction_round_declines_gracefully_without_charge(monkeypatch):
-    # A fourth cluster is still genuinely compactable when the cap is hit: the
-    # graph must decline softly (no charge, no crash) rather than either loop
-    # forever or attempt a still-oversized real generation.
+def test_repeated_continue_does_not_pay_again(monkeypatch):
+    # After the fit is persisted a new «продолжи» request on the same thread
+    # finds nothing new to summarise: no paid stage, straight answer.
     state = multi_cluster_history(4)
-    responses, counts = [summary(state)], [190000, 500]
+    responses, counts = [summary(state), 'First answer.'], [190000, 500, 179000, 70000]
     seen = install(monkeypatch, responses, counts)
     async def scenario():
         graph = msty.builder.compile(checkpointer=InMemorySaver())
-        cfg = {'configurable': {'thread_id': 'fourth-declines'}}
-        current = await graph.ainvoke(state, cfg)
-        for expected_round in (1, 2, 3):
-            assert current['execution']['status'] == 'waiting_compaction'
-            assert current['compaction_round'] == expected_round
-            if expected_round < 3:
-                responses.append(summary(current))
-                counts.extend([190000, 500])
-            else:
-                # Round 4 would still find a real plan (the 4th cluster), but
-                # the cap is already reached: only the outer trigger count is
-                # consumed, no model call, no fourth compaction stage.
-                counts.append(150000)
-            current = await graph.ainvoke(
-                Command(resume={current['__interrupt__'][0].id: resume(current)}), cfg)
-        assert current['execution']['status'] == 'blocked'
-        assert current['result']['response_metadata']['msty_generation'] == 'not_started'
-        assert current['result']['usage_metadata'] == {
-            'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
-        assert current['context_budget_check']['status'] == 'rejected'
-        assert not current.get('__interrupt__')
-        assert current['compaction_round'] == 0
-        assert compact.make_plan(current) is not None  # a real cluster was still left uncompacted
-        assert len(seen['requests']) == 3  # exactly the 3 allowed compaction model calls, no 4th
+        cfg = {'configurable': {'thread_id': 'continue-no-pay'}}
+        first = await graph.ainvoke(state, cfg)
+        second = await graph.ainvoke(Command(resume={first['__interrupt__'][0].id: resume(first)}), cfg)
+        assert second['execution']['status'] == 'answered'
+        memory = second['context_memory']
+        follow = {**state, 'messages': [*second['messages'],
+                                        {'role': 'user', 'content': 'Продолжай.'}],
+                  'execution_task_id': str(uuid.uuid4())}
+        responses.append('Continued.')
+        counts.append(150000)  # above the trigger, but everything old is archived
+        # Same thread: the bridge sends the whole history as new input.
+        third = await graph.ainvoke({**follow, 'context_memory': memory}, cfg)
+        assert third['execution']['status'] == 'answered'
+        assert third['result']['content'] == 'Continued.'
+        assert len(seen['requests']) == 3  # no new summary call
+        assert third['context_memory']['segments'] == memory['segments']
     asyncio.run(scenario())
+
+
+def test_over_limit_drops_oldest_turns_for_this_generation_only(monkeypatch):
+    # No tool bundles to archive and the input exceeds the admitted limit: the
+    # oldest whole turns are left out of this generation (canonical history and
+    # every system message stay; the latest owner turn is never touched).
+    state = initial()
+    for index in range(4):
+        state['messages'].extend([{'role': 'user', 'content': f'Old turn {index}.'},
+                                  {'role': 'assistant', 'content': f'Long answer {index}. ' * 3000}])
+    state['messages'].append({'role': 'user', 'content': 'Делай.'})
+    originals = deepcopy(state['messages'])
+    seen = install(monkeypatch, ['Done.'], [200000, 120000])
+    result = asyncio.run(msty.graph.ainvoke(state))
+    assert result['execution']['status'] == 'answered'
+    assert result['result']['content'] == 'Done.'
+    assert len(seen['requests']) == 1
+    sent = seen['requests'][0]
+    assert sent[-1].content == 'Делай.'
+    assert any('не переданы модели' in str(m.content) for m in sent)
+    assert 'Never write, owner limit.' in [m.content for m in sent if m.type == 'system']
+    assert not any('Long answer 0.' in str(m.content) for m in sent)
+    assert result['messages'] == originals
+    assert result['context_budget_check']['input_tokens'] == 120000
+
+
+def test_fit_projection_keeps_pairs_and_latest_turn():
+    projected = [{'role': 'system', 'content': 'S'},
+                 {'role': 'user', 'content': 'first'},
+                 {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'a', 'type': 'function',
+                     'function': {'name': 'read', 'arguments': '{}'}}]},
+                 {'role': 'tool', 'tool_call_id': 'a', 'content': 'x' * 50000},
+                 {'role': 'user', 'content': 'latest'},
+                 {'role': 'assistant', 'content': '', 'tool_calls': [{'id': 'b', 'type': 'function',
+                     'function': {'name': 'read', 'arguments': '{}'}}]},
+                 {'role': 'tool', 'tool_call_id': 'b', 'content': 'y' * 90000}]
+    fitted, saved = compact.fit_projection(projected, 120000)
+    assert fitted[0] == projected[0]
+    users = [m['content'] for m in fitted if m['role'] == 'user']
+    assert users == ['latest']
+    ids = [c['id'] for m in fitted for c in m.get('tool_calls') or []]
+    assert ids == ['b'] and [m['tool_call_id'] for m in fitted if m['role'] == 'tool'] == ['b']
+    assert len(fitted[-1]['content'].encode()) < 5000 and 'обрезан' in fitted[-1]['content']
+    assert saved > 0
+    assert projected[-1]['content'] == 'y' * 90000  # input untouched
+
+
+def test_mechanical_fit_archives_oldest_runs_and_clips_old_summaries():
+    state = multi_cluster_history(3)
+    memory, saved = compact.mechanical_fit(state, 1)
+    assert len(memory['segments']) == 1 and saved > 0
+    memory, saved = compact.mechanical_fit(state, 10 ** 9)
+    assert len(memory['segments']) == 3
+    projected = compact.project_messages({**state, 'context_memory': memory})
+    assert [m for m in projected if m['role'] in ('user', 'system')] == [
+        m for m in state['messages'] if m['role'] in ('user', 'system')]
+    assert all(len(s['summary'].encode()) <= compact.CLIPPED_SUMMARY_BYTES for s in memory['segments'])
 
 
 def test_many_small_bundles_are_combined_without_crossing_owner_message():

@@ -732,6 +732,22 @@ unchanged: it only projects old tool results and keeps long tool chains cheap.
 A larger admitted input is billed as such (Luna doubles input price above
 272K); cross-turn chat compaction stays in the bridge.
 
+One paid compaction pass per request — 28 September 2026 (brain-desk #899).
+A long Brain Desk chat ran three paid summary rounds in one request (≈313K
+tokens) and then declined with «больше 3 сжатий контекста подряд»; a repeated
+request did the same. Now at most one paid summary stage runs per bridge
+request (`msty_compaction.MAX_COMPACTIONS_PER_TURN = 1`; native tool steps of
+the same request keep the count). If the projection is still at or above the
+trigger — or no model plan exists — the respond step fits it without a model
+call: `mechanical_fit` archives every remaining old tool run as a verbatim
+extract and clips the oldest summaries («выжимка выжимок»); these segments are
+persisted, so a following «продолжи» does not pay for them again. Only while
+the input still exceeds the admitted limit, `fit_projection` leaves the oldest
+whole turns out of this one generation and clips the largest text tool results
+(never owner text, never system messages, never the latest owner turn; the
+canonical history is untouched). The turn then generates; a limit refusal
+remains only when nothing is left to drop. Every step is re-counted exactly.
+
 Capability attestation (24.09.2026 incident): every `context_budget_check`
 (accepted or rejected, including the compaction stage) carries
 `window_admission: true`. The bridge sends a binding above 180,000 only after

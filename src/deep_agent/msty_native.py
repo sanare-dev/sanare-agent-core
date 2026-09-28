@@ -715,7 +715,12 @@ class NativeMstyMiddleware(AgentMiddleware):
             native_tool_route=tool_route, tau_errors=tau_errors, tau_evidence=tau_evidence,
             native_needs_admission=execution['status'] == 'waiting_native')
         if not compacted:
-            update.update(compaction_round=0, compaction_stage=None)
+            # brain-desk #899: native tool steps stay inside the same bridge
+            # request, so a paid compaction already made in it keeps counting
+            # (one paid pass per request); a new request starts from 0.
+            keep = execution['status'] == 'waiting_native'
+            update.update(compaction_round=(state.get('compaction_round') or 0) if keep else 0,
+                          compaction_stage=None)
         return ExtendedModelResponse(model_response=ModelResponse(
             result=[] if compacted else [AIMessage.model_validate(result)]), command=Command(update=update))
 
