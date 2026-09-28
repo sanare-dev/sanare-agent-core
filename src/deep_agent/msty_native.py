@@ -938,7 +938,7 @@ class NativeMstyMiddleware(AgentMiddleware):
             text = ('Подключено: ' + (', '.join(enabled) or 'ничего') +
                     '. Эти инструменты доступны со следующего шага; вызывай их напрямую.')
             if missing:
-                text += (' Нет в тулсете владельца: ' + ', '.join(missing) +
+                text += (' Нет среди инструментов владельца: ' + ', '.join(missing) +
                          ' — выбери из MSTY_TOOL_CATALOG_V1 или используй msty_codex_start.')
             return ToolMessage(content=text, name=call['name'], tool_call_id=call['id'],
                                status='success' if enabled else 'error')

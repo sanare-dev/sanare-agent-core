@@ -62,16 +62,16 @@ description: Edit and verify the registered main Sanare site in an isolated job;
 ''',
     '/brain-maintenance/SKILL.md': '''---
 name: brain-maintenance
-description: Diagnose and repair the existing Msty Brain route using current evidence, scoped changes and regression checks.
+description: Diagnose and repair the existing Brain route (Brain Desk → bridge → graph) using current evidence, scoped changes and regression checks.
 ---
 # Обслуживание действующего Brain
-Не переносить настройки «Правой руки», старого Supervisor и OpenClaw в Msty.
+Не восстанавливать настройки «Правой руки», старого Supervisor и OpenClaw.
 1. Уточни изменяемый компонент по текущей памяти и реальным схемам, не выполняй
    стартовый обход всех карт/каталогов. Нужен факт — выбери один узкий инструмент.
 2. Проследи конкретный отказ: вход владельца, маршрут, вызов, наблюдение, итог.
    API 200, наличие модели и файл навыка не доказывают выполнение задачи.
 3. Внеси минимальную разрешённую правку в существующий компонент, сохрани чужую
-   работу. Конфигурацию Msty меняют штатным GUI, не обфусцированным файлом.
+   работу. Конфигурацию окна меняют штатным интерфейсом Brain Desk, не обфусцированным файлом.
 4. Generic repair/provisioner отключены; старые инструкции не включают их снова.
 5. Добавь воспроизведение и регрессию; offline, внедрение и native UI-приёмка
    являются разными доказательствами. Не перезапускай поверх активной работы.
