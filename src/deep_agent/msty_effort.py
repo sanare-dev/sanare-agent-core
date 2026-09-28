@@ -115,9 +115,10 @@ def choose_effort(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Per-step level (owner order 2026-09-28, «тупит нереально»): the turn level of
 # choose_effort is right for the plan and the final answer, not for every step
-# of a browser/tool chain. Live 28.09 (Brain Desk, owner_browser_* chain): each
-# find → fill_form → click → snapshot step re-reasoned at the turn's 'high',
-# 1–2 min per step, 8 min for 7 steps. A step that only continues a chain after
+# of a browser/tool chain. Live 28.09 (Brain Desk, owner_browser_* chain, 8 min
+# for 7 steps): every step re-reasoned at the turn level (medium there); the
+# model call was 3.5-7 s of each ~55 s step, the rest is outside this graph.
+# A step that only continues a chain after
 # a simple tool result runs at STEP_LEVEL; the turn level is kept for the plan
 # (no tool result yet), after a non-simple tool and for an explicit owner
 # force. Two failed tool batches in a
