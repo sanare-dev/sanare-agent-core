@@ -138,11 +138,9 @@ def test_no_second_compaction_or_generation_when_projection_still_too_big(monkey
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('bad', ['not-json', '{"summary":"missing sources"}',
-    '{"sources":["invented"],"summary":"text"}',
-    AIMessage(content='partial', response_metadata={'finish_reason': 'length'}, usage_metadata=USAGE),
-    AIMessage(content='', tool_calls=[{'id': 'evil', 'name': 'write', 'args': {}}], usage_metadata=USAGE)])
-def test_invalid_summary_preserves_paid_usage_and_does_not_commit_or_retry(monkeypatch, bad):
+@pytest.mark.parametrize('bad', [
+    AIMessage(content='partial', response_metadata={'finish_reason': 'length'}, usage_metadata=USAGE)])
+def test_unfinished_summary_preserves_paid_usage_and_does_not_commit_or_retry(monkeypatch, bad):
     state = history()
     seen = install(monkeypatch, [bad], [150000, 60000])
     result = asyncio.run(msty.graph.ainvoke(state))
@@ -421,3 +419,52 @@ def test_fenced_json_summary_is_accepted():
     assert compact.accept_summary(state, plan, AIMessage(content=wrapped))['compaction_stage']['status'] == 'ready'
     with pytest.raises(compact.ExecutionProtocolError):
         compact.accept_summary(state, plan, AIMessage(content='```json\n{"summary": "x"}\n```'))
+
+
+@pytest.mark.parametrize('bad', ['not-json', '{"summary":"missing sources"}',
+    '{"sources":["invented"],"summary":"text"}',
+    AIMessage(content='', tool_calls=[{'id': 'evil', 'name': 'write', 'args': {}}], usage_metadata=USAGE)])
+def test_rejected_summary_continues_on_mechanical_extract_not_as_answer(monkeypatch, bad):
+    # Live 28.09 (brain-desk thread a6dd00e8): «Сводка не прошла проверку;
+    # исходники сохранены.» became the whole answer to «делай» and the turn
+    # ended with no action. Now the paid call stays the compaction stage, a
+    # deterministic extract replaces its text and the same run answers.
+    state = history()
+    originals = deepcopy(state['messages'])
+    seen = install(monkeypatch, [bad, 'Finished answer'], [150000, 60000, 90000])
+    async def scenario():
+        graph = msty.builder.compile(checkpointer=InMemorySaver())
+        cfg = {'configurable': {'thread_id': 'mechanical'}}
+        first = await graph.ainvoke(state, cfg)
+        assert len(seen['requests']) == 1
+        assert first['result']['content'] == ''
+        assert not first['result'].get('tool_calls')
+        assert first['result']['response_metadata']['msty_stage'] == 'compaction'
+        assert first['result']['usage_metadata'] == USAGE
+        assert first['execution']['status'] == 'waiting_compaction'
+        segment = first['context_memory']['segments'][0]
+        assert segment['summary'].startswith('[Механическая выжимка')
+        assert 'read_fixture' in segment['summary'] and 'old-0' in segment['summary']
+        assert len(segment['summary'].encode('utf-8')) <= compact.summary_limit(compact.make_plan(state))
+        second = await graph.ainvoke(Command(resume={first['__interrupt__'][0].id: resume(first)}), cfg)
+        assert len(seen['requests']) == 2
+        assert second['result']['content'] == 'Finished answer'
+        assert second['execution']['status'] == 'answered'
+        assert second['messages'] == originals
+    asyncio.run(scenario())
+
+
+def test_mechanical_summary_fits_limit_on_huge_sources():
+    state = initial()
+    for index in range(60):
+        identifier = f'big-{index}'
+        state['messages'].extend([
+            {'role': 'assistant', 'content': '', 'tool_calls': [
+                {'id': identifier, 'type': 'function', 'function': {
+                    'name': 'web_read', 'arguments': json.dumps({'url': 'https://example.test/' + 'я' * 400})}}]},
+            {'role': 'tool', 'tool_call_id': identifier, 'content': 'Данные. ' * 800},
+        ])
+    plan = compact.make_plan(state)
+    text = compact.mechanical_summary(plan, 'Сводка не прошла проверку; исходники сохранены.')
+    assert text.strip() and len(text.encode('utf-8')) <= compact.summary_limit(plan)
+    assert compact.accept_mechanical(state, plan, 'x')['compaction_stage']['status'] == 'ready'
