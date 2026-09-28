@@ -5,7 +5,7 @@ task instead of being fixed (Luna had effort='max' for every turn since #35, so
 a bare «привет» reasoned for minutes). ``choose_effort`` reads only signals the
 graph already has: the latest owner message, the Brain role and the Brain Desk
 agent persona of the first system message. That turn level is kept for the
-plan; ``step_effort`` lowers the steps that only continue a
+plan and the synthesis; ``step_effort`` lowers the steps that only continue a
 simple tool chain (owner order 2026-09-28, see below).
 
 Levels are abstract (low < medium < high < max); ``msty_models.make_model``
@@ -120,8 +120,9 @@ def choose_effort(state: dict) -> dict:
 # model call was 3.5-7 s of each ~55 s step, the rest is outside this graph.
 # A step that only continues a chain after
 # a simple tool result runs at STEP_LEVEL; the turn level is kept for the plan
-# (no tool result yet), after a non-simple tool and for an explicit owner
-# force. Two failed tool batches in a
+# (no tool result yet), after a non-simple tool, for the synthesis (msty.py
+# re-runs a low step that turned out to be the final answer, see
+# _synthesis_step) and an explicit owner force. Two failed tool batches in a
 # row ask for rethinking at FAILURE_LEVEL. gpt-6-luna documents none/low/
 # medium/high/xhigh/max: no 'minimal' tier, and 'none' drops reasoning
 # entirely, so 'low' is the floor here.
@@ -196,7 +197,7 @@ def step_effort(state: dict, task: dict) -> dict:
 
     Returns the choice dict of choose_effort plus 'step' (plan | tool_chain |
     failure_rethink | task) and, when lowered or raised, 'task_level' and
-    'task_reason' (the turn level, visible in the LangSmith trace).
+    'task_reason' so the synthesis can restore the turn level.
     """
     messages = state.get('messages') or []
     batches = tool_batches(messages)

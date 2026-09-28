@@ -541,6 +541,85 @@ async def _retry_after_outlimit(state, profile, tools, full_messages, first, eff
             RETRY_KEY: {**record, 'status': 'answered'}}}), budget_check
 
 
+SYNTHESIS_KEY = 'msty_step_synthesis'
+
+
+async def _synthesis_step(profile, tools, choice, full_messages, low, effort, first_limit,
+                          output_limit, budget_check, stream):
+    """Re-run a lowered chain step that turned out to be the final answer.
+
+    Owner order 2026-09-28: chain steps run at msty_effort.STEP_LEVEL, the
+    answer keeps the turn level. Whether a step is the answer is known only
+    after it: a low step without tool calls and with text that was not shown
+    yet (native harness withholds text) is repeated once at the turn level
+    with the same messages and tools. Returns (result, budget_check) or None to
+    keep ``low``. The low answer is the fallback whenever the re-run cannot be
+    admitted or does not produce a usable answer; its usage is summed.
+    """
+    usage = low.usage_metadata
+    used = usage.get('output_tokens') if isinstance(usage, dict) else None
+    if type(used) is not int or used < 0:
+        return None
+    limit = min(first_limit, output_limit - used)
+    level = msty_effort.fit(effort['task_level'], limit) if limit > 0 else msty_effort.STEP_LEVEL
+    if msty_effort.LEVELS.index(level) <= msty_effort.LEVELS.index(msty_effort.STEP_LEVEL):
+        return None
+    record = {'version': 1, 'status': 'answered', 'tools_reexecuted': 0,
+              'first': {'level': effort['level'], 'output_tokens': used,
+                        'input_tokens': usage.get('input_tokens')},
+              'synthesis': {'level': level, 'output_limit': limit}}
+    try:
+        model = (msty_models.make_model(profile, limit, level, True)
+                 if stream is not None and getattr(stream, 'reasoning', None) is not None
+                 else msty_models.make_model(profile, limit, level))
+        if budget_check is not None:
+            tokens = await msty_models.count_input(profile, model, full_messages, tools)
+            if (type(tokens) is not int or tokens < 0 or
+                    budget_check['input_tokens'] + tokens > budget_check['limit']):
+                return None
+            budget_check = {**budget_check, 'input_tokens': budget_check['input_tokens'] + tokens}
+        model = msty_models.bind_tools(profile, model, tools, choice)
+    except Exception:
+        return None  # no call was made: keep the low answer
+    connection = 'model:' + profile
+    remaining, probe_token = msty_breaker.admit(connection)
+    if remaining is not None:
+        return None
+    try:
+        raw = await (stream.invoke(model, full_messages) if stream else model.ainvoke(full_messages))
+    except Exception as error:
+        transient = (getattr(error, 'transient', False) if isinstance(error, msty_stream.StreamFailure)
+                     else msty_taxonomy.is_transient_exception(error))
+        (msty_breaker.record_transient_failure if transient else msty_breaker.record_success)(connection)
+        # The re-run's expense is unknown: the stage usage must not look complete.
+        return low.model_copy(update={'usage_metadata': None, 'response_metadata': {
+            **low.response_metadata, SYNTHESIS_KEY: {**record, 'status': 'failed'}}}), budget_check
+    finally:
+        msty_breaker.release_probe(connection, probe_token)
+    msty_breaker.record_success(connection)
+    try:
+        second = msty_models.stamp_usage(profile, raw)
+    except msty_models.ModelAdapterError:
+        return low.model_copy(update={'usage_metadata': None, 'response_metadata': {
+            **low.response_metadata, SYNTHESIS_KEY: {**record, 'status': 'rejected_model'}}}), budget_check
+    summed = _sum_usage(usage, second.usage_metadata)
+    second_usage = second.usage_metadata or {}
+    record['synthesis'].update(output_tokens=second_usage.get('output_tokens'),
+                               input_tokens=second_usage.get('input_tokens'))
+    stop = msty_models.finish_reason(second.response_metadata)
+    if (stop in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter')
+            or (not _visible_text(second) and not second.tool_calls)):
+        return low.model_copy(update={'usage_metadata': summed, 'response_metadata': {
+            **low.response_metadata, SYNTHESIS_KEY: {**record, 'status': 'kept_low'}}}), budget_check
+    choice_record = {'version': 1, 'level': effort['task_level'], 'reason': 'synthesis',
+                     'step': 'synthesis', 'task_level': effort['task_level'],
+                     'task_reason': effort['task_reason'], 'chain_steps': effort['chain_steps']}
+    return second.model_copy(update={'usage_metadata': summed, 'response_metadata': {
+        **second.response_metadata,
+        msty_effort.METADATA_KEY: msty_models.effort_record(profile, choice_record, limit),
+        SYNTHESIS_KEY: record}}), budget_check
+
+
 async def _respond_step(state: State, *, native_system_prompt: str | None = None,
                         native_result_filter=None):
     tools = state.get("tools") or []
@@ -575,8 +654,8 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         msty_execution.validate_binding(state, profile, output_limit)
         # Per-task reasoning level (owner order 2026-09-26): deterministic, from
         # the latest owner message. Per step (owner order 2026-09-28): a step
-        # that only continues a simple tool chain runs low; the plan, a step
-        # after a non-simple tool and rethinking after failures keep or raise it.
+        # that only continues a simple tool chain runs low; the plan, the
+        # synthesis and rethinking after failures keep or raise it.
         effort = msty_effort.choose_effort(state)
         if msty_models.EFFORT_VALUES.get(profile) is not None:
             effort = msty_effort.step_effort(state, effort)
@@ -617,7 +696,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                        'Если отвечаешь текстом, начни с одной строки: «↪ Ответ резервной модели DeepSeek: '
                        'основная модель OpenAI отклонила запрос фильтром своей политики.»')
         def assemble(projected):
-            messages = convert_to_messages(projected)
+            messages = convert_to_messages(msty_compaction.clip_stale_browser_results(projected))
             if policy_fallback is not None:
                 messages = _without_images(messages)
             full = [SystemMessage(content=policy), *messages]
@@ -788,6 +867,15 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         **result.response_metadata,
         msty_effort.METADATA_KEY: msty_models.effort_record(profile, effort, first_limit)}})
     stop_reason = msty_models.finish_reason(result.response_metadata)
+    if (effort.get('step') == 'tool_chain' and not tools_disabled and not result.tool_calls and
+            stop_reason not in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal',
+                                'content_filter') and _visible_text(result) and
+            not (stream and stream.parts) and time.monotonic() - started <= RETRY_ADMISSION_SECONDS):
+        synthesized = await _synthesis_step(profile, tools, choice, full_messages, result, effort,
+                                            first_limit, output_limit, budget_check, stream)
+        if synthesized is not None:
+            result, budget_check = synthesized
+            stop_reason = msty_models.finish_reason(result.response_metadata)
     if (reserve and stop_reason in ('max_tokens', 'length') and not _visible_text(result) and
             not (stream and stream.parts) and time.monotonic() - started <= RETRY_ADMISSION_SECONDS):
         retried = await _retry_after_outlimit(state, profile, tools, full_messages, result, effort,

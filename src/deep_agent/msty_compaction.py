@@ -13,6 +13,7 @@ This is bounded within one native user chain, not unlimited cross-chat memory.
 """
 from copy import deepcopy
 import json
+import re
 import uuid
 
 from langgraph.types import interrupt
@@ -91,6 +92,59 @@ def project_messages(state):
     projected.extend(deepcopy(messages[cursor:]))
     return projected
 
+
+
+#: Owner order 2026-09-28: a browser chain re-sent every earlier page snapshot
+#: (Playwright-style tools return the page after each action) into every next
+#: step. Only the latest browser result shows the current page; older large
+#: ones are projected to a head and a marker. Projection only: canonical
+#: state.messages, evidence and stagnation checks keep the full text.
+STALE_BROWSER_MIN_BYTES = 4000
+STALE_BROWSER_HEAD_BYTES = 800
+_BROWSER_TOOL = re.compile(r'(?:^|[_.])(?:owner_browser|browser)_[a-z0-9_]+$')
+
+
+def _tool_text(content):
+    if isinstance(content, str):
+        return content
+    if (isinstance(content, list) and content and
+            all(isinstance(p, dict) and p.get('type') == 'text' and isinstance(p.get('text'), str)
+                for p in content)):
+        return '\n'.join(p['text'] for p in content)
+    return None
+
+
+def clip_stale_browser_results(messages):
+    """Keep the latest browser result whole, shorten older large ones."""
+    names, browser = {}, []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get('role') == 'assistant':
+            for call in message.get('tool_calls') or []:
+                if isinstance(call, dict):
+                    function = call.get('function') if isinstance(call.get('function'), dict) else {}
+                    names[call.get('id')] = call.get('name', function.get('name'))
+        elif message.get('role') == 'tool':
+            name = names.get(message.get('tool_call_id'), message.get('name'))
+            if isinstance(name, str) and _BROWSER_TOOL.search(name):
+                browser.append(index)
+    if len(browser) < 2:
+        return messages
+    clipped = list(messages)
+    for index in browser[:-1]:
+        text = _tool_text(messages[index].get('content'))
+        if text is None:
+            continue
+        size = len(text.encode('utf-8'))
+        if size < STALE_BROWSER_MIN_BYTES:
+            continue
+        head = _clip_bytes(text, STALE_BROWSER_HEAD_BYTES)
+        clipped[index] = {**messages[index], 'content': (
+            f'[Устаревший результат браузера сокращён для этого шага: {size} байт, показано начало. '
+            'Текущее состояние страницы — в последнем результате браузера ниже; полный текст '
+            'сохранён в истории хода.]\n' + head)}
+    return clipped
 
 def source_messages(state, source_sha256):
     """Explicit readback of an archived source from the same checkpoint."""
