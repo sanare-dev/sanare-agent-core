@@ -31,6 +31,7 @@ USAGE = {'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110}
 @pytest.fixture(autouse=True)
 def offline_defaults(monkeypatch):
     monkeypatch.delenv('MSTY_MODEL_PROFILE', raising=False)
+    monkeypatch.delenv('MSTY_CONSULT_LIMIT', raising=False)
     monkeypatch.setenv('LANGSMITH_TRACING', 'false')
     monkeypatch.setenv('LANGCHAIN_TRACING_V2', 'false')
 
@@ -179,6 +180,7 @@ def test_unknown_server_profile_is_not_silently_replaced(monkeypatch):
 
 
 def test_consultation_quota_survives_checkpoints_and_shortened_callback(monkeypatch):
+    monkeypatch.setenv('MSTY_CONSULT_LIMIT', '2')
     seen = models(monkeypatch, [operation('consult-1'), operation('consult-2'),
                                operation('read-3', consult=False), operation('consult-3')])
 
@@ -208,13 +210,50 @@ def test_consultation_quota_survives_checkpoints_and_shortened_callback(monkeypa
         assert final['result']['tool_calls'] == final['result']['invalid_tool_calls'] == []
         assert final['result']['additional_kwargs'] == {}
         assert final['result']['usage_metadata'] == USAGE
-        assert 'двух консультаций' in final['result']['content']
+        assert 'Лимит консультаций этого хода (2)' in final['result']['content']
         assert not final.get('__interrupt__')
         assert len(seen['invocations']) == 4
         assert all(profile == 'luna' for profile, _ in seen['invocations'])
         assert 'Лимит консультаций исчерпан' in seen['invocations'][-1][1][0].content
 
     asyncio.run(scenario())
+
+
+def test_analyst_consultation_is_disabled_by_default(monkeypatch):
+    seen = models(monkeypatch, [operation('consult-disabled')])
+    result = asyncio.run(msty.graph.ainvoke(initial()))
+    assert all(CONSULT not in {tool.get('function', {}).get('name')
+                               for tool in bound} for _, bound, _ in seen['bound'])
+    assert result['execution']['consultations'] == 0
+    assert result['result']['tool_calls'] == []
+    assert 'отключены настройкой сервера' in result['result']['content']
+    assert not result.get('__interrupt__')
+
+
+def test_disallowed_consultation_does_not_drop_other_tools(monkeypatch):
+    seen = models(monkeypatch, [reply(calls=[
+        {'id': 'consult', 'name': CONSULT, 'args': {'question': 'Review the evidence.'}},
+        {'id': 'read', 'name': 'read_fixture', 'args': {'name': 'fixture.json'}},
+    ])])
+    result = asyncio.run(msty.graph.ainvoke(initial()))
+    assert all(CONSULT not in {tool.get('function', {}).get('name')
+                               for tool in bound} for _, bound, _ in seen['bound'])
+    assert [call['name'] for call in result['result']['tool_calls']] == ['read_fixture']
+    assert result['execution']['consultations'] == 0
+    assert result['execution']['status'] == 'waiting_tools'
+    assert result['result']['content'].startswith('Консультации аналитика отключены')
+    assert len(result.get('__interrupt__', [])) == 1
+
+
+@pytest.mark.parametrize('limit', ['-1', '3', 'invalid'])
+def test_invalid_consultation_limit_fails_closed_before_generation(monkeypatch, limit):
+    monkeypatch.setenv('MSTY_CONSULT_LIMIT', limit)
+    seen = models(monkeypatch, [])
+    result = asyncio.run(msty.graph.ainvoke(initial()))
+    assert seen['created'] == seen['invocations'] == []
+    assert result['execution']['status'] == 'blocked'
+    assert result['result']['tool_calls'] == []
+    assert not result.get('__interrupt__')
 
 
 def test_role_cannot_be_changed_in_callback_before_next_generation(monkeypatch):
@@ -253,7 +292,8 @@ def test_count_receipt_identifies_method_and_model_without_changing_usage(monkey
         'method': method, 'model_profile': profile}
     assert counts[0][0] == profile
     assert counts[0][1] == seen['invocations'][0][1]
-    assert counts[0][2] == TOOLS
+    assert counts[0][2] == [tool for tool in TOOLS
+                             if tool['function']['name'] != CONSULT]
     assert result['result']['usage_metadata'] == USAGE
     assert result['result']['response_metadata']['model_name'] == canonical
 
