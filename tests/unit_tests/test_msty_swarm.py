@@ -106,7 +106,7 @@ def pending_for(args, batch='b7b1c1a4-0000-4000-8000-000000000001'):
     (lambda p: p['subtasks'].pop() and p['subtasks'].pop(), 'от 2 до 5'),
     (lambda p: p['subtasks'].extend(deepcopy(p['subtasks'][:3])), 'от 2 до 5'),
     (lambda p: p['subtasks'][0].update(profile='sol'), 'вне серверного списка'),
-    (lambda p: p['subtasks'][0].update(max_tokens=4096), 'max_tokens'),
+    (lambda p: p['subtasks'][0].update(max_tokens=8193), 'max_tokens'),
     (lambda p: p['subtasks'][0].update(tools=['x']), 'неизвестные поля'),
     (lambda p: p['subtasks'][1].update(prompt=p['subtasks'][0]['prompt']), 'дублируют'),
     (lambda p: p.update(extra=1), 'только goal и subtasks'),
@@ -125,7 +125,7 @@ def test_plan_defaults_cheap_executor_and_bounded_output():
         item.pop('profile'), item.pop('max_tokens'), item.pop('role')
     parsed = msty_swarm.parse_plan(value)
     assert [s['profile'] for s in parsed['subtasks']] == ['deepseek', 'deepseek']
-    assert [s['max_tokens'] for s in parsed['subtasks']] == [1024, 1024]
+    assert [s['max_tokens'] for s in parsed['subtasks']] == [4096, 4096]
     assert [s['id'] for s in parsed['subtasks']] == ['s1', 's2']
 
 
@@ -638,7 +638,7 @@ def test_real_step_accepts_valid_swarm_plan_end_to_end(monkeypatch, profile):
 @pytest.mark.parametrize('mutate', [
     lambda p: p['subtasks'][0].update(tools=['shell']),     # лишнее поле подзадачи
     lambda p: p.update(extra=True),                          # лишнее поле плана
-    lambda p: p['subtasks'][0].update(max_tokens=4096),      # вне maximum схемы
+    lambda p: p['subtasks'][0].update(max_tokens=8193),      # вне maximum схемы
     lambda p: p['subtasks'][0].update(profile='opus'),       # вне enum схемы
     lambda p: p['subtasks'].pop() and p['subtasks'].pop(),   # меньше minItems
 ])

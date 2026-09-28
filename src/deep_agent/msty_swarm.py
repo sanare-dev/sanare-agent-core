@@ -55,9 +55,10 @@ MAX_SUBTASKS = 5
 #: Gemini Flash живёт только локальной полосой моста и здесь недоступен.
 PROFILES = ('deepseek', 'luna')
 DEFAULT_PROFILE = 'deepseek'
-DEFAULT_MAX_TOKENS = 1024
+DEFAULT_MAX_TOKENS = 4096       # brain-desk #868: развёрнутый результат подзадачи (было 1024)
 MIN_MAX_TOKENS = 256
-MAX_OUTPUT_TOKENS = 2048        # = выходной предел analyst-допуска моста
+MAX_OUTPUT_TOKENS = 8192        # brain-desk #868: было 2048 (= analyst-допуску моста);
+                                # выдачу лимита подзадаче по-прежнему подтверждает допуск моста
 MAX_GOAL_CHARS = 2000
 MAX_TITLE_CHARS = 80
 MAX_ROLE_CHARS = 60

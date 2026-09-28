@@ -226,7 +226,9 @@ def validate_resume(state, resume):
                                      _tool_drift(state.get('tools'), incoming.get('tools')) + '.')
     maximum = incoming.get('max_tokens')
     previous_maximum = state.get('max_tokens') or 4096
-    if type(maximum) is not int or not 1 <= maximum <= min(previous_maximum, 8192):
+    # Верхняя граница — потолок выхода лида (msty.py, brain-desk #868): иначе
+    # продолжение шага, начатого с лимитом >8192, отклонялось бы каждый раз.
+    if type(maximum) is not int or not 1 <= maximum <= min(previous_maximum, 16384):
         raise ExecutionProtocolError('Лимит ответа нельзя увеличить при продолжении.')
     if state.get('task_budget_binding') is not None and maximum != previous_maximum:
         raise ExecutionProtocolError('Привязанный лимит ответа должен сохраняться при продолжении.')

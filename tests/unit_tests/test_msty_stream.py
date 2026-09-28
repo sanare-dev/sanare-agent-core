@@ -332,6 +332,8 @@ def test_independent_fresh_task_does_not_inherit_old_artifact_buffer(monkeypatch
 
 
 def test_consultation_limit_still_applies_after_streaming(monkeypatch):
+    # Допуск 2 за ход (#868 сделала 0 дефолтом); счётчик чекпоинта исчерпан.
+    monkeypatch.setenv('MSTY_CONSULT_LIMIT', '2')
     name = 'sanare_admin_msty_brain_consult'
     install(monkeypatch, [AIMessageChunk(content='Ask consultant.', tool_call_chunks=[
         {'id': 'third', 'name': name, 'index': 0, 'args': '{}'}]), *chunks(reason='tool_calls')])
@@ -340,6 +342,6 @@ def test_consultation_limit_still_applies_after_streaming(monkeypatch):
         execution={'consultations': 2})
     result = asyncio.run(events(state))
     assert not value(result)['result']['tool_calls']
-    assert 'Лимит двух консультаций' in value(result)['result']['content']
+    assert 'Лимит консультаций этого хода (2)' in value(result)['result']['content']
     assert custom(result)[-2]['type'] == 'text_invalidated'
     assert value(result)['result']['usage_metadata'] == USAGE

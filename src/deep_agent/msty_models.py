@@ -188,7 +188,9 @@ def effort_record(profile: str, choice: dict | None, max_tokens: int | None = No
 
 def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096, effort: str | None = None):
     config = _profile(profile)
-    if type(max_tokens) is not int or not 1 <= max_tokens <= 8192:
+    # Потолок 16384 — выход лида после brain-desk #868 (msty.py); аналитик и
+    # рой ограничены своими константами (msty.py, msty_swarm.py).
+    if type(max_tokens) is not int or not 1 <= max_tokens <= 16384:
         raise ModelAdapterError('Недопустимый предел ответа модели.')
     reasoning = effort_value(profile, effort, max_tokens)
     # Explicit key + endpoint prevent generic SDK base-url environment overrides

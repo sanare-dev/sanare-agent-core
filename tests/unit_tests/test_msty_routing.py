@@ -31,6 +31,7 @@ USAGE = {'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110}
 @pytest.fixture(autouse=True)
 def offline_defaults(monkeypatch):
     monkeypatch.delenv('MSTY_MODEL_PROFILE', raising=False)
+    monkeypatch.delenv('MSTY_CONSULT_LIMIT', raising=False)
     monkeypatch.setenv('LANGSMITH_TRACING', 'false')
     monkeypatch.setenv('LANGCHAIN_TRACING_V2', 'false')
 
@@ -179,6 +180,8 @@ def test_unknown_server_profile_is_not_silently_replaced(monkeypatch):
 
 
 def test_consultation_quota_survives_checkpoints_and_shortened_callback(monkeypatch):
+    # Прежний допуск 2 консультации за ход (#868 сделала 0 дефолтом).
+    monkeypatch.setenv('MSTY_CONSULT_LIMIT', '2')
     seen = models(monkeypatch, [operation('consult-1'), operation('consult-2'),
                                operation('read-3', consult=False), operation('consult-3')])
 
@@ -208,13 +211,25 @@ def test_consultation_quota_survives_checkpoints_and_shortened_callback(monkeypa
         assert final['result']['tool_calls'] == final['result']['invalid_tool_calls'] == []
         assert final['result']['additional_kwargs'] == {}
         assert final['result']['usage_metadata'] == USAGE
-        assert 'двух консультаций' in final['result']['content']
+        assert 'Лимит консультаций этого хода (2)' in final['result']['content']
         assert not final.get('__interrupt__')
         assert len(seen['invocations']) == 4
         assert all(profile == 'luna' for profile, _ in seen['invocations'])
         assert 'Лимит консультаций исчерпан' in seen['invocations'][-1][1][0].content
 
     asyncio.run(scenario())
+
+
+def test_consultation_is_blocked_by_default_zero_limit(monkeypatch):
+    # #868: без MSTY_CONSULT_LIMIT консультации аналитика отключены — платный
+    # вызов более слабой модели не выполняется, ответ остаётся за Brain.
+    seen = models(monkeypatch, [operation('consult-1')])
+    result = asyncio.run(msty.graph.ainvoke(initial()))
+    assert result['result']['tool_calls'] == []
+    assert 'отключены настройкой сервера' in result['result']['content']
+    assert result['execution']['consultations'] == 0
+    assert not result.get('__interrupt__')
+    assert 'не вызывай консультанта' in seen['invocations'][0][1][0].content
 
 
 def test_role_cannot_be_changed_in_callback_before_next_generation(monkeypatch):

@@ -52,7 +52,7 @@ def test_unknown_profile_rejected_without_sdk(profile, monkeypatch):
         adapter.make_model(profile)
 
 
-@pytest.mark.parametrize('limit', [0, -1, 8193, True, 2.5, '200'])
+@pytest.mark.parametrize('limit', [0, -1, 16385, True, 2.5, '200'])
 def test_output_bound_is_strict(limit):
     with pytest.raises(adapter.ModelAdapterError):
         adapter.make_model('luna', limit)

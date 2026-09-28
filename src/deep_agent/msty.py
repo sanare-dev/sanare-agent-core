@@ -194,6 +194,21 @@ def consultation_count(state: State) -> int:
     return sum(consult_name(c.get('name') or c.get('function', {}).get('name', '')) for c in current)
 
 
+def consultation_limit() -> int:
+    """Допуск консультаций DeepSeek-аналитика за ход.
+
+    По умолчанию 0 (brain-desk #868): консультация — платный вызов более
+    слабой модели. Вернуть прежний режим можно переменной окружения
+    MSTY_CONSULT_LIMIT=1|2 (по образцу MSTY_STATIC_CACHE); больше двух за ход
+    не допускает checkpoint-протокол моста (проверка счётчика выше).
+    """
+    try:
+        value = int(os.getenv('MSTY_CONSULT_LIMIT', '0'))
+    except ValueError:
+        return 0
+    return min(max(value, 0), 2)
+
+
 def valid_tool_calls(result: AIMessage, tools: list[dict]) -> bool:
     """Validate the entire batch against exactly the client's current schemas.
 
@@ -368,7 +383,10 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             messages = _without_images(messages)
         profile = selected_profile(state)
         consultations = consultation_count(state)
-        cap = 2048 if state.get('brain_task_role') == 'analyst' else 8192
+        consult_limit = consultation_limit()
+        # Потолок выхода лида поднят 8192→16384 (brain-desk #868: обрывы length
+        # на длинных ответах); аналитик остаётся на 2048.
+        cap = 2048 if state.get('brain_task_role') == 'analyst' else 16384
         output_limit = min(max(int(state.get('max_tokens') or 4096), 1), cap)
         msty_execution.validate_binding(state, profile, output_limit)
         # Per-task reasoning level (owner order 2026-09-26): deterministic, from
@@ -381,8 +399,14 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         policy = (ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else
                   native_system_prompt if native_system_prompt is not None else
                   policy_for_tools(tools) + '\n\n' + msty_memory.system_context())
-        if consultations >= 2:
-            policy += '\nЛимит консультаций исчерпан. Продолжай своими инструментами; не вызывай консультанта снова.'
+        # Заметка о лимите — только когда консультант вообще подключён в этом
+        # запросе: иначе это лишний вес always-loaded префикса (бюджет контекста
+        # native-графа) и шум в текстовом ANALYST_POLICY.
+        consult_offered = any(consult_name(name) for name in tool_names(tools))
+        if consult_offered and consultations >= consult_limit:
+            policy += ('\nКонсультации аналитика отключены настройкой сервера; не вызывай консультанта.'
+                       if consult_limit == 0 else
+                       '\nЛимит консультаций исчерпан. Продолжай своими инструментами; не вызывай консультанта снова.')
         if any(msty_task._named(name, msty_task.PLAN_SUFFIX) for name in tool_names(tools)):
             policy += ('\nДля поручения с изменениями проверяемых локальных артефактов используй msty_task_plan '
                 'с требованиями и конкретными read-only проверками, затем реальные рабочие инструменты. '
@@ -573,8 +597,15 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                            'Модель запросила неподключённый или некорректный инструмент; вызов не выполнен.')
         result = result.model_copy(update={'content': explanation, 'tool_calls': [],
                                           'invalid_tool_calls': [], 'additional_kwargs': {}})
-    if consultations + sum(consult_name(c['name']) for c in result.tool_calls) > 2:
-        result = result.model_copy(update={'content': 'Лимит двух консультаций этого хода исчерпан; '
+    # Блокируем только НОВЫЕ вызовы консультанта сверх допуска: чекпоинты,
+    # созданные до #868, могут нести счётчик 1–2 при уже нулевом лимите, и
+    # обычные инструменты такого шага не должны стираться.
+    new_consults = sum(consult_name(c['name']) for c in result.tool_calls)
+    if new_consults and consultations + new_consults > consult_limit:
+        result = result.model_copy(update={'content': (
+            'Консультации аналитика отключены настройкой сервера (MSTY_CONSULT_LIMIT=0); '
+            if consult_limit == 0 else
+            f'Лимит консультаций этого хода ({consult_limit}) исчерпан; ') +
             'новые вызовы не выполнены. Нужна работа основного Brain с имеющимися доказательствами.',
             'tool_calls': [], 'invalid_tool_calls': [], 'additional_kwargs': {}})
     result = msty_task.gate_final(state, result, tools, tools_disabled)
