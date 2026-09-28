@@ -124,6 +124,21 @@ def fit(level: str, output_limit: int) -> str:
     return LEVELS[index]
 
 
+#: Out-of-limit recovery (owner order 2026-09-28): a retry must leave most of
+#: its output for the answer text, so its level needs RETRY_HEADROOM_FACTOR x
+#: that level's reasoning floor.
+RETRY_HEADROOM_FACTOR = 4
+
+
+def retry_level(applied: str, headroom: int) -> str:
+    """One level below ``applied`` (high→medium→low), lower still if the
+    retry's output ``headroom`` cannot hold that level's reasoning and a reply."""
+    index = max(LEVELS.index(applied) - 1, 0)
+    while index > 0 and headroom < RETRY_HEADROOM_FACTOR * MIN_OUTPUT_TOKENS.get(LEVELS[index], 0):
+        index -= 1
+    return LEVELS[index]
+
+
 # Server sub-agent roles: short atomic operator work, long read-only research,
 # and cross-checking of critical claims.
 SUBAGENT_LEVELS = {'operator': 'low', 'researcher': 'medium', 'auditor': 'high'}

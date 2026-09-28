@@ -186,10 +186,25 @@ def effort_record(profile: str, choice: dict | None, max_tokens: int | None = No
     return record
 
 
+#: Provider output ceilings per call, reasoning included (Responses API:
+#: max_output_tokens "including reasoning tokens"). gpt-6-luna: 1,050,000
+#: context, 128,000 max output (developers.openai.com/api/docs/models/gpt-6-luna,
+#: checked 2026-09-28). Other profiles keep the rollout's 8192. The bridge's
+#: task binding still decides the actual limit of a stage; this is only the
+#: upper bound the graph accepts.
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+MAX_OUTPUT_TOKENS = MappingProxyType({'luna': 128000})
+
+
+def max_output(profile: str) -> int:
+    _profile(profile)
+    return MAX_OUTPUT_TOKENS.get(profile, DEFAULT_MAX_OUTPUT_TOKENS)
+
+
 def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096, effort: str | None = None,
                reasoning_summary: bool = False):
     config = _profile(profile)
-    if type(max_tokens) is not int or not 1 <= max_tokens <= 8192:
+    if type(max_tokens) is not int or not 1 <= max_tokens <= max_output(profile):
         raise ModelAdapterError('Недопустимый предел ответа модели.')
     reasoning = effort_value(profile, effort, max_tokens)
     # Explicit key + endpoint prevent generic SDK base-url environment overrides

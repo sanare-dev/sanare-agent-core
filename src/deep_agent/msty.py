@@ -6,12 +6,13 @@ duplicate messages when a persisted thread is resumed.
 import asyncio
 import json
 import os
+import time
 from typing import TypedDict
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.validators import validator_for
 from langchain_anthropic import ChatAnthropic
 from langchain_anthropic.chat_models import _format_messages
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, convert_to_messages
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, convert_to_messages
 from langgraph.config import get_stream_writer
 from langgraph.graph import StateGraph, START, END
 from referencing import Registry
@@ -317,12 +318,94 @@ async def _policy_fallback_step(state, profile, code, budget_check, *,
     if isinstance(binding, dict):
         # Локальная копия только для validate_binding этого шага; состояние
         # графа и мост сохраняют исходный допуск, мост сверяет его с marker.
-        fallback_state['task_budget_binding'] = {**binding, 'profile': fallback}
+        # A fallback with a lower output ceiling runs below the reserved limit.
+        output = binding.get('output_limit')
+        fallback_state['task_budget_binding'] = {**binding, 'profile': fallback, 'output_limit': (
+            min(output, msty_models.max_output(fallback)) if type(output) is int else output)}
     return await _respond_step(fallback_state, native_system_prompt=native_system_prompt,
                                native_result_filter=native_result_filter)
 
 
-def _explain_unfinished(result: AIMessage, stop_reason: str, output_limit: int) -> AIMessage:
+#: Out-of-limit recovery (owner order 2026-09-28). Live 28.09, Brain Desk:
+#: ~7 minutes of tax-document work ended with «исчерпан лимит вывода (8192
+#: токенов)»; the ledger row of that stage had reasoning_tokens == output_tokens
+#: == 8192 and no text. The bridge reserves ONE stage for its bound
+#: output_limit and marks the task budget breached if the settled output of a
+#: stage exceeds it, so a retry has to fit inside the same limit: a reasoning
+#: lead call runs with output_limit minus a retry reserve, and only an empty
+#: truncated answer spends that reserve on exactly one retry one level lower,
+#: with the same messages (the tool results already collected) and tools off.
+RETRY_SPLIT_MIN_OUTPUT = 8192
+RETRY_MIN_OUTPUT = 2048
+#: The bridge ends a request after 150 s; a first call slower than this leaves
+#: no room for a retry to finish (Luna ≈ 100 output tokens/s, ledger 28.09).
+RETRY_ADMISSION_SECONDS = 100.0
+RETRY_KEY = 'msty_outlimit_retry'
+RETRY_NOTE = ('[Служебно, не от владельца] Предыдущая попытка этого шага израсходовала весь лимит '
+              'вывода на рассуждение и не дала текста. Инструменты в этом шаге недоступны и повторно '
+              'не вызываются. Сразу дай итоговый ответ владельцу по уже полученным выше результатам '
+              'инструментов: что установлено, что не проверено и следующий шаг. Кратко, без '
+              'повторного разбора.')
+
+
+def retry_reserve(state, profile: str, effort: dict, output_limit: int) -> int:
+    """Output tokens held back from the first call for one recovery retry."""
+    if (state.get('brain_task_role') == 'analyst' or state.get(POLICY_FALLBACK_KEY) is not None or
+            msty_models.EFFORT_VALUES.get(profile) is None or output_limit < RETRY_SPLIT_MIN_OUTPUT):
+        return 0
+    reserve = max(RETRY_MIN_OUTPUT, output_limit // 4)
+    level = effort['level']
+    if (effort.get('reason') == 'owner_force' and
+            msty_effort.fit(level, output_limit - reserve) != msty_effort.fit(level, output_limit)):
+        return 0  # an explicit «!max» keeps its whole limit instead of a retry
+    return reserve
+
+
+def _visible_text(result: AIMessage) -> str:
+    try:
+        return msty_stream.text_content(result.content).strip()
+    except msty_stream.StreamFailure:
+        return ''
+
+
+def _sum_usage(first, second):
+    """Measured usage of both calls of one stage; unknown stays unknown.
+
+    A detail known for only one call is dropped for cache_creation (the bridge
+    then prices every uncached token as a write: an upper estimate) and read
+    as 0 elsewhere (fewer cached tokens: never cheaper than the truth).
+    """
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return None
+    counts = ('input_tokens', 'output_tokens')
+    if any(type(u.get(k)) is not int or u[k] < 0 for u in (first, second) for k in counts):
+        return None
+    total = {k: first[k] + second[k] for k in counts}
+    total['total_tokens'] = total['input_tokens'] + total['output_tokens']
+    for name in ('input_token_details', 'output_token_details'):
+        a, b = first.get(name) or {}, second.get(name) or {}
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return None
+        merged = {}
+        for key in sorted(set(a) | set(b)):
+            values = [d[key] for d in (a, b) if key in d]
+            if any(type(v) is not int or v < 0 for v in values):
+                return None
+            if len(values) == 2 or key != 'cache_creation':
+                merged[key] = sum(values)
+        if merged:
+            total[name] = merged
+    return total
+
+
+def _append_text(content, text):
+    if isinstance(content, str):
+        return content + text
+    return [*content, {'type': 'text', 'text': text}]
+
+
+def _explain_unfinished(result: AIMessage, stop_reason: str, output_limit: int, *,
+                        streamed: bool = False) -> AIMessage:
     """Make a provider-terminated reply explicit to every consumer.
 
     Live 2026-09-26 (Brain Desk run e9b6a175, ledger output_tokens == 4096 ==
@@ -332,24 +415,118 @@ def _explain_unfinished(result: AIMessage, stop_reason: str, output_limit: int) 
     bridge (which reads only finish_reason/stop_reason) saw a clean 'stop' with
     empty content and reported «Модель вернула пустой ответ». Stamp the
     translated reason and, when no visible text exists, say what happened.
+    Partial text is kept and marked; streamed text is never rewritten (the
+    bridge rejects a final text that differs from the shown one), there the
+    finish_reason 'length' is the mark and Brain Desk offers «Продолжить».
     """
     metadata = result.response_metadata or {}
     update = {}
     if metadata.get('finish_reason') is None and metadata.get('stop_reason') is None:
         update['response_metadata'] = {**metadata, 'finish_reason': stop_reason}
-    try:
-        visible = msty_stream.text_content(result.content).strip()
-    except msty_stream.StreamFailure:
-        visible = ''
-    if not visible:
+    visible = _visible_text(result)
+    retry = metadata.get(RETRY_KEY) if isinstance(metadata.get(RETRY_KEY), dict) else None
+    cut = stop_reason in ('max_tokens', 'length')
+    if not visible and cut and retry is not None:
+        first, second = retry['first'], retry['retry']
+        if retry.get('status') == 'answered':
+            repeat = (f'повтор без инструментов на уровне {second["level"]} тоже израсходовал '
+                      f'{second["output_tokens"]} из {second["output_limit"]} токенов')
+        else:
+            repeat = ('повтор без инструментов не завершён (сбой провайдера или модели), '
+                      'его расход не подтверждён')
+        update['content'] = (
+            f'Ответ модели не получен: попытка на уровне рассуждения {first["level"]} израсходовала '
+            f'весь лимит вывода ({first["output_tokens"]} из {first["output_limit"]} токенов) на '
+            f'рассуждение, {repeat}. Результаты инструментов этого хода сохранены в истории; '
+            'инструменты повторно не вызывались. Нажмите «Продолжить» или сузьте задачу.')
+    elif not visible:
         update['content'] = (
             f'Ответ модели не получен: исчерпан лимит вывода ({output_limit} токенов) до '
             'текстового ответа (у Luna его расходует рассуждение). Действия не выполнены; '
-            'нужен больший лимит вывода или более узкая задача.'
-            if stop_reason in ('max_tokens', 'length') else
+            'результаты инструментов этого хода сохранены. Нажмите «Продолжить» или сузьте задачу.'
+            if cut else
             'Ответ модели не получен: провайдер прервал генерацию '
             f'({stop_reason}). Действия не выполнены.')
+    elif cut and not streamed:
+        update['content'] = _append_text(result.content, (
+            f'\n\n— Ответ обрезан лимитом вывода ({output_limit} токенов): это неполный текст. '
+            'Нажмите «Продолжить», чтобы Brain дописал его.'))
     return result.model_copy(update=update) if update else result
+
+
+async def _retry_after_outlimit(state, profile, tools, full_messages, first, effort, first_limit,
+                                output_limit, budget_check, stream):
+    """One recovery call inside the same stage, or None to keep ``first``.
+
+    Returns (result, budget_check). Admission: measured first output, headroom
+    >= RETRY_MIN_OUTPUT, both counted inputs within the stage input limit and
+    a closed circuit. Tools are bound with choice 'none': no tool call of this
+    step is repeated and none is issued, so paid tool work is never doubled.
+    """
+    usage = first.usage_metadata
+    used = usage.get('output_tokens') if isinstance(usage, dict) else None
+    if type(used) is not int or used < 0:
+        return None
+    headroom = output_limit - used
+    if headroom < RETRY_MIN_OUTPUT:
+        return None
+    applied = msty_effort.fit(effort['level'], first_limit)
+    level = msty_effort.retry_level(applied, headroom)
+    record = {'version': 1, 'stage_output_limit': output_limit, 'tools_reexecuted': 0,
+              'first': {'level': applied, 'output_limit': first_limit, 'output_tokens': used,
+                        'input_tokens': usage.get('input_tokens')},
+              'retry': {'level': level, 'output_limit': headroom}}
+    messages = [*full_messages, HumanMessage(content=RETRY_NOTE)]
+    try:
+        # Same stream object: the reasoning relay keeps its seq across calls.
+        model = (msty_models.make_model(profile, headroom, level, True)
+                 if stream is not None and getattr(stream, 'reasoning', None) is not None
+                 else msty_models.make_model(profile, headroom, level))
+        if budget_check is not None:
+            tokens = await msty_models.count_input(profile, model, messages, tools)
+            if (type(tokens) is not int or tokens < 0 or
+                    budget_check['input_tokens'] + tokens > budget_check['limit']):
+                return None
+            budget_check = {**budget_check, 'input_tokens': budget_check['input_tokens'] + tokens}
+        model = msty_models.bind_tools(profile, model, tools, 'none')
+    except Exception:
+        return None  # no call was made: keep the honest first result
+    connection = 'model:' + profile
+    remaining, probe_token = msty_breaker.admit(connection)
+    if remaining is not None:
+        return None
+    try:
+        raw = await (stream.invoke(model, messages) if stream else model.ainvoke(messages))
+    except Exception as error:
+        transient = (getattr(error, 'transient', False) if isinstance(error, msty_stream.StreamFailure)
+                     else msty_taxonomy.is_transient_exception(error))
+        (msty_breaker.record_transient_failure if transient else msty_breaker.record_success)(connection)
+        failed = {**record, 'status': 'failed'}
+        # The retry's expense is unknown: the stage usage must not look complete.
+        return first.model_copy(update={'usage_metadata': None, 'response_metadata': {
+            **first.response_metadata, RETRY_KEY: failed}}), budget_check
+    finally:
+        msty_breaker.release_probe(connection, probe_token)
+    msty_breaker.record_success(connection)
+    try:
+        second = msty_models.stamp_usage(profile, raw)
+    except msty_models.ModelAdapterError:
+        if stream:
+            stream.invalidate()
+        return AIMessage(content='Ответ повтора пришёл от неподтверждённой модели; действия не выполнены.',
+            usage_metadata=_sum_usage(usage, msty_models.checked_usage(profile, raw)),
+            response_metadata={'msty_generation': 'rejected_model', 'msty_blocked': True,
+                               RETRY_KEY: {**record, 'status': 'rejected_model'}}), budget_check
+    second_usage = second.usage_metadata or {}
+    record['retry'].update(output_tokens=second_usage.get('output_tokens'),
+                           input_tokens=second_usage.get('input_tokens'))
+    return second.model_copy(update={
+        'usage_metadata': _sum_usage(usage, second.usage_metadata),
+        'response_metadata': {
+            **second.response_metadata,
+            msty_effort.METADATA_KEY: msty_models.effort_record(
+                profile, {'version': 1, 'level': level, 'reason': 'outlimit_retry'}, headroom),
+            RETRY_KEY: {**record, 'status': 'answered'}}}), budget_check
 
 
 async def _respond_step(state: State, *, native_system_prompt: str | None = None,
@@ -372,17 +549,21 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             messages = _without_images(messages)
         profile = selected_profile(state)
         consultations = consultation_count(state)
-        cap = 2048 if state.get('brain_task_role') == 'analyst' else 8192
+        cap = 2048 if state.get('brain_task_role') == 'analyst' else msty_models.max_output(profile)
         output_limit = min(max(int(state.get('max_tokens') or 4096), 1), cap)
         msty_execution.validate_binding(state, profile, output_limit)
         # Per-task reasoning level (owner order 2026-09-26): deterministic, from
         # the latest owner message, so every tool-loop step of a turn reuses it.
         effort = msty_effort.choose_effort(state)
+        # output_limit stays the stage's bound total; the first call leaves the
+        # recovery reserve unused unless it ends truncated without text.
+        reserve = retry_reserve(state, profile, effort, output_limit)
+        first_limit = output_limit - reserve
         model = (ChatAnthropic(model='claude-sonnet-4-6', max_tokens=output_limit,
                                base_url='https://api.anthropic.com', timeout=120, max_retries=0)
                  if profile == 'sonnet' and not msty_models.msty_gateway.enabled()
-                 else msty_models.make_model(profile, output_limit, effort['level'], reasoning_live)
-                 if reasoning_live else msty_models.make_model(profile, output_limit, effort['level']))
+                 else msty_models.make_model(profile, first_limit, effort['level'], reasoning_live)
+                 if reasoning_live else msty_models.make_model(profile, first_limit, effort['level']))
         policy = (ANALYST_POLICY if state.get('brain_task_role') == 'analyst' else
                   native_system_prompt if native_system_prompt is not None else
                   policy_for_tools(tools) + '\n\n' + msty_memory.system_context())
@@ -498,6 +679,7 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
                                'tau_circuit_open': connection}), budget_check)
     stream = None
     policy_rejection = None
+    started = time.monotonic()
     try:
         stream = (msty_stream.TextStream(state) if incremental else
                   msty_stream.TextStream(state, text=False) if reasoning_live else None)
@@ -559,14 +741,23 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
             response_metadata={'msty_generation': 'rejected_model', 'msty_blocked': True}), budget_check)
     result = result.model_copy(update={'response_metadata': {
         **result.response_metadata,
-        msty_effort.METADATA_KEY: msty_models.effort_record(profile, effort, output_limit)}})
+        msty_effort.METADATA_KEY: msty_models.effort_record(profile, effort, first_limit)}})
     stop_reason = msty_models.finish_reason(result.response_metadata)
+    if (reserve and stop_reason in ('max_tokens', 'length') and not _visible_text(result) and
+            not (stream and stream.parts) and time.monotonic() - started <= RETRY_ADMISSION_SECONDS):
+        retried = await _retry_after_outlimit(state, profile, tools, full_messages, result, effort,
+                                              first_limit, output_limit, budget_check, stream)
+        if retried is not None:
+            result, budget_check = retried
+            tools_disabled = True  # the retry is bound with tool_choice 'none'
+            stop_reason = msty_models.finish_reason(result.response_metadata)
     if stop_reason in ('max_tokens', 'length', 'model_context_window_exceeded', 'refusal', 'content_filter'):
         # A parsed prefix is not a completed instruction. Preserve provider
         # termination and measured usage, but never suspend for partial actions.
         result = result.model_copy(update={'tool_calls': [], 'invalid_tool_calls': [],
                                           'additional_kwargs': {}})
-        result = _explain_unfinished(result, stop_reason, output_limit)
+        result = _explain_unfinished(result, stop_reason, first_limit,
+                                     streamed=bool(stream and stream.parts))
     allowed = tool_names(tools)
     if (tools_disabled and result.tool_calls) or not valid_tool_calls(result, tools):
         # Fail closed before the client can execute an invented operation. Keep
