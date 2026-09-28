@@ -101,10 +101,13 @@ issues the matching budget binding. They are never autonomous lead profiles.
 The active Gateway route refuses the former `astra`, `sol` (5.6), `opus`
 (4.8) and `fable` selectors. Their profile definitions remain only for
 historical accounting and explicit direct operator use outside this route.
-The bridge and Msty tool schema must be switched in coordination with the
-deployed graph; a source PR alone does not prove the live graph uses these
-allowlists. Offline tests use synthetic keys and mocked Gateway responses,
-without paid provider calls.
+Optional consultations from the lead are disabled by default. Set the server
+environment variable `MSTY_CONSULT_LIMIT=1` or `2` to allow that many calls in
+one owner task; `0` keeps them disabled, and invalid values fail closed. The
+bridge and Msty tool schema must be switched in coordination with the deployed
+graph; a source PR alone does not prove the live graph uses these allowlists.
+Offline tests use synthetic keys and mocked Gateway responses, without paid
+provider calls.
 
 ### Progress-aware execution
 
@@ -120,8 +123,9 @@ identical in-flight status observations stop the poll loop.
 Cloud code has no separate dollar cap or `MAX_STEPS` to raise. Recursion is a
 per-invocation graph bound, not the cumulative task-action counter: 200 sequential
 native actions with checkpoint/resume are covered offline at recursion limit 64.
-The separate 24-check verifier receipt bound, two-consultation cap, 512-message
-input bound, eight compaction segments, and 180000-token admission remain unchanged.
+The separate 24-check verifier receipt bound, consultation cap (disabled by
+default, maximum two), 512-message input bound, eight compaction segments, and
+180000-token admission remain unchanged.
 Those independent bounds can still stop a large task before its action ceiling.
 
 The stack is composed with `create_agent`: Deep Agents0.4.11 `create_deep_agent`
@@ -433,10 +437,13 @@ does not read paths, execute changes, browse or recursively delegate.
 The server-selected Luna/DeepSeek lead reads sources and performs authorized work through
 Msty's existing MCP tools. It may ask for analysis/review when justified, then checks
 the opinion against actual sources and observes the result of its own actions.
-At most two issued consultations are counted in the native task checkpoint;
-the ordinary 200-action limit still applies. Role changes inside a pending
-callback are rejected. This is not a new background worker system and does not
-reactivate retired teams, Paperclip jobs or `brain_supervisor`.
+Analyst consultations are disabled by default. The operator may explicitly set
+`MSTY_CONSULT_LIMIT=1` or `2`; values outside `0..2` fail closed. The selected
+limit is checked against the native task checkpoint, while the ordinary
+200-action limit still applies. When the limit is exhausted, the consultant
+schema is withheld from the lead model. Role changes inside a pending callback
+are rejected. This is not a new background worker system and does not reactivate
+retired teams, Paperclip jobs or `brain_supervisor`.
 
 ```text
 Msty → local action router → gateway/stop/budget → LangGraph → Luna or DeepSeek
