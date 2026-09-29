@@ -958,7 +958,7 @@ async def _fit_without_model(state, tokens, input_bytes, limit, assemble, wire_b
     work = state
     memory_update = None
     full_messages = None
-    target = int(msty_compaction.TRIGGER_TOKENS * msty_compaction.TARGET_SHARE)
+    target = msty_compaction.mechanical_target_tokens(state)
     try:
         memory, _ = msty_compaction.mechanical_fit(work, int((tokens - target) * ratio * 1.15) + 1)
     except msty_execution.ExecutionProtocolError as error:

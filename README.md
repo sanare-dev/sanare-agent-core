@@ -358,13 +358,15 @@ Registered site work is verified separately by the site executor. A newer clean
 site status (no unchecked writes and passed typecheck) supersedes a stale failed
 generic file-plan in old checkpoints; an unverified or failed site job never does.
 
-With `compaction_protocol=msty-compaction-v1`, compaction starts at 80% of the
-bound task's immutable input limit (with a minimum of the 120000-token legacy
-trigger). Unbound and old checkpoints keep the 120000-token trigger. The reserved
-headroom leaves room for new messages and token-count variance. A lead context
-reaching that trigger may summarize one contiguous range of old complete text-only tool bundles
+With `compaction_protocol=msty-compaction-v1`, a bound task whose admitted input
+limit is above 180000 starts compaction at 80% of that immutable limit. Existing
+180000 bindings and unbound/old checkpoints keep the 120000-token trigger. For
+bound Luna tasks the dynamic trigger is capped at 218000 to leave 54000 tokens
+before the provider's 272000 input-price tier ([current Luna pricing](https://developers.openai.com/api/docs/models/gpt-6-luna)); an unusually large single tool result can still cross that tier. The model-free fit after the one paid
+summary targets 85% of that task-specific trigger. A lead context reaching that trigger
+may summarize one contiguous range of old complete text-only tool bundles
 (16–400 KB), keeping the newest two bundles, pending pairs and **all** user/system
-messages verbatim. Up to eight hash-bound summaries are persisted in the same
+messages verbatim. Up to sixty-four hash-bound summaries are persisted in the same
 checkpoint. The canonical source messages are never replaced; checkpoint state
 and `msty_compaction.source_messages` provide source readback. This does not add a
 model-visible retrieval tool. The model-visible summary is explicitly unverified
@@ -739,10 +741,13 @@ can verify the same number. Requests without a binding keep 180,000.
 Deploy order: this graph first — it still admits the old bridge's 180,000
 binding — then enable the bridge's window limits and reload it. An old graph
 rejects a bridge binding above 180,000 before generation (no model call).
-Native tool-bundle compaction scales to 80% of the immutable bound input limit;
-unbound and old checkpoints retain the 120,000-token trigger. It only projects
-old tool results and keeps newer messages unchanged. A larger admitted input is billed as such (Luna doubles input price above
-272K); cross-turn chat compaction stays in the bridge.
+Native tool-bundle compaction scales to 80% of the immutable bound input limit,
+only when the bound input limit is above 180,000. Existing 180,000 bindings and
+unbound checkpoints retain the 120,000-token trigger. Luna has a 218,000-token
+cap to start before its 272K input-price tier ([current Luna pricing](https://developers.openai.com/api/docs/models/gpt-6-luna)).
+The model-free mechanical fit targets 85% of the same task-specific trigger. It only projects old tool results
+and keeps newer messages unchanged. A single large result can still cross the
+price tier; cross-turn chat compaction stays in the bridge.
 
 One paid compaction pass per request — 28 September 2026 (brain-desk #899).
 A long Brain Desk chat ran three paid summary rounds in one request (≈313K

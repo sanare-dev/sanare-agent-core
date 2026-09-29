@@ -18,15 +18,21 @@ import uuid
 
 from langgraph.types import interrupt
 
-from .msty_execution import ExecutionProtocolError, canonical_digest, input_limit, task_id
+from .msty_execution import (LEGACY_INPUT_LIMIT, ExecutionProtocolError,
+                             canonical_digest, input_limit, task_id)
 
 PROTOCOL = 'msty-compaction-v1'
 TRIGGER_TOKENS = 120000
 # Bound chats can admit more than the legacy 180K. Start compaction at 80% of
 # that task's immutable input limit, leaving room for the latest turn and count
-# variance. Unbound/legacy checkpoints retain the original trigger.
+# variance. Luna has a provider price step above 272K input; keep 54K headroom
+# below it. A single unusually large tool result can still cross that step.
+# Unbound/legacy checkpoints retain the original trigger.
 COMPACTION_TRIGGER_FRACTION_NUMERATOR = 4
 COMPACTION_TRIGGER_FRACTION_DENOMINATOR = 5
+LUNA_INPUT_PRICE_TIER_TOKENS = 272000
+LUNA_COMPACTION_HEADROOM_TOKENS = 54000
+LUNA_COMPACTION_TRIGGER_MAX = LUNA_INPUT_PRICE_TIER_TOKENS - LUNA_COMPACTION_HEADROOM_TOKENS
 MAX_SOURCE_BYTES = 400000
 # brain-desk #899 (28.09.2026): a long chat accumulates one segment per
 # isolated tool run; 8 made the mechanical fit stop early. Validation stays
@@ -59,8 +65,17 @@ def trigger_tokens(state):
     if not isinstance(binding, dict):
         return TRIGGER_TOKENS
     limit = input_limit(state)
+    if limit <= LEGACY_INPUT_LIMIT:
+        return TRIGGER_TOKENS
     scaled = limit * COMPACTION_TRIGGER_FRACTION_NUMERATOR // COMPACTION_TRIGGER_FRACTION_DENOMINATOR
+    if binding.get('profile') == 'luna':
+        scaled = min(scaled, LUNA_COMPACTION_TRIGGER_MAX)
     return max(TRIGGER_TOKENS, scaled)
+
+
+def mechanical_target_tokens(state):
+    """Return the deterministic fit target for this task's paid compaction trigger."""
+    return int(trigger_tokens(state) * TARGET_SHARE)
 
 
 def enabled(state):
