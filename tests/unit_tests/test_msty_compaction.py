@@ -25,6 +25,62 @@ def initial(**changes):
             'compaction_protocol': compact.PROTOCOL, **changes}
 
 
+def test_compaction_trigger_scales_from_bound_window_and_respects_luna_price_tier():
+    assert compact.trigger_tokens({}) == compact.TRIGGER_TOKENS
+
+    luna = initial()
+    luna['task_budget_binding']['input_limit'] = execution.window_input_limit('luna')
+    assert compact.trigger_tokens(luna) == 218000
+    assert compact.mechanical_target_tokens(luna) == 185300
+
+    deepseek = initial()
+    deepseek['task_budget_binding'].update(profile='deepseek',
+        input_limit=execution.window_input_limit('deepseek'))
+    assert compact.trigger_tokens(deepseek) == execution.window_input_limit('deepseek') * 4 // 5
+
+    # Existing 180K bindings retain room for generation and count variance.
+    legacy_bound = initial()
+    assert compact.trigger_tokens(legacy_bound) == 120000
+    assert compact.mechanical_target_tokens(legacy_bound) == 102000
+    assert compact.mechanical_target_tokens({}) == 102000
+
+
+@pytest.mark.parametrize(('tokens', 'compacts'), [(210000, False), (220000, True)])
+def test_luna_compaction_runs_before_the_input_price_tier(monkeypatch, tokens, compacts):
+    state = history()
+    state['task_budget_binding']['input_limit'] = execution.window_input_limit('luna')
+    replies = [summary(state)] if compacts else ['Finished answer']
+    counts = [tokens, 60000] if compacts else [tokens]
+    seen = install(monkeypatch, replies, counts)
+    result = asyncio.run(msty.graph.ainvoke(state))
+
+    assert len(seen['requests']) == 1
+    assert (result['execution']['status'] == 'waiting_compaction') is compacts
+    if compacts:
+        assert result['result']['response_metadata']['msty_stage'] == 'compaction'
+    else:
+        assert result['execution']['status'] == 'answered'
+        assert not result.get('context_memory')
+
+
+def test_model_free_fit_targets_the_bounded_luna_trigger(monkeypatch):
+    state = history()
+    state['task_budget_binding']['input_limit'] = execution.window_input_limit('luna')
+    seen = {}
+
+    def mechanical_fit(_state, need_bytes):
+        seen['need_bytes'] = need_bytes
+        return None, 0
+
+    monkeypatch.setattr(compact, 'mechanical_fit', mechanical_fit)
+    result = asyncio.run(msty._fit_without_model(state, 220000, 220000,
+        execution.window_input_limit('luna'), lambda messages: messages,
+        lambda messages: 220000, lambda messages: asyncio.sleep(0, result=220000)))
+
+    assert seen['need_bytes'] == int((220000 - 185300) * 1.15) + 1
+    assert result[1] == 220000
+
+
 def history():
     state = initial()
     for index in range(4):
