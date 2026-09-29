@@ -14,6 +14,7 @@ from import_compactions import (
     stage_claude,
     stage_kimi,
     stage_openwebui,
+    stage_prepared,
 )
 
 
@@ -214,6 +215,55 @@ class ImportCompactionsTests(unittest.TestCase):
         with sqlite3.connect(database) as connection:
             connection.execute("CREATE TABLE chat_message (id TEXT, content TEXT)")
         self.assertEqual(stage_openwebui(database, self.pending)["candidates"], 0)
+        self.assertEqual(list(self.pending.glob("*.json")), [])
+
+    def test_prepared_import_stages_only_owner_curated_summary_and_is_idempotent(self):
+        prepared = self.root / "prepared"
+        prepared.mkdir()
+        (prepared / "summary.json").write_text(json.dumps({
+            "schema": 1,
+            "source_kind": "msty",
+            "source_id": "conversation-42",
+            "observed_at": "2026-09-24T00:00:00Z",
+            "summary": "Владелец подготовил эту выжимку вручную.",
+        }))
+        (prepared / "raw-export.json").write_text(json.dumps({
+            "schema": 1, "source_kind": "msty", "source_id": "raw",
+            "observed_at": "2026-09-24T00:00:00Z", "summary": "",
+            "messages": ["Сырая переписка"],
+        }))
+
+        counts = stage_prepared(prepared, self.pending)
+        self.assertEqual(counts["new"], 1)
+        files = list(self.pending.glob("*.json"))
+        self.assertEqual(len(files), 1)
+        payload = json.loads(files[0].read_text())
+        self.assertEqual(payload["source_kind"], "msty")
+        self.assertEqual(payload["summary"], "Владелец подготовил эту выжимку вручную.")
+        self.assertNotIn("Сырая переписка", files[0].read_text())
+        self.assertEqual(stage_prepared(prepared, self.pending)["existing"], 1)
+
+    def test_prepared_import_rejects_sensitive_invalid_and_symlink_sources(self):
+        prepared = self.root / "prepared"
+        prepared.mkdir()
+        valid = {
+            "schema": 1, "source_kind": "codex", "source_id": "turn-7",
+            "observed_at": "2026-09-24T00:00:00Z", "summary": "Безопасная выжимка.",
+        }
+        invalid = [
+            {**valid, "summary": "password=hidden"},
+            {**valid, "source_kind": "unknown"},
+            {**valid, "observed_at": "yesterday"},
+            {**valid, "source_id": "../outside"},
+            {**valid, "source_id": "owner@example.com"},
+            {**valid, "messages": []},
+        ]
+        for index, payload in enumerate(invalid):
+            (prepared / f"bad-{index}.json").write_text(json.dumps(payload))
+        outside = self.root / "outside.json"
+        outside.write_text(json.dumps(valid))
+        (prepared / "linked.json").symlink_to(outside)
+        self.assertEqual(stage_prepared(prepared, self.pending)["candidates"], 0)
         self.assertEqual(list(self.pending.glob("*.json")), [])
 
     def test_list_pending_reads_staged_candidates_with_id(self):
