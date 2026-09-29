@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import uuid
 
 
 DEFAULT_THREADS = Path.home() / "Library/Application Support/BrainDesk/threads"
@@ -32,7 +33,10 @@ SENSITIVE = re.compile(
     re.IGNORECASE,
 )
 MAX_THREAD_BYTES = 64 * 1024 * 1024
+MAX_PREPARED_BYTES = 256 * 1024
 MAX_SUMMARY_CHARS = 12_000
+PREPARED_SOURCE_KINDS = ("codex", "msty", "hermes", "other")
+PREPARED_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -422,6 +426,71 @@ def stage_openwebui(database: Path, pending: Path, *, dry_run: bool = False) -> 
     return counts
 
 
+def stage_prepared(root: Path, pending: Path, *, dry_run: bool = False) -> dict[str, int]:
+    """Stage only explicitly owner-prepared summary JSON files.
+
+    This adapter deliberately does not parse application exports or chat logs.
+    The caller must choose the directory explicitly, and each file must contain
+    the small documented summary schema.
+    """
+    counts = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
+    if not root.is_dir() or root.is_symlink():
+        return counts
+    _prepare_pending(pending, dry_run)
+    for path in sorted(root.glob("*.json")):
+        counts["files"] += 1
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as input_file:
+                metadata = os.fstat(input_file.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_PREPARED_BYTES:
+                    continue
+                raw = input_file.read(MAX_PREPARED_BYTES + 1)
+            if len(raw) > MAX_PREPARED_BYTES:
+                continue
+            payload = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if set(payload) != {"schema", "source_kind", "source_id", "observed_at", "summary"}:
+            continue
+        kind = payload.get("source_kind")
+        source_id = payload.get("source_id")
+        observed_at = payload.get("observed_at")
+        summary = payload.get("summary")
+        if (type(payload.get("schema")) is not int or payload["schema"] != 1 or
+                kind not in PREPARED_SOURCE_KINDS or
+                not isinstance(source_id, str) or not PREPARED_ID.fullmatch(source_id) or
+                SENSITIVE.search(source_id) or
+                not isinstance(observed_at, str) or not isinstance(summary, str) or
+                not summary.strip() or len(summary) > MAX_SUMMARY_CHARS or
+                SENSITIVE.search(summary)):
+            continue
+        try:
+            timestamp = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            continue
+        # Candidate's legacy UUID field is stable and non-identifying; the
+        # caller-provided source id remains visible only in its source URI.
+        thread_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"prepared://{kind}/{source_id}"))
+        candidate = Candidate(
+            schema=1,
+            status="pending_review",
+            source_kind=kind,
+            source=f"prepared://{kind}/{source_id}",
+            thread_id=thread_id,
+            compaction_id=source_id,
+            source_sha256=hashlib.sha256(summary.encode("utf-8")).hexdigest(),
+            observed_at=observed_at,
+            summary=summary,
+        )
+        _stage_candidate(candidate, pending, counts, dry_run)
+    return counts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--threads", type=Path, default=DEFAULT_THREADS)
@@ -429,9 +498,11 @@ def main() -> int:
     parser.add_argument("--claude-root", type=Path, default=DEFAULT_CLAUDE)
     parser.add_argument("--openwebui-db", type=Path,
                         help="closed Open WebUI SQLite snapshot with chat_message.context_summary")
+    parser.add_argument("--prepared-dir", type=Path,
+                        help="explicit directory of owner-prepared summary JSON files (not raw exports)")
     parser.add_argument("--pending", type=Path, default=DEFAULT_PENDING)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--source", choices=("all", "braindesk", "kimi", "claude", "openwebui"), default="all")
+    parser.add_argument("--source", choices=("all", "braindesk", "kimi", "claude", "openwebui", "prepared"), default="all")
     parser.add_argument("--list-pending", action="store_true",
                         help="print the pending queue as JSON for an external reader (Brain Desk #238)")
     parser.add_argument("--resolve-pending", metavar="ID",
@@ -450,6 +521,8 @@ def main() -> int:
         return 0 if moved else 1
     if options.source == "openwebui" and options.openwebui_db is None:
         parser.error("--source openwebui requires --openwebui-db")
+    if options.source == "prepared" and options.prepared_dir is None:
+        parser.error("--source prepared requires --prepared-dir")
     result = {"files": 0, "candidates": 0, "new": 0, "existing": 0}
     for source, run in (("braindesk", lambda: stage(options.threads, options.pending, dry_run=options.dry_run)),
                         ("kimi", lambda: stage_kimi(options.kimi_root, options.pending, dry_run=options.dry_run)),
@@ -460,6 +533,10 @@ def main() -> int:
                 result[key] += value
     if options.openwebui_db is not None and options.source in ("all", "openwebui"):
         counts = stage_openwebui(options.openwebui_db, options.pending, dry_run=options.dry_run)
+        for key, value in counts.items():
+            result[key] += value
+    if options.prepared_dir is not None and options.source in ("all", "prepared"):
+        counts = stage_prepared(options.prepared_dir, options.pending, dry_run=options.dry_run)
         for key, value in counts.items():
             result[key] += value
     result["at"] = datetime.now(timezone.utc).isoformat()
