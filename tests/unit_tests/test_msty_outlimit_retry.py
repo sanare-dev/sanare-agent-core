@@ -283,7 +283,8 @@ class PolicyRejected(Exception):
 def test_policy_fallback_runs_below_a_larger_luna_limit(monkeypatch):
     reply = AIMessage(content='Ответ.', usage_metadata={'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2})
     seen = install(monkeypatch, [PolicyRejected(), reply], counts=[1000, 1000])
-    result = run(bound(16384))
-    assert [c[:2] for c in seen['created']] == [('luna', 12288), ('deepseek', 8192)]
+    # DeepSeek's step ceiling is 32768 since #1195; Luna's limit is above it.
+    result = run(bound(65536))
+    assert [c[:2] for c in seen['created']] == [('luna', 49152), ('deepseek', 32768)]
     assert result['result']['response_metadata']['msty_model_profile'] == 'deepseek'
-    assert result['task_budget_binding']['output_limit'] == 16384  # the reserve is unchanged
+    assert result['task_budget_binding']['output_limit'] == 65536  # the reserve is unchanged
