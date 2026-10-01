@@ -186,14 +186,37 @@ def effort_record(profile: str, choice: dict | None, max_tokens: int | None = No
     return record
 
 
-#: Provider output ceilings per call, reasoning included (Responses API:
-#: max_output_tokens "including reasoning tokens"). gpt-6-luna: 1,050,000
-#: context, 128,000 max output (developers.openai.com/api/docs/models/gpt-6-luna,
-#: checked 2026-09-28). Other profiles keep the rollout's 8192. The bridge's
-#: task binding still decides the actual limit of a stage; this is only the
-#: upper bound the graph accepts.
+#: Upper bound of ONE step's output the graph accepts, reasoning included
+#: (Responses API: max_output_tokens "including reasoning tokens"). The bridge's
+#: task binding still decides the actual limit of a stage.
+#: - gpt-6-luna: 1,050,000 context, 128,000 max output
+#:   (developers.openai.com/api/docs/models/gpt-6-luna, checked 2026-09-28).
+#: - brain-desk #1195 (owner 01.10.2026): lead answers were cut at 6144 visible
+#:   tokens (8192 minus the 2048 retry reserve). Step ceiling 32768 for
+#:   deepseek-flash (DeepSeek V4.1 Flash: 384K max output) and the Anthropic
+#:   profiles claude-opus-5-5 / claude-opus-4-8 / claude-fable-5-1 /
+#:   claude-sonnet-4-6 (128K max output); provider docs checked 2026-10-01.
+#:   32768 is the step ceiling, not the provider maximum, and equals the
+#:   bridge's lead cap (brain_accounting.LEAD_OUTPUT_CAP).
+#: - sol / sol6 / astra: provider limits not verified, keep the rollout's 8192.
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
-MAX_OUTPUT_TOKENS = MappingProxyType({'luna': 128000})
+STEP_MAX_OUTPUT_TOKENS = 32768
+MAX_OUTPUT_TOKENS = MappingProxyType({
+    'luna': 128000,
+    'deepseek': STEP_MAX_OUTPUT_TOKENS,
+    'opus5': STEP_MAX_OUTPUT_TOKENS, 'opus': STEP_MAX_OUTPUT_TOKENS,
+    'fable': STEP_MAX_OUTPUT_TOKENS, 'sonnet': STEP_MAX_OUTPUT_TOKENS,
+})
+#: Above this output limit a direct Anthropic call streams (#1195). A
+#: non-streaming Messages call sends nothing until the whole answer is ready,
+#: so the explicit 120 s read timeout would cut a long answer; streaming keeps
+#: bytes flowing. (The SDK's own ">10 min non-streaming" refusal only applies
+#: with its default timeout; this adapter always sets timeout=120.)
+ANTHROPIC_STREAM_ABOVE = DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def anthropic_streaming(max_tokens: int) -> bool:
+    return max_tokens > ANTHROPIC_STREAM_ABOVE
 
 
 def max_output(profile: str) -> int:
@@ -225,7 +248,7 @@ def make_model(profile: str = DEFAULT_PROFILE, max_tokens: int = 4096, effort: s
                       http_async_client=httpx.AsyncClient(follow_redirects=False))
     if config.provider == 'anthropic' and not gateway:
         try:
-            return ChatAnthropic(**common)
+            return ChatAnthropic(**common, streaming=anthropic_streaming(max_tokens))
         except Exception:
             raise ModelAdapterError('Клиент выбранного провайдера не создан.') from None
     options = dict(use_responses_api=False, stream_usage=False)

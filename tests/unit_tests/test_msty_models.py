@@ -59,12 +59,36 @@ def test_output_bound_is_strict(limit):
 
 
 def test_output_ceiling_is_per_profile():
-    # gpt-6-luna documents 128,000 max output (reasoning included); the rest
-    # keep the rollout's 8192.
+    # gpt-6-luna documents 128,000 max output (reasoning included). #1195:
+    # DeepSeek and the Anthropic profiles get the 32768 step ceiling; the
+    # unverified OpenAI sol/sol6/astra keep the rollout's 8192.
     assert adapter.max_output('luna') == 128000
-    assert adapter.max_output('deepseek') == adapter.max_output('sonnet') == 8192
+    for profile in ('deepseek', 'opus5', 'opus', 'fable', 'sonnet'):
+        assert adapter.max_output(profile) == 32768
+    for profile in ('sol', 'sol6', 'astra'):
+        assert adapter.max_output(profile) == 8192
     with pytest.raises(adapter.ModelAdapterError):
-        adapter.make_model('deepseek', 8193)
+        adapter.make_model('deepseek', 32769)
+    with pytest.raises(adapter.ModelAdapterError):
+        adapter.make_model('sol6', 8193)
+
+
+def test_deepseek_accepts_32768_on_its_documented_wire(monkeypatch):
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'test-key')
+    monkeypatch.setattr(adapter.msty_gateway, 'overrides', lambda profile: {})
+    model = adapter.make_model('deepseek', 32768)
+    assert model.extra_body['max_tokens'] == 32768
+
+
+@pytest.mark.parametrize('limit,streams', [(2048, False), (8192, False), (8193, True), (32768, True)])
+def test_direct_anthropic_streams_above_8192(limit, streams, monkeypatch):
+    # A non-streaming Messages call sends no bytes until the answer is done;
+    # with the explicit 120 s timeout a 32768-token answer would be cut.
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'test-key')
+    monkeypatch.setattr(adapter.msty_gateway, 'overrides', lambda profile: {})
+    model = adapter.make_model('opus5', limit)
+    assert model.streaming is streams and model.max_tokens == limit
+    assert model.default_request_timeout == 120
 
 
 @pytest.mark.parametrize('requested', [1, 8, 15, 16, 40])

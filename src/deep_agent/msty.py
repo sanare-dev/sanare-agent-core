@@ -664,7 +664,8 @@ async def _respond_step(state: State, *, native_system_prompt: str | None = None
         reserve = retry_reserve(state, profile, effort, output_limit)
         first_limit = output_limit - reserve
         model = (ChatAnthropic(model='claude-sonnet-4-6', max_tokens=output_limit,
-                               base_url='https://api.anthropic.com', timeout=120, max_retries=0)
+                               base_url='https://api.anthropic.com', timeout=120, max_retries=0,
+                               streaming=msty_models.anthropic_streaming(output_limit))
                  if profile == 'sonnet' and not msty_models.msty_gateway.enabled()
                  else msty_models.make_model(profile, first_limit, effort['level'], reasoning_live)
                  if reasoning_live else msty_models.make_model(profile, first_limit, effort['level']))
