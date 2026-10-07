@@ -187,12 +187,51 @@ def _tool_drift(before, after):
     return detail + ')'
 
 
+def _post_batch_catalog(state, resume):
+    """Gateway-staged schemas, committed only after the old batch is consumed.
+
+    Tool text is observation, never proof of install or new authority. Actual
+    action authorization stays at the local executor. No counters are reset.
+    """
+    refresh = resume.get('catalog_refresh')
+    if refresh is None:
+        return deepcopy(state.get('tools') or [])
+    execution = state['execution']
+    expected = {'version', 'task_id', 'batch_id', 'previous_sha256', 'next_sha256', 'tools'}
+    if (not isinstance(refresh, dict) or set(refresh) != expected or
+            type(refresh['version']) is not int or refresh['version'] != 1 or
+            state.get('brain_task_role', 'lead') != 'lead' or
+            refresh['task_id'] != execution['task_id'] or
+            refresh['batch_id'] != execution['pending']['batch_id'] or
+            refresh['previous_sha256'] != canonical_digest(state.get('tools') or [])):
+        raise ExecutionProtocolError('Обновление каталога не привязано к завершённому пакету.')
+    tools = refresh['tools']
+    if not isinstance(tools, list) or len(tools) > msty_models.MAX_TOOLS:
+        raise ExecutionProtocolError('Неверный размер нового каталога.')
+    try:
+        msty_models.check_tools(tools)
+    except msty_models.ModelAdapterError as exc:
+        raise ExecutionProtocolError('Неверная схема нового каталога.') from exc
+    names = []
+    for tool in tools:
+        function = tool.get('function') if isinstance(tool, dict) else None
+        if (not isinstance(function, dict) or tool.get('type') != 'function' or
+                not isinstance(function.get('name'), str) or not function['name'] or
+                not isinstance(function.get('parameters'), dict)):
+            raise ExecutionProtocolError('Неверная схема нового каталога.')
+        names.append(function['name'])
+    if len(names) != len(set(names)) or refresh['next_sha256'] != canonical_digest(tools):
+        raise ExecutionProtocolError('Новый каталог повреждён или содержит повторения.')
+    return deepcopy(tools)
+
+
 def validate_resume(state, resume):
     """Bind the one pending batch to canonical client IDs, preserving observations.
 
     Local SessionStore owns b1 mappings and replay protection; the remote check
     is defense in depth. It is not authentication of mutable Msty tool text.
-    Never accept a new task, new tools or a larger output cap through resume.
+    Never replace pending schemas, task or output cap through input. A separately
+    gateway-staged catalogue commits only after this entire batch is validated.
     """
     execution = state['execution']
     pending = execution['pending']
@@ -305,6 +344,7 @@ def validate_resume(state, resume):
     from . import msty_task
     contract = msty_task.observe(state, client_calls, new_results)
     return {**deepcopy(incoming), 'messages': messages,
+            'tools': _post_batch_catalog(state, resume),
             'text_stream_protocol': incoming.get('text_stream_protocol'),
             'reasoning_stream_protocol': incoming.get('reasoning_stream_protocol'),
             'execution': {**execution, 'status': 'running', 'pending': None},
