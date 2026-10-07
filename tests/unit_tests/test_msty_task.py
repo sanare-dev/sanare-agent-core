@@ -215,7 +215,7 @@ def test_real_mcp_textcontent_wrapper_supported_but_disagreeing_structured_rejec
     assert task._decode(wrapper) is None
 
 
-def test_bound_tool_role_image_has_explicit_zero_generation_rejection(monkeypatch):
+def test_orphan_tool_role_image_has_explicit_zero_generation_rejection(monkeypatch):
     original_counter = msty_models.count_input
     seen = install(monkeypatch, [], [])
     # Restore the real local counter; its refusal is not an API/model call.
@@ -225,7 +225,7 @@ def test_bound_tool_role_image_has_explicit_zero_generation_rejection(monkeypatc
         {'type': 'text', 'text': 'Synthetic screenshot.'},
         {'type': 'image_url', 'image_url': {'url': 'https://example.invalid/synthetic.png'}}]}])))
     assert not seen['requests']
-    assert 'результате инструмента' in result['result']['content']
+    assert 'без парного вызова инструмента' in result['result']['content']
     assert result['result']['usage_metadata']['total_tokens'] == 0
     assert result['execution']['status'] == 'blocked'
 
