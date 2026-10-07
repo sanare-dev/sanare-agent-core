@@ -319,3 +319,18 @@ def test_tool_drift_is_rejected_with_counts_only(monkeypatch, mutation, detail):
         assert len(seen) == 1
 
     asyncio.run(scenario())
+
+
+def test_resume_tool_image_does_not_change_owner_turn(monkeypatch):
+    model_sequence(monkeypatch, [operation()])
+    waiting = asyncio.run(msty.graph.ainvoke(initial()))
+    resume = resume_value(waiting)
+    image = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,aGVsbG8=', 'detail': 'high'}}
+    resume['input']['messages'][-1]['content'] = [{'type': 'text', 'text': 'Observed'}, image]
+    validated = execution.validate_resume(waiting, resume)
+    assert validated['messages'][0] == initial()['messages'][0]
+    assert validated['messages'][-1]['content'][-1] == image
+    altered = deepcopy(resume)
+    altered['input']['messages'].append({'role': 'user', 'content': [image]})
+    with pytest.raises(execution.ExecutionProtocolError, match='Новый пользовательский ход'):
+        execution.validate_resume(waiting, altered)

@@ -1009,3 +1009,15 @@ Follow-ups from the independent review of #18:
 - A second `native_swarm` in one step gets its own refusal text.
 - Regression tests run the real lead step (adapter, `bind_tools`,
   `prepare_messages`, `stamp_usage`, `valid_tool_calls`) for deepseek and luna.
+
+
+### Paired tool images (Brain Desk #1590, 7 October 2026)
+
+Luna's provider projection moves images from paired tool results into a separate
+visual observation after all results of the batch. Canonical checkpoint/resume
+history retains the tool content and original owner question; it does not accept
+an additional client user turn as a tool result. Admission counting and generation
+use the same projection. Image count/detail limits are unchanged; incomplete or
+orphan image batches are rejected. DeepSeek remains fail-closed for images and
+Sonnet's existing native content route is unchanged. Offline resume and official
+SDK HTTP payload tests verify the boundary, not live delivery or model quality.

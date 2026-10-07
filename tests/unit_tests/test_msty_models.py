@@ -389,8 +389,8 @@ def test_conflicting_cache_read_counts_not_silently_selected():
     assert adapter.stamp_usage('deepseek', AIMessage(content='a', response_metadata={'token_usage': raw})).usage_metadata is None
 
 
-@pytest.mark.parametrize('profile', ['luna', 'deepseek'])
-def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeypatch):
+@pytest.mark.parametrize('profile,tool_image', [('luna', False), ('luna', True), ('deepseek', False)])
+def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, tool_image, monkeypatch):
     captured = []
     def handler(request):
         captured.append((str(request.url), json.loads(request.content)))
@@ -417,7 +417,9 @@ def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeyp
     history = adapter.prepare_messages(profile, [HumanMessage(content='read'),
         AIMessage(content=[{'type': 'text', 'text': 'reading'}, {'type': 'tool_use',
             'id': 'a', 'name': 'read_fixture', 'input': {'path': '/synthetic/a'}}]),
-        ToolMessage(content='17', tool_call_id='a')], TOOLS)
+        ToolMessage(content=([{'type': 'text', 'text': '17'}, {'type': 'image_url', 'image_url': {
+            'url': 'data:image/png;base64,aGVsbG8=', 'detail': 'high'}}] if tool_image else '17'),
+            tool_call_id='a')], TOOLS)
     async def execute():
         try:
             return await adapter.bind_tools(profile, model, TOOLS, 'none').ainvoke(history)
@@ -436,6 +438,10 @@ def test_actual_sdk_mock_http_payload_and_tool_result_roundtrip(profile, monkeyp
         assert payload['input'][2] == {'type': 'function_call', 'name': 'read_fixture',
             'arguments': '{"path": "/synthetic/a"}', 'call_id': 'a'}
         assert payload['input'][3] == {'type': 'function_call_output', 'output': '17', 'call_id': 'a'}
+        if tool_image:
+            assert payload['input'][4]['role'] == 'user'
+            assert payload['input'][4]['content'][-1] == {'type': 'input_image',
+                'image_url': 'data:image/png;base64,aGVsbG8=', 'detail': 'high'}
         assert payload['reasoning'] == {'effort': 'low'} and payload['max_output_tokens'] == 40
         assert payload['store'] is False
         assert 'reasoning_effort' not in payload and 'thinking' not in payload
@@ -509,3 +515,32 @@ def test_luna_responses_malformed_function_call_is_rejected_not_dropped():
                               'arguments': 'not-json'}])
     with pytest.raises(msty_models.ModelAdapterError, match='Некорректный исторический вызов'):
         msty_models._openai_content(msg)
+
+
+def test_luna_tool_images_projection_preserves_owner_and_complete_batch():
+    image = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,aGVsbG8=', 'detail': 'high'}}
+    source = [HumanMessage(content='Original owner question'),
+              AIMessage(content='', tool_calls=[
+                  {'id': 'one', 'name': 'read_fixture', 'args': {}},
+                  {'id': 'two', 'name': 'read_fixture', 'args': {}}]),
+              ToolMessage(content=[{'type': 'text', 'text': 'Observed'}, image], tool_call_id='one'),
+              ToolMessage(content='Second result', tool_call_id='two')]
+    original = deepcopy(source)
+    projected = adapter.prepare_messages('luna', source, TOOLS)
+    assert source == original
+    assert [message.type for message in projected] == ['human', 'ai', 'tool', 'tool', 'human']
+    assert projected[0].content == 'Original owner question'
+    assert projected[-1].content[-1] == image
+    assert projected[2].content == 'Observed'
+    assert adapter.prepare_messages('luna', projected, TOOLS) == projected
+    wire = adapter.convert_to_openai_messages(projected)
+    counted, envelope = adapter._image_counting_projection('luna', wire)
+    assert envelope > 0
+    assert 'aGVsbG8=' not in json.dumps(counted)
+    assert 'aGVsbG8=' in json.dumps(wire)
+    with pytest.raises(adapter.ModelAdapterError):
+        adapter.prepare_messages('luna', source[:-1], TOOLS)
+    with pytest.raises(adapter.ModelAdapterError):
+        adapter.prepare_messages('luna', [source[2]], TOOLS)
+    with pytest.raises(adapter.ModelAdapterError):
+        adapter._image_counting_projection('deepseek', wire)

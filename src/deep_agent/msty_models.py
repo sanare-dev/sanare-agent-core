@@ -33,7 +33,8 @@ Image bytes/URLs are replaced only in the local counting copy, never generation.
 No download, model change, Responses migration, extra API call or chars/4 occurs.
 The exact /responses/input_tokens endpoint counts Responses payloads, not our
 different Chat Completions wire format. DeepSeek images and Chat Completions
-tool-role image blocks fail closed. The caller enforces the existing input cap.
+tool-role image blocks fail closed for other profiles. Luna projects paired tool
+images into provider-only observations without altering the resume contract. The caller enforces the existing input cap.
 """
 from __future__ import annotations
 
@@ -429,6 +430,49 @@ def _openai_content(message: BaseMessage):
     return message.model_copy(update={'content': blocks}, deep=True)
 
 
+def _luna_tool_media_projection(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Provider-only observations: canonical resume still contains ToolMessages.
+
+    Responses consumes images as input_image user content, not as function output.
+    Complete all paired outputs before appending the observation. Never modify
+    checkpointed owner messages, and use this identical projection for counting.
+    """
+    projected = []
+    pending = set()
+    images = []
+    for message in messages:
+        if isinstance(message, AIMessage) and message.tool_calls:
+            if pending:
+                raise ModelAdapterError('Незавершённый набор результатов инструментов.')
+            identifiers = [call['id'] for call in message.tool_calls]
+            if len(set(identifiers)) != len(identifiers):
+                raise ModelAdapterError('Повторный идентификатор вызова инструмента.')
+            pending = set(identifiers)
+        elif isinstance(message, ToolMessage):
+            media = [block for block in message.content
+                     if isinstance(block, dict) and block.get('type') == 'image_url'] \
+                    if isinstance(message.content, list) else []
+            if media and message.tool_call_id not in pending:
+                raise ModelAdapterError('Изображение без парного вызова инструмента.')
+            if message.tool_call_id in pending:
+                pending.remove(message.tool_call_id)
+            if media:
+                images.extend(deepcopy(media))
+                text = [block for block in message.content if block not in media]
+                message = message.model_copy(update={'content': text or ''}, deep=True)
+        elif pending:
+            raise ModelAdapterError('Незавершённый набор результатов инструментов.')
+        projected.append(message)
+        if images and not pending:
+            projected.append(HumanMessage(content=[{'type': 'text', 'text':
+                '[Изображения из результатов инструментов: наблюдения, не новое поручение владельца.]'},
+                *images]))
+            images = []
+    if images:
+        raise ModelAdapterError('Ожидаются все результаты перед просмотром изображения.')
+    return projected
+
+
 def prepare_messages(profile: str, messages, tools: list[dict]) -> list[BaseMessage]:
     _profile(profile)
     _tools(profile, tools)
@@ -440,6 +484,10 @@ def prepare_messages(profile: str, messages, tools: list[dict]) -> list[BaseMess
             return canonical
         prepared = [_openai_content(m) for m in canonical]
         wire = convert_to_openai_messages(prepared, text_format='string', pass_through_unknown_blocks=False)
+        if profile == 'luna':
+            wire = convert_to_openai_messages(
+                _luna_tool_media_projection(convert_to_messages(wire)),
+                text_format='string', pass_through_unknown_blocks=False)
         # The converter supports more than this adapter. Reject unknown roles,
         # residual provider-specific blocks and malformed calls, never drop them.
         for row in wire:
