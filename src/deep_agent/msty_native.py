@@ -770,7 +770,7 @@ class NativeMstyMiddleware(AgentMiddleware):
         results = {by_client[observation['tool_call_id']]: deepcopy(observation['content'])
                    for observation in observations}
         continuation = {key: resumed.get(key) for key in
-                        ('tool_choice', 'max_tokens', 'context_budget', 'context_budget_check', 'text_stream_protocol',
+                        ('tools', 'tool_choice', 'max_tokens', 'context_budget', 'context_budget_check', 'text_stream_protocol',
                          'reasoning_stream_protocol')}
         return {**continuation, 'execution': {**resumed['execution'], 'native_actions': _native_actions(state)},
                 'task_contract': resumed.get('task_contract'), 'native_needs_admission': False,
